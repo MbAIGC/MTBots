@@ -1,0 +1,83 @@
+name: docker
+
+# 公开仓库的 Actions 免费不计量力，所以这里顺手把「测试 + 多架构镜像」都放到 CI 里。
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  test:
+    name: 单元测试（288 个用例，不联网）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: 安装依赖
+        run: pip install -r requirements.txt
+      - name: 配置自检（离线）
+        run: |
+          python -m mtbots --check
+        env:
+          MTBOTS_BOT_TOKEN: "123456:CI_PLACEHOLDER"
+          ALLOWED_USER_IDS: "123456789"
+          DATA_DIR: ${{ runner.temp }}/mtbots-data
+      - name: 跑测试
+        run: python -m unittest discover -s tests -t . -v
+
+  image:
+    name: 构建镜像并推 GHCR
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # 镜像名必须全小写，而 github.repository 保留大小写（MbAIGC/MTBots）
+      - name: 计算小写镜像名
+        id: img
+        run: echo "name=${REGISTRY}/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - name: 登录 GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: 生成标签与 OCI 标签
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.img.outputs.name }}
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: buildx 构建（amd64 + arm64）
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false

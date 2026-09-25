@@ -1,0 +1,199 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1180 1560" width="1180" height="1560" font-family="'PingFang SC','Microsoft YaHei','Hiragino Sans GB','WenQuanYi Micro Hei','Noto Sans CJK SC','Source Han Sans SC',sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#94a3b8"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="1180" height="1560" fill="#f8fafc"/>
+
+  <text x="40" y="52" font-size="27" font-weight="700" fill="#0f172a">三 Bot 合并 · 交互图</text>
+  <text x="40" y="82" font-size="15" fill="#64748b">LDMG + LitePan-TGBot + ClinePass-TG-Bot → 一个 Bot · 一个首页 · 三个模块 = 三个命名空间（单人使用版）</text>
+  <line x1="40" y1="100" x2="1140" y2="100" stroke="#e2e8f0" stroke-width="2"/>
+
+  <!-- ===================== ① 导航结构 ===================== -->
+  <text x="40" y="136" font-size="17" font-weight="700" fill="#334155">① 导航结构：首页 → 模块（同一条消息原地编辑，不刷屏）</text>
+
+  <!-- Home -->
+  <rect x="390" y="160" width="400" height="190" rx="14" fill="#ffffff" stroke="#0f172a" stroke-width="2"/>
+  <text x="590" y="194" font-size="17" font-weight="700" fill="#0f172a" text-anchor="middle">🏠 控制台（首页总览）</text>
+  <line x1="410" y1="208" x2="770" y2="208" stroke="#e2e8f0" stroke-width="1.5"/>
+  <text x="415" y="236" font-size="14" fill="#334155">🐳 Docker     2 个项目有新镜像</text>
+  <text x="415" y="260" font-size="14" fill="#334155">🎬 LitePan    最近任务 ✅ 3 分钟前</text>
+  <text x="415" y="284" font-size="14" fill="#334155">🤖 Cline      本周额度 57%</text>
+  <line x1="410" y1="298" x2="770" y2="298" stroke="#e2e8f0" stroke-width="1.5"/>
+  <rect x="412" y="308" width="78" height="28" rx="14" fill="#eff6ff" stroke="#2563eb"/>
+  <text x="451" y="327" font-size="12.5" fill="#1d4ed8" text-anchor="middle">🐳 Docker</text>
+  <rect x="498" y="308" width="86" height="28" rx="14" fill="#f5f3ff" stroke="#7c3aed"/>
+  <text x="541" y="327" font-size="12.5" fill="#6d28d9" text-anchor="middle">🎬 LitePan</text>
+  <rect x="592" y="308" width="72" height="28" rx="14" fill="#ecfdf5" stroke="#059669"/>
+  <text x="628" y="327" font-size="12.5" fill="#047857" text-anchor="middle">🤖 Cline</text>
+  <rect x="672" y="308" width="86" height="28" rx="14" fill="#fffbeb" stroke="#d97706"/>
+  <text x="715" y="327" font-size="12.5" fill="#b45309" text-anchor="middle">🧰 任务中心</text>
+
+  <!-- connectors home -> modules -->
+  <path d="M 590 350 L 590 395" stroke="#94a3b8" stroke-width="1.5" fill="none"/>
+  <path d="M 210 395 L 970 395" stroke="#94a3b8" stroke-width="1.5" fill="none"/>
+  <path d="M 210 395 L 210 424" stroke="#94a3b8" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
+  <path d="M 590 395 L 590 424" stroke="#94a3b8" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
+  <path d="M 970 395 L 970 424" stroke="#94a3b8" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
+
+  <!-- ===== module 1 : Docker (mx=40) ===== -->
+  <rect x="40" y="430" width="340" height="228" rx="14" fill="#ffffff" stroke="#2563eb" stroke-width="2"/>
+  <text x="64" y="466" font-size="16" font-weight="700" fill="#1d4ed8">🐳 Docker 管理</text>
+  <text x="356" y="466" font-size="12" fill="#94a3b8" text-anchor="end">🏠 › 🐳</text>
+  <line x1="64" y1="480" x2="356" y2="480" stroke="#e2e8f0" stroke-width="1.5"/>
+  <text x="64" y="506" font-size="13.5" fill="#334155">01  emby</text>
+  <text x="356" y="506" font-size="13.5" fill="#b45309" text-anchor="end">⬆️ 可升级</text>
+  <text x="64" y="530" font-size="13.5" fill="#334155">02  openlist</text>
+  <text x="356" y="530" font-size="13.5" fill="#047857" text-anchor="end">✅ 最新</text>
+  <text x="64" y="554" font-size="13.5" fill="#334155">03  nginx</text>
+  <text x="356" y="554" font-size="13.5" fill="#b45309" text-anchor="end">⬆️ 可升级</text>
+  <rect x="64" y="578" width="140" height="28" rx="8" fill="#eff6ff" stroke="#2563eb"/>
+  <text x="134" y="597" font-size="12.5" fill="#1d4ed8" text-anchor="middle">⬆️ 全部升级</text>
+  <rect x="216" y="578" width="140" height="28" rx="8" fill="#ffffff" stroke="#cbd5e1"/>
+  <text x="286" y="597" font-size="12.5" fill="#475569" text-anchor="middle">🧹 清理镜像</text>
+  <rect x="64" y="614" width="44" height="28" rx="8" fill="#ffffff" stroke="#cbd5e1"/>
+  <text x="86" y="633" font-size="12.5" fill="#475569" text-anchor="middle">◀️</text>
+  <rect x="116" y="614" width="52" height="28" rx="8" fill="#f1f5f9" stroke="#cbd5e1"/>
+  <text x="142" y="633" font-size="12.5" fill="#475569" text-anchor="middle">1/2</text>
+  <rect x="176" y="614" width="44" height="28" rx="8" fill="#ffffff" stroke="#cbd5e1"/>
+  <text x="198" y="633" font-size="12.5" fill="#475569" text-anchor="middle">▶️</text>
+  <rect x="256" y="614" width="100" height="28" rx="8" fill="#f8fafc" stroke="#94a3b8"/>
+  <text x="306" y="633" font-size="12.5" fill="#334155" text-anchor="middle">🏠 返回</text>
+
+  <!-- ===== module 2 : LitePan (mx=420) ===== -->
+  <rect x="420" y="430" width="340" height="228" rx="14" fill="#ffffff" stroke="#7c3aed" stroke-width="2"/>
+  <text x="444" y="466" font-size="16" font-weight="700" fill="#6d28d9">🎬 LitePan 联动</text>
+  <text x="736" y="466" font-size="12" fill="#94a3b8" text-anchor="end">🏠 › 🎬</text>
+  <line x1="444" y1="480" x2="736" y2="480" stroke="#e2e8f0" stroke-width="1.5"/>
+  <text x="444" y="506" font-size="13.5" fill="#64748b">规则视图  1 / 5</text>
+  <text x="444" y="530" font-size="13.5" fill="#334155">光鸭-A 全量</text>
+  <text x="736" y="530" font-size="13.5" fill="#64748b" text-anchor="end">3 个动作</text>
+  <text x="444" y="554" font-size="13.5" fill="#334155">剧集刮削</text>
+  <text x="736" y="554" font-size="13.5" fill="#64748b" text-anchor="end">5 个动作</text>
+  <rect x="444" y="578" width="140" height="28" rx="8" fill="#f5f3ff" stroke="#7c3aed"/>
+  <text x="514" y="597" font-size="12.5" fill="#6d28d9" text-anchor="middle">🎬 触发选中</text>
+  <rect x="596" y="578" width="140" height="28" rx="8" fill="#ffffff" stroke="#cbd5e1"/>
+  <text x="666" y="597" font-size="12.5" fill="#475569" text-anchor="middle">🔄 重新发现</text>
+  <rect x="444" y="614" width="44" height="28" rx="8" fill="#ffffff" stroke="#cbd5e1"/>
+  <text x="466" y="633" font-size="12.5" fill="#475569" text-anchor="middle">◀️</text>
+  <rect x="496" y="614" width="52" height="28" rx="8" fill="#f1f5f9" stroke="#cbd5e1"/>
+  <text x="522" y="633" font-size="12.5" fill="#475569" text-anchor="middle">2/5</text>
+  <rect x="556" y="614" width="44" height="28" rx="8" fill="#ffffff" stroke="#cbd5e1"/>
+  <text x="578" y="633" font-size="12.5" fill="#475569" text-anchor="middle">▶️</text>
+  <rect x="636" y="614" width="100" height="28" rx="8" fill="#f8fafc" stroke="#94a3b8"/>
+  <text x="686" y="633" font-size="12.5" fill="#334155" text-anchor="middle">🏠 返回</text>
+
+  <!-- ===== module 3 : Cline (mx=800) ===== -->
+  <rect x="800" y="430" width="340" height="228" rx="14" fill="#ffffff" stroke="#059669" stroke-width="2"/>
+  <text x="824" y="466" font-size="16" font-weight="700" fill="#047857">🤖 Cline 额度</text>
+  <text x="1116" y="466" font-size="12" fill="#94a3b8" text-anchor="end">🏠 › 🤖</text>
+  <line x1="824" y1="480" x2="1116" y2="480" stroke="#e2e8f0" stroke-width="1.5"/>
+  <text x="824" y="506" font-size="13.5" fill="#334155">主账号</text>
+  <text x="1116" y="506" font-size="13.5" fill="#047857" text-anchor="end">5h 2% · 周 57%</text>
+  <text x="824" y="530" font-size="13.5" fill="#334155">备用</text>
+  <text x="1116" y="530" font-size="13.5" fill="#047857" text-anchor="end">周 12%</text>
+  <text x="824" y="554" font-size="13.5" fill="#64748b">已绑 2 个 Key（仅显示掩码）</text>
+  <rect x="824" y="578" width="90" height="28" rx="8" fill="#ecfdf5" stroke="#059669"/>
+  <text x="869" y="597" font-size="12.5" fill="#047857" text-anchor="middle">/addkey</text>
+  <rect x="922" y="578" width="90" height="28" rx="8" fill="#ffffff" stroke="#cbd5e1"/>
+  <text x="967" y="597" font-size="12.5" fill="#475569" text-anchor="middle">/delkey</text>
+  <rect x="1020" y="578" width="96" height="28" rx="8" fill="#ffffff" stroke="#cbd5e1"/>
+  <text x="1068" y="597" font-size="12.5" fill="#475569" text-anchor="middle">/keys</text>
+  <rect x="824" y="614" width="140" height="28" rx="8" fill="#ffffff" stroke="#cbd5e1"/>
+  <text x="894" y="633" font-size="12.5" fill="#475569" text-anchor="middle">🔄 刷新面板</text>
+  <rect x="1016" y="614" width="100" height="28" rx="8" fill="#f8fafc" stroke="#94a3b8"/>
+  <text x="1066" y="633" font-size="12.5" fill="#334155" text-anchor="middle">🏠 返回</text>
+
+  <!-- connectors modules -> job center -->
+  <path d="M 210 658 L 210 700" stroke="#94a3b8" stroke-width="1.5" fill="none"/>
+  <path d="M 590 658 L 590 700" stroke="#94a3b8" stroke-width="1.5" fill="none"/>
+  <path d="M 970 658 L 970 700" stroke="#94a3b8" stroke-width="1.5" fill="none"/>
+  <path d="M 210 700 L 970 700" stroke="#94a3b8" stroke-width="1.5" fill="none"/>
+  <path d="M 590 700 L 590 734" stroke="#94a3b8" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
+
+  <!-- job center -->
+  <rect x="140" y="740" width="900" height="152" rx="14" fill="#fffdf5" stroke="#d97706" stroke-width="2"/>
+  <text x="164" y="774" font-size="16" font-weight="700" fill="#b45309">🧰 任务中心</text>
+  <text x="1016" y="774" font-size="13" fill="#92400e" text-anchor="end">三个模块的长任务都注册在这里，任何模块都不阻塞其他模块</text>
+  <line x1="164" y1="788" x2="1016" y2="788" stroke="#fde68a" stroke-width="1.5"/>
+  <text x="164" y="816" font-size="13.5" fill="#334155">🐳 emby 升级中</text>
+  <text x="560" y="816" font-size="13.5" fill="#1d4ed8">▓▓▓▓▓░░░ 62%</text>
+  <text x="1016" y="816" font-size="13" fill="#b91c1c" text-anchor="end">[取消]</text>
+  <text x="164" y="842" font-size="13.5" fill="#334155">🎬 LitePan 刮削中</text>
+  <text x="560" y="842" font-size="13.5" fill="#6d28d9">⏳ 1 分 20 秒</text>
+  <text x="1016" y="842" font-size="13" fill="#b91c1c" text-anchor="end">[取消]</text>
+  <text x="164" y="868" font-size="13.5" fill="#047857">✅ openlist 升级完成 · 2 分钟前</text>
+
+  <!-- ===================== ② 一条主线 ===================== -->
+  <line x1="40" y1="920" x2="1140" y2="920" stroke="#e2e8f0" stroke-width="2"/>
+  <text x="40" y="956" font-size="17" font-weight="700" fill="#334155">② 一条主线走通三个模块（真实点击流）</text>
+
+  <!-- step 1 -->
+  <rect x="150" y="980" width="890" height="58" rx="12" fill="#ffffff" stroke="#cbd5e1"/>
+  <circle cx="110" cy="1009" r="17" fill="#0f172a"/>
+  <text x="110" y="1014" font-size="14" font-weight="700" fill="#ffffff" text-anchor="middle">1</text>
+  <text x="174" y="1006" font-size="14.5" fill="#0f172a" font-weight="700">/start</text>
+  <text x="238" y="1006" font-size="14.5" fill="#334155">→ 🏠 控制台（首页总览）</text>
+  <text x="174" y="1027" font-size="12.5" fill="#94a3b8">一张卡片看全：容器可升级数 / 最近任务 / 额度</text>
+
+  <!-- step 2 -->
+  <path d="M 110 1026 L 110 1048" stroke="#94a3b8" stroke-width="1.5" fill="none"/>
+  <rect x="150" y="1048" width="890" height="58" rx="12" fill="#ffffff" stroke="#cbd5e1"/>
+  <circle cx="110" cy="1077" r="17" fill="#2563eb"/>
+  <text x="110" y="1082" font-size="14" font-weight="700" fill="#ffffff" text-anchor="middle">2</text>
+  <text x="174" y="1074" font-size="14.5" fill="#334155">点 [🐳 Docker 管理] → </text>
+  <text x="336" y="1074" font-size="14.5" fill="#0f172a" font-weight="700">同一条消息</text>
+  <text x="430" y="1074" font-size="14.5" fill="#334155">变成 Docker 面板，面包屑 🏠 › 🐳</text>
+  <text x="174" y="1095" font-size="12.5" fill="#94a3b8">不新发消息，聊天记录不会越滚越长</text>
+
+  <!-- step 3 -->
+  <path d="M 110 1106 L 110 1128" stroke="#94a3b8" stroke-width="1.5" fill="none"/>
+  <rect x="150" y="1128" width="890" height="58" rx="12" fill="#ffffff" stroke="#cbd5e1"/>
+  <circle cx="110" cy="1157" r="17" fill="#2563eb"/>
+  <text x="110" y="1162" font-size="14" font-weight="700" fill="#ffffff" text-anchor="middle">3</text>
+  <text x="174" y="1154" font-size="14.5" fill="#334155">点 [⬆️ 全部升级] →</text>
+  <text x="352" y="1154" font-size="14.5" fill="#b45309" font-weight="700">⚠️ 确认升级 2 个项目？</text>
+  <text x="546" y="1154" font-size="14.5" fill="#334155">[✅ 确认]  [❌ 取消]</text>
+  <text x="174" y="1175" font-size="12.5" fill="#94a3b8">破坏性操作统一两步确认：绑定发起人 · 60 秒过期自动作废</text>
+
+  <!-- step 4 -->
+  <path d="M 110 1186 L 110 1208" stroke="#94a3b8" stroke-width="1.5" fill="none"/>
+  <rect x="150" y="1208" width="890" height="58" rx="12" fill="#ffffff" stroke="#cbd5e1"/>
+  <circle cx="110" cy="1237" r="17" fill="#d97706"/>
+  <text x="110" y="1242" font-size="14" font-weight="700" fill="#ffffff" text-anchor="middle">4</text>
+  <text x="174" y="1234" font-size="14.5" fill="#334155">确认 → 注册进 🧰 任务中心：</text>
+  <text x="418" y="1234" font-size="14.5" fill="#b45309">🐳 升级中 ▓▓▓▓▓░░ 62%  [取消]</text>
+  <text x="174" y="1255" font-size="12.5" fill="#94a3b8">异步跑，不阻塞 🎬/🤖 两个模块的按钮</text>
+
+  <!-- step 5 -->
+  <path d="M 110 1266 L 110 1288" stroke="#94a3b8" stroke-width="1.5" fill="none"/>
+  <rect x="150" y="1288" width="890" height="58" rx="12" fill="#ffffff" stroke="#cbd5e1"/>
+  <circle cx="110" cy="1317" r="17" fill="#059669"/>
+  <text x="110" y="1322" font-size="14" font-weight="700" fill="#ffffff" text-anchor="middle">5</text>
+  <text x="174" y="1314" font-size="14.5" fill="#047857">✅ emby / openlist 升级完成 · 18:22</text>
+  <text x="174" y="1335" font-size="12.5" fill="#94a3b8">后台跑完自动推送，不需要你去 /jobs 里翻</text>
+
+  <!-- step 6 -->
+  <path d="M 110 1346 L 110 1368" stroke="#94a3b8" stroke-width="1.5" fill="none"/>
+  <rect x="150" y="1368" width="890" height="58" rx="12" fill="#ffffff" stroke="#cbd5e1"/>
+  <circle cx="110" cy="1397" r="17" fill="#7c3aed"/>
+  <text x="110" y="1402" font-size="14" font-weight="700" fill="#ffffff" text-anchor="middle">6</text>
+  <text x="174" y="1394" font-size="14.5" fill="#334155">完成卡片自带跨模块动作：</text>
+  <text x="422" y="1394" font-size="14.5" fill="#6d28d9">[🎬 重跑 LitePan 刷新]</text>
+  <text x="608" y="1394" font-size="14.5" fill="#334155">→ 🎬 已触发 tg_refresh ✅</text>
+  <text x="174" y="1415" font-size="12.5" fill="#94a3b8">这是合并才有的能力：一条推送里直接给下一步</text>
+
+  <!-- step 7 -->
+  <path d="M 110 1426 L 110 1448" stroke="#94a3b8" stroke-width="1.5" fill="none"/>
+  <rect x="150" y="1448" width="890" height="58" rx="12" fill="#ffffff" stroke="#cbd5e1"/>
+  <circle cx="110" cy="1477" r="17" fill="#7c3aed"/>
+  <text x="110" y="1482" font-size="14" font-weight="700" fill="#ffffff" text-anchor="middle">7</text>
+  <text x="174" y="1474" font-size="14.5" fill="#047857">✅ LitePan 联动完成（3 个动作）· 18:25</text>
+  <text x="174" y="1495" font-size="12.5" fill="#94a3b8">回执轮询在后台跑，结果同样进任务中心</text>
+
+  <!-- footer -->
+  <rect x="40" y="1524" width="1100" height="0.1" fill="none"/>
+  <text x="40" y="1540" font-size="13" fill="#64748b">注：LitePan 的动态规则命令限额 ≤ 30 条（Telegram 全局限 100 条，三模块共享），超出的规则进内联键盘分页。</text>
+</svg>

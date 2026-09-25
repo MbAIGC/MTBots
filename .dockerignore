@@ -1,0 +1,27 @@
+# 构建上下文：只需要源码 + 依赖清单（Dockerfile 里 COPY 的东西）
+# 本地依赖目录 9.5MB，且是宿主机平台相关的，进镜像只会白白拖慢构建
+.vendor/
+
+# 运行期数据与密钥：绝不进上下文（.env 里有 Bot Token！）
+data/
+.env
+.env.*
+!.env.example
+
+# VCS / 缓存 / 编辑器
+.git/
+.gitignore
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+# 只有开发时才用得到的
+tests/
+docs/
+AGENTS.md
+Makefile
+docker-compose.yml
+Dockerfile
+.dockerignore
+litepan-users.example.json

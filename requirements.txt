@@ -1,0 +1,9 @@
+# MTBots 运行期依赖（三个模块合并后的并集）
+#   ptb      —— 统一运行时（LDMG / ClinePass 原本就用它，LitePan 由 stdlib 轮询改造而来）
+#   dotenv   —— 兼容三家旧的 .env 用法
+#   requests —— ClinePass 额度接口客户端
+#   pypinyin —— LitePan 中文规则名 -> 命令 slug
+python-telegram-bot==21.6
+python-dotenv==1.0.1
+requests>=2.28,<3.0
+pypinyin==0.54.0

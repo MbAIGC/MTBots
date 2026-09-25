@@ -1,0 +1,23 @@
+{
+  "users": [
+    {
+      "chat_ids": [123456789],
+      "litepan_url": "http://A-NAS:5211",
+      "api_key": "lpk_api_用户A的密钥",
+      "default_event": "tg_refresh",
+      "source": "telegram",
+      "default_path": "/",
+      "message": "",
+      "drives": {
+        "光鸭-A": "quarkA_refresh",
+        "123-A": "123A_refresh"
+      },
+      "admin_user": "",
+      "admin_password": "",
+      "lite_timeout": 15,
+      "receipt_poll": 5,
+      "receipt_timeout": 1800,
+      "show_url": false
+    }
+  ]
+}

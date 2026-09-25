@@ -1,0 +1,32 @@
+services:
+  mtbots:
+    build: .
+    image: mtbots:latest
+    container_name: mtbots
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATA_DIR: /app/data
+      CONFIG_FILE: /app/data/config.json
+      LITEPAN_USERS_FILE: /app/data/litepan-users.json
+      LOG_DIR: /app/data/logs
+      TZ: Asia/Shanghai
+    volumes:
+      # ① 特权：Docker 模块要能升级/清理宿主机上的 compose 项目。
+      #    单人自用可以直接挂；想加保险就换成 docker-socket-proxy 的 HTTP 端点（见 README 的安全红线）。
+      - /var/run/docker.sock:/var/run/docker.sock
+      # ② 你的 compose 文件根目录（docker 模块要靠它读项目；按实际路径改）
+      - /docker:/docker
+      # ③ 三份配置合成一份 data/：Cline Key + LitePan 用户 + 日志
+      - ./data:/app/data
+    # 让容器里的 mtbots 用户能读写 docker.sock：填宿主机 docker 组的 GID
+    # 查询：getent group docker | cut -d: -f3
+    group_add:
+      - "${DOCKER_GID:-999}"
+    # 只读根文件系统 + 禁止提权（沿用 LitePan / ClinePass 的做法）
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
