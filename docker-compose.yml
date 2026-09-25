@@ -1,7 +1,9 @@
 services:
   mtbots:
     build: .
-    image: mtbots:latest
+    # 现成镜像（CI 构建，公开可拉）。想本地构建就用 `docker compose up -d --build`，
+    # 构建出来的镜像会就地打上同一个 tag。
+    image: ghcr.io/mbaigc/mtbots:latest
     container_name: mtbots
     restart: unless-stopped
     env_file:

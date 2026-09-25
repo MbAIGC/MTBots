@@ -1,5 +1,9 @@
 # MTBots —— 三个 Telegram Bot 合并成一个
 
+[![docker](https://github.com/MbAIGC/MTBots/actions/workflows/docker.yml/badge.svg)](https://github.com/MbAIGC/MTBots/actions/workflows/docker.yml)
+[![image](https://img.shields.io/badge/ghcr.io-mbaigc%2Fmtbots-2496ED?logo=docker&logoColor=white)](https://github.com/MbAIGC/MTBots/pkgs/container/mtbots)
+![platform](https://img.shields.io/badge/platform-linux%2Famd64%20%7C%20linux%2Farm64-informational)
+
 > 把 **LDMG**（宿主机 Docker Compose 升级/清理）、**LitePan-TGBot**（远程触发 LitePan 媒体自动化）、
 > **ClinePass-TG-Bot**（多 Key 额度面板）合并为**一个进程、一个 token、一套权限、一个任务中心**的 Bot：`MTBots`。
 >
@@ -39,12 +43,30 @@ python3 -m mtbots --check          # 配置自检，不连 Telegram
 python3 -m mtbots                  # 启动
 ```
 
-Docker 部署（含 docker CLI，Docker 模块靠它升级宿主机 compose 项目）：
+Docker 部署（含 docker CLI，Docker 模块靠它升级宿主机 compose 项目）。
+镜像由 GitHub Actions 在每次 push 到 `main` / 打 `v*` tag 时构建，推 `ghcr.io/mbaigc/mtbots`，
+**公开、可匿名拉取**，同时带 `linux/amd64` 与 `linux/arm64`：
 
 ```bash
+cp .env.example .env                 # 填 MTBOTS_BOT_TOKEN 与 ALLOWED_USER_IDS
 mkdir -p data && sudo chown 10001:10001 data
-DOCKER_GID=$(getent group docker | cut -d: -f3) docker compose up -d --build
+export DOCKER_GID=$(getent group docker | cut -d: -f3)
+
+docker compose up -d                 # ① 用 GHCR 上的现成镜像（最快）
+docker compose up -d --build         # ② 或本地构建（compose 里同时写着 build: .）
 docker compose logs -f
+```
+
+不想用 compose 就直接 docker run：
+
+```bash
+docker run -d --name mtbots --restart unless-stopped \
+  --env-file .env \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -v /docker:/docker \
+  -v "$PWD/data:/app/data" \
+  --group-add "$DOCKER_GID" \
+  ghcr.io/mbaigc/mtbots:latest
 ```
 
 > 切换上线时建议**换一个新 token**：旧 bot 还在轮询同一个 token 会导致 409 冲突。
@@ -105,6 +127,13 @@ mtbots/
     ├── docker/       # 🐳 原 LDMG：compose 扫描 / 升级 / 清理 / 进度流
     ├── litepan/      # 🎬 原 LitePan：发现 / 规则 / 触发 / 回执轮询（同步 HTTP → to_thread）
     └── cline/        # 🤖 原 ClinePass：Key 存储 / 额度接口 / 面板渲染
+
+仓库根：
+├── Dockerfile / docker-compose.yml / .dockerignore   # 镜像与部署（非 root、只读根、自带 docker CLI）
+├── .github/workflows/docker.yml                      # CI：跑测试 + 构建 amd64/arm64 镜像推 GHCR
+├── Makefile                                          # make check / health / test / run / list
+├── docs/                                             # 设计稿、施工契约（porting-contract）、合并报告
+└── tests/                                            # 288 个 stdlib unittest 用例
 ```
 
 ## 配置

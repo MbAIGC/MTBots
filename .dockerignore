@@ -10,7 +10,9 @@ data/
 
 # VCS / 缓存 / 编辑器
 .git/
+.github/
 .gitignore
+.docker-config/
 __pycache__/
 *.py[cod]
 .pytest_cache/
