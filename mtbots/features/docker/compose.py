@@ -397,6 +397,51 @@ class DockerState:
         self.projects_cache_time = 0.0
 
 
+DOCKER_SOCKET = "/var/run/docker.sock"
+
+
+def socket_group_hint(
+    path: str = DOCKER_SOCKET,
+    *,
+    gid: Optional[int] = None,
+    groups: Optional[list[int]] = None,
+) -> list[str]:
+    """权限不够时把「到底该填哪个 GID」直接量出来。
+
+    比 `getent group docker` 靠谱：NAS（busybox）上常常没有 docker 组条目，用户只能瞎猜
+    （线上就有人先猜 998、再猜 0，两次都无效）。这里直接对比 socket 的属组和本进程的附加组：
+    组已经在了就闭嘴（说明不是组权限问题，别乱指路），是 root:root 就说清 group_add 救不了。
+
+    `gid` / `groups` 允许注入，测试不用碰真实 socket。
+    """
+    if gid is None:
+        try:
+            gid = os.stat(path).st_gid
+        except OSError:
+            return []
+    if groups is None:
+        if os.geteuid() == 0:
+            return []  # root 不受文件模式约束，组权限不是原因，别乱指路
+        try:
+            groups = sorted(set(os.getgroups()) | {os.getgid()})
+        except OSError:  # pragma: no cover - 极少见，仅防御
+            groups = []
+    if gid == 0:
+        return [
+            "   实测：容器里 <code>%s</code> 属组是 root（gid=0），<code>group_add</code> 加组救不了——"
+            "要么让容器以 root 跑（compose 里加 <code>user: \"0:0\"</code>），"
+            "要么改用 docker-socket-proxy。" % esc(path)
+        ]
+    if gid in groups:
+        return []
+    return [
+        "   实测：容器里 <code>%s</code> 属组 <code>gid=%d</code>，本进程附加组是 <code>%s</code>，不含它。"
+        "在 .env 写 <code>DOCKER_GID=%d</code>，再用 "
+        "<code>docker compose up -d --force-recreate</code> 重建（<code>restart</code> 不生效）。"
+        % (esc(path), gid, ",".join(str(g) for g in groups), gid)
+    ]
+
+
 def scan_hint(state: DockerState, *, include_compose: bool = True) -> list[str]:
     """扫描不到项目时的可操作提示（把权限 / 挂载 / 缺命令三种原因分开说）。
 
@@ -412,11 +457,12 @@ def scan_hint(state: DockerState, *, include_compose: bool = True) -> list[str]:
     if error:
         if "permission denied" in low:
             hints.append(
-                "⚠️ 读不到 Docker：<code>permission denied</code> —— 容器里的 mtbots 用户不在宿主机 docker 组。"
+                "⚠️ 读不到 Docker：<code>permission denied</code> —— "
+                "容器里的 mtbots 用户没有 <code>/var/run/docker.sock</code> 的权限。"
             )
+            hints.extend(socket_group_hint())
             hints.append(
-                "   修：<code>export DOCKER_GID=$(getent group docker | cut -d: -f3)</code> "
-                "后 <code>docker compose up -d</code> 重建。"
+                "   兜底：宿主机上 <code>stat -c '%%g' %s</code> 看 socket 属组 GID。" % DOCKER_SOCKET
             )
         elif any(
             mark in low

@@ -11,6 +11,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from mtbots.app import build_application, build_core, load_modules, modules_summary
 from mtbots.config import Settings
@@ -184,13 +185,22 @@ class DispatcherTests(unittest.TestCase):
     def test_docker_list_panel_explains_empty_scan(self):
         """空列表必须带上原因：以前只有一句「暂未检测到」，用户只能猜是不是权限。"""
         app, core, bot = make_recording_app(modules="docker", docker_projects=[])
-        state = core.data["docker"]
-        state.last_scan_error = "permission denied while trying to connect to the Docker daemon socket"
-        self._drive(app, real_update(bot, text="/d_list"))
+        core.data["docker"].last_scan_error = (
+            "permission denied while trying to connect to the Docker daemon socket"
+        )
+        # 实测 GID 那一行依赖运行环境（sandbox 里是 root、CI 里根本没 socket），
+        # 这里只验证它被拼进面板；内容本身由 tests/test_docker_module.py 覆盖。
+        with mock.patch(
+            "mtbots.features.docker.compose.socket_group_hint",
+            return_value=["   实测：GID-MARKER"],
+        ):
+            self._drive(app, real_update(bot, text="/d_list"))
+
         text = bot.last_text
         self.assertIn("暂未检测到", text)
-        self.assertIn("DOCKER_GID", text)
-        self.assertIn("docker 组", text)
+        self.assertIn("permission denied", text)
+        self.assertIn("stat -c", text)
+        self.assertIn("GID-MARKER", text)
 
     def test_every_panel_is_valid_telegram_html(self):
         """所有面板文案都要能被 Telegram 的 HTML 解析器接受。

@@ -133,7 +133,7 @@ mtbots/
 ├── .github/workflows/docker.yml                      # CI：跑测试 + 构建 amd64/arm64 镜像推 GHCR
 ├── Makefile                                          # make check / health / test / run / list
 ├── docs/                                             # 设计稿、施工契约（porting-contract）、合并报告
-└── tests/                                            # 309 个 stdlib unittest 用例
+└── tests/                                            # 314 个 stdlib unittest 用例
 ```
 
 ## 配置
@@ -193,12 +193,12 @@ make check
 ```
 
 测试全部是 stdlib `unittest`、不联网也不碰真实 Telegram/Docker（Docker 用例还会把
-`subprocess` / `create_subprocess_exec` 换成抛异常的桩做反证）。当前 **309 个用例全绿**：
+`subprocess` / `create_subprocess_exec` 换成抛异常的桩做反证）。当前 **314 个用例全绿**：
 
 | 文件 | 用例 | 覆盖 |
 |---|---|---|
 | `tests/test_core.py` | 56 | 文本分片（HTML 标签闭合）、`safe_html` 出口转义、`SafeBot` 解析失败降级、ACL 默认拒绝、存储原子写/0600/损坏分类、任务中心、面板唯一与两步确认、菜单去重与作用域、配置兼容、日志脱敏（含 exc_info 的 traceback）、路由消歧与兜底救援 |
-| `tests/test_docker_module.py` | 36 | 项目排序/分页、pull 噪音过滤、清理候选、回调载荷、模块装配、**扫描失败诊断（权限/未挂载/缺命令）** |
+| `tests/test_docker_module.py` | 41 | 项目排序/分页、pull 噪音过滤、清理候选、回调载荷、模块装配、**扫描失败诊断（权限/未挂载/缺命令 + 实测 socket GID）** |
 | `tests/test_litepan_module.py` | 58 | slug 构建（拼音/限长/去重）、users.json 校验、发现解析与缓存、菜单预算、触发与回执 |
 | `tests/test_cline_module.py` | 140 | 额度解析/渲染、Key 掩码与指纹、别名校验、存储读写与自愈、默认拒绝 |
 | `tests/test_integration.py` | 19 | 三个真实模块一起装配、命令不重复、菜单合并、`--check` 离线可跑，以及**真 `telegram.Update` 走 PTB dispatcher 的端到端用例**（不重复执行、全角命令可救援、下线模块的按钮有反馈、点按钮原地改同一条面板、**所有面板文案都过一遍 Telegram HTML 合法性校验**） |
@@ -221,8 +221,24 @@ make check
 |---|---|
 | 按钮点了没反应、「🏠 返回」看着无效 | 已修：一条会话只保留**一条**面板消息（home / docker / litepan / cline 共用同一处），点按钮就地改这条，`/start` 这类命令新发到聊天最底部并删掉旧面板。若仍无反应，`docker compose logs -f` 里搜 `HTML 解析失败`：那说明文案里有 Telegram 不认的标签，出口已经自动降级为纯文本，把日志贴出来即可定位。 |
 | LitePan 报 `Can't parse entities: unsupported start tag "盘名"` | 已修：`SafeBot`（`mtbots/bot.py`）在出站口把白名单外的 `<` 全部转义，真解析失败时再降级纯文本重发；`tests/htmlcheck.py` 会把**每个面板文案**离线校验一遍，这类事故进不了 CI。 |
-| Docker 面板「⚠️ 暂未检测到任何 Docker Compose 项目」 | 面板现在会带原因：`permission denied` → 容器用户不在宿主机 docker 组，`export DOCKER_GID=$(getent group docker \| cut -d: -f3)` 后 `docker compose up -d` 重建；`Cannot connect` → 没挂 `/var/run/docker.sock`；扫到了但目录不存在 → 把宿主机 compose 目录**按相同路径**挂进容器（如 `-v /opt/stacks:/opt/stacks`）。 |
+| Docker 面板「⚠️ 暂未检测到任何 Docker Compose 项目」 | 面板会直接给出原因；`permission denied` 还会实测 socket 属组并告诉你填哪个 GID，见下面「Docker 读不到项目」。 |
 | 点旧按钮提示「菜单已过期」 | 回调里的长载荷（规则名、项目名）存在内存，Bot 重启后失效；重发一次命令即可。 |
+
+### Docker 读不到项目
+
+面板把三种原因分开说。`permission denied` 时会**实测** socket 的属组和容器进程的附加组，直接给出要填的数字：
+
+```
+⚠️ 读不到 Docker：permission denied —— 容器里的 mtbots 用户没有 /var/run/docker.sock 的权限。
+   实测：容器里 /var/run/docker.sock 属组 gid=996，本进程附加组是 10001，不含它。
+   在 .env 写 DOCKER_GID=996，再用 docker compose up -d --force-recreate 重建（restart 不生效）。
+```
+
+照做即可；手工核对用宿主机上的 `stat -c '%g' /var/run/docker.sock`——NAS（busybox）上常常没有 `docker` 组条目，
+`getent group docker` 会返回空，只能靠猜（线上就有人先猜 998、再猜 0，两次都无效）。两个坑：
+
+* 改完 `.env` **必须** `--force-recreate`：`docker compose restart` 不会重新套用 `group_add`。
+* 查出来是 `0`（socket 属 `root:root`，群晖等 NAS 上常见）时加组救不了：要么让容器用 root 跑（compose 里加 `user: "0:0"`），要么上 `docker-socket-proxy`（更安全，见「安全红线」）。
 
 ## 已知限制
 

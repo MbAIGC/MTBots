@@ -29,6 +29,7 @@ from mtbots.features.docker.compose import (
     paginate_projects,
     scan_hint,
     select_unused_images,
+    socket_group_hint,
     sort_projects_for_display,
 )
 from mtbots.features.docker.config import DockerSettings
@@ -546,8 +547,38 @@ class ScanDiagnosticsTest(unittest.TestCase):
 
         self.assertIn("permission denied", state.last_scan_error.lower())
         hints = " ".join(scan_hint(state))
-        self.assertIn("DOCKER_GID", hints)
-        self.assertIn("docker 组", hints)
+        self.assertIn("docker.sock", hints)
+        self.assertIn("stat -c", hints)
+
+    def test_permission_denied_includes_measured_gid(self) -> None:
+        """权限不够时必须给出实测 GID（`getent group docker` 在 NAS 上经常没条目）。"""
+        state = self._state()
+        denied = self._result(1, "", "permission denied while trying to connect to the Docker daemon")
+        with mock.patch("mtbots.features.docker.compose.subprocess.run", return_value=denied):
+            state.scan_projects_sync()
+        with mock.patch(
+            "mtbots.features.docker.compose.socket_group_hint",
+            return_value=["   实测：MEASURED-GID 提示"],
+        ):
+            hints = " ".join(scan_hint(state))
+        self.assertIn("MEASURED-GID", hints, "权限错误必须带上实测 GID 提示")
+
+    def test_socket_group_hint_names_the_exact_gid(self) -> None:
+        hints = " ".join(socket_group_hint("/var/run/docker.sock", gid=996, groups=[10001, 999]))
+        self.assertIn("DOCKER_GID=996", hints)
+        self.assertIn("force-recreate", hints)
+
+    def test_socket_group_hint_silent_when_group_present(self) -> None:
+        # 组已经在附加组里 → 权限问题另有原因，不许瞎指路
+        self.assertEqual(socket_group_hint("/var/run/docker.sock", gid=996, groups=[10001, 996]), [])
+
+    def test_socket_group_hint_explains_root_owned_socket(self) -> None:
+        hints = " ".join(socket_group_hint("/var/run/docker.sock", gid=0, groups=[10001]))
+        self.assertIn("group_add", hints)
+        self.assertIn("0:0", hints)
+
+    def test_socket_group_hint_tolerates_missing_socket(self) -> None:
+        self.assertEqual(socket_group_hint("/nonexistent/docker.sock", groups=[10001]), [])
 
     def test_daemon_unreachable_hint(self) -> None:
         state = self._state()

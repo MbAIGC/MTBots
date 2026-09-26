@@ -22,8 +22,10 @@ services:
       - /docker:/docker
       # ③ 三份配置合成一份 data/：Cline Key + LitePan 用户 + 日志
       - ./data:/app/data
-    # 让容器里的 mtbots 用户能读写 docker.sock：填宿主机 docker 组的 GID
-    # 查询：getent group docker | cut -d: -f3
+    # 让容器里的 mtbots 用户能读写 docker.sock：填宿主机 socket 的属组 GID
+    #   查：stat -c '%g' /var/run/docker.sock   （NAS 上常常没有 docker 组条目，别用 getent 猜）
+    #   改完必须重建容器：docker compose up -d --force-recreate（restart 不会重新套用 group_add）
+    #   查到 0（socket 属 root:root）时 group_add 救不了 → 换 user: "0:0" 或 docker-socket-proxy
     group_add:
       - "${DOCKER_GID:-999}"
     # 只读根文件系统 + 禁止提权（沿用 LitePan / ClinePass 的做法）
