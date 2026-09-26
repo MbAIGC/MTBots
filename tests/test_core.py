@@ -11,17 +11,31 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.error import BadRequest
+from telegram.ext import ExtBot
 
 from mtbots import text as textmod
 from mtbots.acl import ACL
+from mtbots.bot import SafeBot
 from mtbots.config import Settings
 from mtbots.jobs import DONE, JobCenter
 from mtbots.menu import MenuManager
 from mtbots.panels import PanelManager, cb, cb_parse, nav_home, nav_open
 from mtbots.store import JsonStore, StoreError, atomic_write_json
-from tests.fakes import FakeBot, FakeChat, FakeContext, FakeQuery, FakeUpdate, FakeUser, add_fake_module, make_core
+from tests.fakes import (
+    FAKE_TOKEN,
+    FakeBot,
+    FakeChat,
+    FakeContext,
+    FakeQuery,
+    FakeUpdate,
+    FakeUser,
+    add_fake_module,
+    make_core,
+)
 
 
 class TextTests(unittest.TestCase):
@@ -49,6 +63,35 @@ class TextTests(unittest.TestCase):
     def test_esc(self):
         self.assertEqual(textmod.esc("<a&b>"), "&lt;a&amp;b&gt;")
         self.assertEqual(textmod.esc(None), "")
+
+    def test_safe_html_escapes_non_tag_literals(self):
+        """`<盘名>` 这类字面量必须被转义，否则 Telegram 会整条消息报 unsupported start tag。"""
+        cases = {
+            "/refresh <盘名>": "/refresh &lt;盘名>",
+            "<你的数据目录>": "&lt;你的数据目录>",
+            "3 < 5 且 7 > 2": "3 &lt; 5 且 7 > 2",
+            "<DATA_DIR>/config.json": "&lt;DATA_DIR>/config.json",
+        }
+        for raw, expected in cases.items():
+            self.assertEqual(textmod.safe_html(raw), expected, raw)
+
+    def test_safe_html_keeps_whitelisted_tags(self):
+        body = '<b>粗</b> <i>斜</i> <code>码</code> <a href="https://x.y">链</a> <tg-spoiler>隐</tg-spoiler>'
+        self.assertEqual(textmod.safe_html(body), body)
+        # 已有实体不许被二次转义
+        self.assertEqual(textmod.safe_html("a &lt; b"), "a &lt; b")
+
+    def test_strip_tags_unescapes_for_plain_fallback(self):
+        self.assertEqual(textmod.strip_tags("<b>粗</b> &lt;盘名>"), "粗 <盘名>")
+
+    def test_safe_html_output_survives_splitting(self):
+        """真实用例：LitePan 那段把整条面板打挂的文案。"""
+        body = "用法：/refresh <盘名>、/refresh_<规则> 或 /run <事件>\n" + "x" * 200
+        safe = textmod.safe_html(body)
+        self.assertNotIn("<盘名>", safe)
+        for chunk in textmod.split_message(safe, 80):
+            for bad in ("<盘名>", "<规则>", "<事件>"):
+                self.assertNotIn(bad, chunk)
 
 
 class ACLTests(unittest.TestCase):
@@ -167,9 +210,32 @@ class PanelTests(unittest.TestCase):
         flat = [b.callback_data for row in first.kwargs["reply_markup"].inline_keyboard for b in row]
         self.assertIn(nav_home(), flat)
 
-        asyncio.run(self.core.panels.render("docker", self.update, "正文2"))
-        self.assertEqual(len(self.bot.sent), 1)  # 第二次是原地编辑，不新发
+        # 点按钮触发 → 原地编辑同一条（用户视线就在这条消息上）
+        callback = FakeUpdate(FakeUser(), FakeChat(), bot=self.bot, query=FakeQuery(nav_home(), FakeUser()))
+        asyncio.run(self.core.panels.render("docker", callback, "正文2"))
+        self.assertEqual(len(self.bot.sent), 1, "回调触发必须原地编辑，不新发")
         self.assertIn("正文2", self.bot.edits[-1].text)
+
+    def test_command_render_moves_panel_to_bottom(self):
+        """命令触发要新发到最底部并删掉旧面板：否则用户看不到更新（「第二次 /start 没反应」）。"""
+        chat_id = self.update.effective_chat.id
+        asyncio.run(self.core.panels.render("docker", self.update, "第一版"))
+        self.assertEqual(len(self.bot.sent), 1)
+        asyncio.run(self.core.panels.render("docker", self.update, "第二版"))
+        self.assertEqual(len(self.bot.sent), 2, "命令触发要新发")
+        self.assertEqual(self.bot.edits, [], "命令触发不做原地编辑")
+        self.assertEqual(self.bot.deleted, [(chat_id, 1001)], "旧面板要删掉")
+
+    def test_panels_are_shared_across_modules(self):
+        """home / docker / litepan 共用同一条面板消息——「🏠 返回」才一定看得见。"""
+        chat_id = self.update.effective_chat.id
+        asyncio.run(self.core.panels.render("docker", self.update, "docker 面板"))
+        callback = FakeUpdate(FakeUser(), FakeChat(), bot=self.bot, query=FakeQuery(nav_home(), FakeUser()))
+        asyncio.run(self.core.panels.render("home", callback, "首页总览"))
+        self.assertEqual(len(self.bot.sent), 1, "换模块不允许新开一条消息")
+        self.assertEqual(len(self.bot.edits), 1)
+        self.assertIn("首页总览", self.bot.edits[-1].text)
+        self.assertEqual(self.core.panels.tracked(chat_id), 1001)
 
     def test_render_force_new(self):
         asyncio.run(self.core.panels.render("docker", self.update, "a"))
@@ -458,6 +524,64 @@ class RouterTests(unittest.TestCase):
         allowed = asyncio.run(self.router.ensure_allowed(self.core, self._update()))
         self.assertFalse(allowed)
         self.assertIn("白名单", self.bot.sent[-1].text)
+
+
+class SafeBotTests(unittest.IsolatedAsyncioTestCase):
+    """出站兜底：非法 `<` 转义 + 解析失败降级纯文本（模块里漏 esc 也不会再整条挂掉）。"""
+
+    def _bot(self) -> SafeBot:
+        return SafeBot(FAKE_TOKEN)
+
+    async def test_send_message_sanitizes_html(self):
+        bot = self._bot()
+        parent = mock.AsyncMock(return_value="ok")
+        with mock.patch.object(ExtBot, "send_message", new=parent):
+            await bot.send_message(1, "看 <盘名>", parse_mode="HTML")
+        args, kwargs = parent.call_args
+        self.assertEqual(args[1], "看 &lt;盘名>")
+        self.assertEqual(kwargs["parse_mode"], "HTML")
+
+    async def test_send_message_leaves_non_html_alone(self):
+        bot = self._bot()
+        parent = mock.AsyncMock(return_value="ok")
+        with mock.patch.object(ExtBot, "send_message", new=parent):
+            await bot.send_message(1, "看 <盘名>", parse_mode="MarkdownV2")
+        args, _kwargs = parent.call_args
+        self.assertEqual(args[1], "看 <盘名>")
+
+    async def test_edit_message_text_sanitizes_html(self):
+        bot = self._bot()
+        parent = mock.AsyncMock(return_value="ok")
+        with mock.patch.object(ExtBot, "edit_message_text", new=parent):
+            await bot.edit_message_text("换 <规则>", chat_id=1, message_id=2, parse_mode="HTML")
+        args, kwargs = parent.call_args
+        self.assertEqual(args[0], "换 &lt;规则>")
+        self.assertEqual(kwargs["message_id"], 2)
+
+    async def test_parse_error_falls_back_to_plain_text(self):
+        bot = self._bot()
+        calls: list[tuple[str, object]] = []
+
+        async def side_effect(chat_id, text, parse_mode=None, **kwargs):
+            calls.append((text, parse_mode))
+            if parse_mode:
+                raise BadRequest('Can\'t parse entities: Can\'t find end tag corresponding to start tag "b"')
+            return "ok"
+
+        parent = mock.AsyncMock(side_effect=side_effect)
+        with mock.patch.object(ExtBot, "send_message", new=parent):
+            await bot.send_message(1, "x <b>没闭合", parse_mode="HTML")
+
+        self.assertEqual(len(calls), 2, "第一次 HTML 失败后必须再试一次纯文本")
+        self.assertEqual(calls[0], ("x <b>没闭合", "HTML"))
+        # 降级时会去掉真标签、但把被转义的字面量还原成肉眼可见的 `<...>`
+        self.assertEqual(calls[1], ("x 没闭合", None))
+
+    async def test_unrelated_bad_request_is_not_swallowed(self):
+        bot = self._bot()
+        with mock.patch.object(ExtBot, "send_message", new=mock.AsyncMock(side_effect=BadRequest("chat not found"))):
+            with self.assertRaises(BadRequest):
+                await bot.send_message(1, "<b>x</b>", parse_mode="HTML")
 
 
 if __name__ == "__main__":

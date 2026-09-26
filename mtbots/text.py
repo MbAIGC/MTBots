@@ -26,6 +26,48 @@ TIMEOUT = "⏱️"
 _TAG_RE = re.compile(r"</?([A-Za-z][A-Za-z0-9]*)[^>]*?(/?)>")
 _VOID_TAGS = {"br"}
 
+#: Telegram HTML 模式真正支持的标签，其余 `<xxx>` 一律当字面量转义（见 :func:`safe_html`）
+TELEGRAM_TAGS = (
+    "b",
+    "strong",
+    "i",
+    "em",
+    "u",
+    "ins",
+    "s",
+    "strike",
+    "del",
+    "span",
+    "tg-spoiler",
+    "tg-emoji",
+    "a",
+    "code",
+    "pre",
+    "blockquote",
+)
+#: 匹配「不是合法标签开头」的那个 `<`（零宽断言，只替换 `<` 本身）
+_BAD_LT_RE = re.compile(
+    r"<(?!/?(?:%s)(?:[ />]))" % "|".join(TELEGRAM_TAGS),
+    re.IGNORECASE,
+)
+
+
+def safe_html(text: str) -> str:
+    """转义白名单之外的 `<`，让任意文案都能安全地用 HTML 模式发出去。
+
+    典型踩坑：文案里出现 `<盘名>`、`a < b`、`<你的数据目录>`，Telegram 会整条消息
+    返回 `BadRequest: Can't parse entities: unsupported start tag "盘名"`，
+    于是面板刷不出来、按钮看起来像失灵。出口处统一兜住这类字面量。
+    """
+    if not text or "<" not in text:
+        return text or ""
+    return _BAD_LT_RE.sub("&lt;", text)
+
+
+def strip_tags(text: str) -> str:
+    """去掉 HTML 标签并反转义实体：给 `parse_mode=None` 的兜底文本用。"""
+    return html.unescape(_TAG_RE.sub("", text or ""))
+
 
 def esc(value: object) -> str:
     """HTML 转义（None -> 空串）。"""
@@ -171,7 +213,10 @@ __all__ = [
     "OVER",
     "PENDING",
     "TIMEOUT",
+    "TELEGRAM_TAGS",
     "esc",
+    "safe_html",
+    "strip_tags",
     "now_stamp",
     "section",
     "progress_bar",

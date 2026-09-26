@@ -27,8 +27,8 @@ _ENV_HELP = {
     "MTBOTS_BOT_TOKEN": "Telegram Bot Token（也接受 TELEGRAM_BOT_TOKEN / BOT_TOKEN / TG_BOT_TOKEN）",
     "ALLOWED_USER_IDS": "允许使用的 Telegram 用户 ID（逗号分隔；也接受 TG_ALLOWED_IDS）",
     "DATA_DIR": "数据目录（默认 data/）",
-    "CONFIG_FILE": "Cline 模块的 Key 存储路径（默认 <DATA_DIR>/config.json）",
-    "LITEPAN_USERS_FILE": "LitePan 多用户配置（默认 <DATA_DIR>/litepan-users.json）",
+    "CONFIG_FILE": "Cline 模块的 Key 存储路径（默认 〈DATA_DIR〉/config.json）",
+    "LITEPAN_USERS_FILE": "LitePan 多用户配置（默认 〈DATA_DIR〉/litepan-users.json）",
     "MTBOTS_MODULES": "启用的模块，逗号分隔（默认 docker,litepan,cline）",
     "MTBOTS_ROLES": "角色覆盖，如 123:owner,456:admin（默认白名单内全部 owner）",
 }

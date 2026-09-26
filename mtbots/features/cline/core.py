@@ -103,7 +103,7 @@ class ConfigError(RuntimeError):
 #: 容器里以非 root 运行，挂载目录属主不对时给出可照抄的修复步骤
 PERMISSION_HINT = (
     "容器内以非 root 运行（uid 10001，用户 app），挂载目录的属主必须交给它："
-    "在宿主机执行 sudo chown -R 10001:10001 <你的数据目录>，"
+    "在宿主机执行 sudo chown -R 10001:10001 〈你的数据目录〉，"
     "或改用 docker-compose.yml 默认的命名卷（-v clinepass-data:/app/data）。"
 )
 

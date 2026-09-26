@@ -9,6 +9,7 @@ from telegram import Update
 from telegram.ext import Application, TypeHandler
 
 from . import __version__, features
+from .bot import SafeBot
 from .config import Settings
 from .core import Core
 from .jobs import JobCenter
@@ -48,10 +49,11 @@ def load_modules(core: Core) -> Core:
 def build_application(settings: Settings, core: Optional[Core] = None) -> Application:
     core = core or load_modules(build_core(settings))
 
-    builder = Application.builder().token(settings.bot_token)
+    # 用自己的 Bot 子类：所有出站 HTML 都在这一层兜底（转义非法 `<` + 解析失败降级纯文本）。
+    # 注意 builder 的 token/base_url 与 .bot() 互斥，所以这两项都交给 SafeBot 构造函数。
     api_base = settings.custom_api_base()
-    if api_base:
-        builder = builder.base_url(api_base)
+    bot = SafeBot(settings.bot_token, base_url=api_base) if api_base else SafeBot(settings.bot_token)
+    builder = Application.builder().bot(bot)
 
     async def _post_init(application: Application) -> None:
         await post_init(application, core)

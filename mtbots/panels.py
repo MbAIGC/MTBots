@@ -1,12 +1,17 @@
-"""统一面板层：一条会话一个模块只保留一条面板消息 + 面包屑 + 🏠 返回 + 两步确认。
+"""统一面板层：一条会话只保留一条面板消息 + 面包屑 + 🏠 返回 + 两步确认。
 
 交互设计（three-bots-merge-ux.md 图 1）的三条硬规则都在这里实现：
 
-1. **原地编辑**：模块面板永远 `edit_message_text` 同一条消息，不刷屏；
-   超长 / 编辑失败才新发（并自动分片）。
+1. **面板唯一 + 视线内更新**：home / docker / litepan / cline 共用同一条面板消息，
+   所以「🏠 返回」改的就是用户正在看的那条消息；点按钮时原地编辑不刷屏，
+   命令（`/start`、`/d_list`…）触发时新发一条到最底部并删掉旧面板——
+   否则旧面板停在命令上方，编辑了也看不见（「第二次 /start 没反应」就是这么来的）。
 2. **面包屑常驻**：头部 `🏠 › 🐳 Docker 管理`，`🏠 返回` 永远在键盘角落里，
    于是三个模块能和平共处而不需要命令前缀。
 3. **两步确认**：破坏性操作的确认按钮绑定发起人 + 60 秒过期，过期后作废。
+
+出站 HTML 的兜底（非法 `<` 转义、解析失败降级纯文本）在 :class:`mtbots.bot.SafeBot`，
+不在这里——那样连模块自己的 `reply_text` 也一起兜住了。
 """
 
 from __future__ import annotations
@@ -118,7 +123,7 @@ BACK_LABEL = "🏠 返回"
 class PanelManager:
     def __init__(self, core: Any = None):
         self._core = core
-        self._panels: dict[tuple[int, str], int] = {}
+        self._panels: dict[int, int] = {}
         self._pending: dict[str, tuple[int, float]] = {}
 
     def attach(self, core: Any) -> None:
@@ -184,14 +189,23 @@ class PanelManager:
         body = self._decorate(module_id, text, footer=footer)
         markup = self._with_back(module_id, keyboard)
 
-        key = (int(target_chat), module_id)
-        existing = None if force_new else self._panels.get(key)
+        key = int(target_chat)
+        previous = self._panels.get(key)
+        # 一条会话只保留**一条**面板消息（home / docker / litepan / cline 共用同一条），于是
+        # 「🏠 返回」就是把用户正在看的那条消息原地改成首页，一定看得见。
+        #
+        # 只有「点按钮」触发的渲染才就地编辑：用户视线就在这条消息上。
+        # 命令（/start、/d_list…）触发的渲染一律新发到聊天最底部，并删掉旧面板——否则旧面板
+        # 停在用户刚发的命令**上方**，编辑了也看不见，表现就是「第二次 /start 没反应」。
+        in_place = (not force_new) and previous is not None
+        if in_place and update is not None and update.callback_query is None:
+            in_place = False
 
-        if existing is not None and len(body) <= limit:
+        if in_place and len(body) <= limit:
             try:
                 await bot.edit_message_text(
                     chat_id=target_chat,
-                    message_id=existing,
+                    message_id=previous,
                     text=body,
                     parse_mode=parse_mode,
                     reply_markup=markup,
@@ -199,8 +213,7 @@ class PanelManager:
                 )
                 return
             except BadRequest as exc:
-                reason = str(exc).lower()
-                if "not modified" in reason:
+                if "not modified" in str(exc).lower():
                     return
                 log.info("面板编辑失败，改为新发：module=%s chat=%s（%s）", module_id, target_chat, exc)
             except TelegramError as exc:
@@ -209,16 +222,22 @@ class PanelManager:
         message = await self.send(target_chat, body, markup, parse_mode=parse_mode, bot=bot, limit=limit)
         if message is not None:
             self._panels[key] = message.message_id
+            if previous is not None and previous != message.message_id:
+                await self._delete_quietly(bot, target_chat, previous)
+
+    async def _delete_quietly(self, bot: Any, chat_id: int, message_id: int) -> None:
+        """删旧面板：失败就算了（群里没删消息权限、消息超过 48 小时都会失败）。"""
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=message_id)
+        except TelegramError as exc:
+            log.debug("旧面板删除失败（忽略）：chat=%s msg=%s（%s）", chat_id, message_id, exc)
 
     def forget(self, chat_id: int, module_id: Optional[str] = None) -> None:
-        if module_id is None:
-            for key in [k for k in self._panels if k[0] == int(chat_id)]:
-                self._panels.pop(key, None)
-        else:
-            self._panels.pop((int(chat_id), module_id), None)
+        """forget: 忘掉本会话的面板（module_id 参数保留仅为兼容旧调用）。"""
+        self._panels.pop(int(chat_id), None)
 
-    def tracked(self, chat_id: int, module_id: str) -> Optional[int]:
-        return self._panels.get((int(chat_id), module_id))
+    def tracked(self, chat_id: int, module_id: Optional[str] = None) -> Optional[int]:
+        return self._panels.get(int(chat_id))
 
     # ---------- 两步确认 ----------
     async def ask_confirm(

@@ -133,7 +133,7 @@ mtbots/
 ├── .github/workflows/docker.yml                      # CI：跑测试 + 构建 amd64/arm64 镜像推 GHCR
 ├── Makefile                                          # make check / health / test / run / list
 ├── docs/                                             # 设计稿、施工契约（porting-contract）、合并报告
-└── tests/                                            # 288 个 stdlib unittest 用例
+└── tests/                                            # 309 个 stdlib unittest 用例
 ```
 
 ## 配置
@@ -193,15 +193,15 @@ make check
 ```
 
 测试全部是 stdlib `unittest`、不联网也不碰真实 Telegram/Docker（Docker 用例还会把
-`subprocess` / `create_subprocess_exec` 换成抛异常的桩做反证）。当前 **288 个用例全绿**：
+`subprocess` / `create_subprocess_exec` 换成抛异常的桩做反证）。当前 **309 个用例全绿**：
 
 | 文件 | 用例 | 覆盖 |
 |---|---|---|
-| `tests/test_core.py` | 45 | 文本分片（HTML 标签闭合）、ACL 默认拒绝、存储原子写/0600/损坏分类、任务中心、面板原地编辑与两步确认、菜单去重与作用域、配置兼容、日志脱敏（含 exc_info 的 traceback）、路由消歧与兜底救援 |
-| `tests/test_docker_module.py` | 31 | 项目排序/分页、pull 噪音过滤、清理候选、回调载荷、模块装配 |
+| `tests/test_core.py` | 56 | 文本分片（HTML 标签闭合）、`safe_html` 出口转义、`SafeBot` 解析失败降级、ACL 默认拒绝、存储原子写/0600/损坏分类、任务中心、面板唯一与两步确认、菜单去重与作用域、配置兼容、日志脱敏（含 exc_info 的 traceback）、路由消歧与兜底救援 |
+| `tests/test_docker_module.py` | 36 | 项目排序/分页、pull 噪音过滤、清理候选、回调载荷、模块装配、**扫描失败诊断（权限/未挂载/缺命令）** |
 | `tests/test_litepan_module.py` | 58 | slug 构建（拼音/限长/去重）、users.json 校验、发现解析与缓存、菜单预算、触发与回执 |
 | `tests/test_cline_module.py` | 140 | 额度解析/渲染、Key 掩码与指纹、别名校验、存储读写与自愈、默认拒绝 |
-| `tests/test_integration.py` | 14 | 三个真实模块一起装配、命令不重复、菜单合并、`--check` 离线可跑，以及**真 `telegram.Update` 走 PTB dispatcher 的端到端用例**（不重复执行、全角命令可救援、下线模块的按钮有反馈、面板原地编辑） |
+| `tests/test_integration.py` | 19 | 三个真实模块一起装配、命令不重复、菜单合并、`--check` 离线可跑，以及**真 `telegram.Update` 走 PTB dispatcher 的端到端用例**（不重复执行、全角命令可救援、下线模块的按钮有反馈、点按钮原地改同一条面板、**所有面板文案都过一遍 Telegram HTML 合法性校验**） |
 
 ## 与原三个 Bot 的差异（有意为之）
 
@@ -215,9 +215,19 @@ make check
 | 三个模块的长任务统一进 `/jobs`，完成推送带模块标签与跨模块下一步按钮 | 合并才有的能力：一个任务中心 + 一次点击跨模块跳转 |
 | `/d_status` `/d_list` `/p_status` `/p_list` `/c_status` 由路由注册并转发给模块 | 别名要先进模块上下文再渲染面板；同 group 内先注册者优先，模块再注册同名命令会变成死代码 |
 
+## 排错
+
+| 现象 | 原因 / 处理 |
+|---|---|
+| 按钮点了没反应、「🏠 返回」看着无效 | 已修：一条会话只保留**一条**面板消息（home / docker / litepan / cline 共用同一处），点按钮就地改这条，`/start` 这类命令新发到聊天最底部并删掉旧面板。若仍无反应，`docker compose logs -f` 里搜 `HTML 解析失败`：那说明文案里有 Telegram 不认的标签，出口已经自动降级为纯文本，把日志贴出来即可定位。 |
+| LitePan 报 `Can't parse entities: unsupported start tag "盘名"` | 已修：`SafeBot`（`mtbots/bot.py`）在出站口把白名单外的 `<` 全部转义，真解析失败时再降级纯文本重发；`tests/htmlcheck.py` 会把**每个面板文案**离线校验一遍，这类事故进不了 CI。 |
+| Docker 面板「⚠️ 暂未检测到任何 Docker Compose 项目」 | 面板现在会带原因：`permission denied` → 容器用户不在宿主机 docker 组，`export DOCKER_GID=$(getent group docker \| cut -d: -f3)` 后 `docker compose up -d` 重建；`Cannot connect` → 没挂 `/var/run/docker.sock`；扫到了但目录不存在 → 把宿主机 compose 目录**按相同路径**挂进容器（如 `-v /opt/stacks:/opt/stacks`）。 |
+| 点旧按钮提示「菜单已过期」 | 回调里的长载荷（规则名、项目名）存在内存，Bot 重启后失效；重发一次命令即可。 |
+
 ## 已知限制
 
-* 群里「回复某条面板消息来定位上下文」没做——面板仍是「一个会话 × 一个模块 = 一条消息」，私聊为主的用法不受影响。
+* 群里「回复某条面板消息定位上下文」仍未实现；面板按会话唯一（跨模块共用），命令触发时新发到最底部、旧面板删除。
 * Docker 模块是**进程内**模块（不是 sidecar + `docker-socket-proxy`）。单人自用可接受；多人场景建议按设计稿 §4 方案 B 拆出去。
+* Docker 模块只能看到「挂进容器的那些 compose 目录」，且容器内路径必须与宿主机一致（探针靠 `docker compose ls` 的宿主机路径定位工作目录）。
 * LitePan 命令菜单按会话差异化下发受 `MenuManager` 限制：目前是所有已授权会话共用一份片段（含 `refresh_<slug>`）。
 * LitePan 的「自动发现」与「回执」还没拆成两个开关（旧版就是耦合的，行为未退化）。

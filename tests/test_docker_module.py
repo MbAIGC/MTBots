@@ -7,7 +7,10 @@ DockerState 隔离/缓存/任务锁、DockerSettings.from_env、ModuleSpec 与 r
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
+import tempfile
 import time
 import unittest
 from pathlib import Path
@@ -24,6 +27,7 @@ from mtbots.features.docker.compose import (
     is_pull_noise,
     normalize_image_id,
     paginate_projects,
+    scan_hint,
     select_unused_images,
     sort_projects_for_display,
 )
@@ -511,6 +515,104 @@ class PruneScanTest(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(snapshot, "bbb222\t<none>:<none>\t10MB")
         self.assertEqual(error, "")
+
+
+class ScanDiagnosticsTest(unittest.TestCase):
+    """空项目列表必须说清原因（权限不够 / 目录没挂进来 / 缺 compose 命令）。
+
+    以前这三种情况都是静默返回 []，面板只有一句「暂未检测到任何 Docker Compose 项目」，
+    用户只能猜（线上就是这么被反馈的）。
+    """
+
+    def _state(self) -> DockerState:
+        state = DockerState(DockerSettings())
+        state.compose_bin = ["docker", "compose"]
+        return state
+
+    @staticmethod
+    def _result(returncode: int = 0, stdout: str = "", stderr: str = ""):
+        return mock.Mock(returncode=returncode, stdout=stdout, stderr=stderr)
+
+    def test_permission_denied_is_reported_with_fix(self) -> None:
+        state = self._state()
+        denied = self._result(
+            1,
+            "",
+            "permission denied while trying to connect to the Docker daemon socket "
+            "at unix:///var/run/docker.sock",
+        )
+        with mock.patch("mtbots.features.docker.compose.subprocess.run", return_value=denied):
+            self.assertEqual(state.scan_projects_sync(), [])
+
+        self.assertIn("permission denied", state.last_scan_error.lower())
+        hints = " ".join(scan_hint(state))
+        self.assertIn("DOCKER_GID", hints)
+        self.assertIn("docker 组", hints)
+
+    def test_daemon_unreachable_hint(self) -> None:
+        state = self._state()
+        unreachable = self._result(
+            1,
+            "",
+            "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. "
+            "Is the docker daemon running?",
+        )
+        with mock.patch("mtbots.features.docker.compose.subprocess.run", return_value=unreachable):
+            state.scan_projects_sync()
+        self.assertIn("docker.sock", " ".join(scan_hint(state)))
+
+    def test_unmounted_project_dir_is_reported(self) -> None:
+        state = self._state()
+        payload = json.dumps(
+            [
+                {
+                    "Name": "media",
+                    "Status": "running(1)",
+                    "ConfigFiles": "/opt/stacks/media/docker-compose.yml",
+                }
+            ]
+        )
+        with mock.patch(
+            "mtbots.features.docker.compose.subprocess.run",
+            return_value=self._result(0, payload, ""),
+        ):
+            self.assertEqual(state.scan_projects_sync(), [])
+
+        self.assertEqual(state.hidden_dirs, ["/opt/stacks/media"])
+        self.assertEqual(state.last_scan_error, "")
+        self.assertIn("挂进容器", " ".join(scan_hint(state)))
+
+    def test_missing_compose_binary_hint(self) -> None:
+        state = DockerState(DockerSettings())
+        state.compose_bin = []
+        self.assertIn("docker compose", " ".join(scan_hint(state)))
+        # d_list 面板已经在上面单独打印过缺命令，这里允许不重复
+        self.assertEqual(scan_hint(state, include_compose=False), [])
+
+    def test_successful_scan_has_no_hint(self) -> None:
+        state = self._state()
+        with tempfile.TemporaryDirectory() as tmp:
+            compose_file = os.path.join(tmp, "docker-compose.yml")
+            Path(compose_file).write_text("services: {}\n", encoding="utf-8")
+            payload = json.dumps(
+                [{"Name": "media", "Status": "running(1)", "ConfigFiles": compose_file}]
+            )
+
+            def fake_run(cmd, **kwargs):
+                if "config" in cmd:
+                    return self._result(0, "emby\n", "")
+                return self._result(0, payload, "")
+
+            with mock.patch(
+                "mtbots.features.docker.compose.subprocess.run", side_effect=fake_run
+            ):
+                projects = state.scan_projects_sync()
+
+        self.assertEqual([p["name"] for p in projects], ["media"])
+        self.assertEqual(projects[0]["services"], ["emby"])
+        self.assertEqual(state.last_scan_error, "")
+        self.assertEqual(state.hidden_dirs, [])
+        self.assertEqual(scan_hint(state), [])
 
 
 if __name__ == "__main__":

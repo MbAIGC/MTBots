@@ -589,6 +589,12 @@ async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYP
     log.error("❌ 未捕获的系统异常：", exc_info=error)
     if not isinstance(update, Update):
         return
+    # 回调里抛异常时必须应答一次，否则客户端按钮一直转圈，看起来就是「点了没反应」
+    if update.callback_query is not None:
+        try:
+            await update.callback_query.answer("⚠️ 处理失败，原因见下方提示")
+        except Exception:
+            pass
     chat = update.effective_chat
     if chat is None:
         return

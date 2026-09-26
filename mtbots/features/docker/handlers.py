@@ -27,6 +27,7 @@ from .compose import (
     format_prune_snapshot,
     paginate_projects,
     run_command_with_feedback,
+    scan_hint,
     scan_prune_candidates,
     sort_projects_for_display,
 )
@@ -208,6 +209,10 @@ async def _render_list(
 
     if not ordered:
         text += "⚠️ 暂未检测到任何 Docker Compose 项目\n"
+        # 空列表必须说清是「权限不够」「目录没挂进来」还是「compose 命令缺失」，
+        # 否则用户只能猜（缺命令那行上面已经单独打印过了）。
+        for hint in scan_hint(state, include_compose=False):
+            text += hint + "\n"
     else:
         last_group: Optional[str] = None
         for i, p in enumerate(page_projects, start=start_idx + 1):

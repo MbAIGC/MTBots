@@ -176,6 +176,11 @@ class DockerState:
         self.projects_cache_time: float = 0.0
         #: 测试/嵌入用：替换真实扫描（返回项目列表）
         self.scan_hook: Optional[Callable[[], list[dict]]] = None
+        #: 最近一次扫描的失败原因（空 = 成功）。以前这里失败是静默的，
+        #: 结果「权限不足 / 目录没挂载」都表现成一句「暂未检测到任何项目」，没法排查。
+        self.last_scan_error: str = ""
+        #: 扫到了、但 compose 目录在容器里不存在的项目目录（宿主机路径没挂进来）
+        self.hidden_dirs: list[str] = []
 
     # ---------- 任务锁 ----------
     def get_lock(self) -> asyncio.Lock:
@@ -284,11 +289,18 @@ class DockerState:
 
     # ---------- 项目扫描 ----------
     def scan_projects_sync(self) -> list[dict]:
-        """`docker compose ls -a --format json` 扫描（同步，交给 to_thread 跑）。"""
+        """`docker compose ls -a --format json` 扫描（同步，交给 to_thread 跑）。
+
+        失败不再静默：`last_scan_error` 记下原因，`hidden_dirs` 记下「扫到了、但 compose
+        目录在容器里不存在」的项目，面板和 `--health` 据此给出可操作提示。
+        """
         projects: list[dict] = []
         seen_keys: set[str] = set()
+        self.last_scan_error = ""
+        self.hidden_dirs = []
         compose_bin = self.get_compose_bin()
         if not compose_bin:
+            self.last_scan_error = "未找到 docker compose / docker-compose 命令"
             return projects
 
         try:
@@ -298,7 +310,13 @@ class DockerState:
                 text=True,
                 timeout=SCAN_TIMEOUT,
             )
-            if result.returncode == 0 and result.stdout.strip():
+            if result.returncode != 0:
+                detail = (result.stderr or result.stdout or "").strip()
+                self.last_scan_error = detail.splitlines()[0] if detail else "退出码 %d" % result.returncode
+                log.warning("docker compose ls 失败：%s", self.last_scan_error)
+                return projects
+
+            if result.stdout.strip():
                 try:
                     data = json.loads(result.stdout)
                     if isinstance(data, dict):
@@ -324,9 +342,14 @@ class DockerState:
                         continue
                     first_file = config_files[0] if config_files else ""
                     work_dir = os.path.dirname(first_file) if first_file else ""
+                    if work_dir and not os.path.isdir(work_dir):
+                        # compose 文件在宿主机有、容器里没有 => 没挂载，单独提示
+                        if work_dir not in self.hidden_dirs:
+                            self.hidden_dirs.append(work_dir)
+                        continue
 
                     unique_key = "%s:%s" % (name, work_dir)
-                    if work_dir and os.path.isdir(work_dir) and unique_key not in seen_keys:
+                    if work_dir and unique_key not in seen_keys:
                         seen_keys.add(unique_key)
                         services = self.get_project_services(work_dir, config_files)
                         projects.append(
@@ -339,6 +362,7 @@ class DockerState:
                             }
                         )
         except Exception as exc:
+            self.last_scan_error = str(exc)
             log.warning("docker compose ls 扫描失败: %s", exc)
 
         projects.sort(key=lambda x: x["name"])
@@ -371,6 +395,50 @@ class DockerState:
     def invalidate_cache(self) -> None:
         """使项目扫描缓存立即过期（升级/清理操作后调用）。"""
         self.projects_cache_time = 0.0
+
+
+def scan_hint(state: DockerState, *, include_compose: bool = True) -> list[str]:
+    """扫描不到项目时的可操作提示（把权限 / 挂载 / 缺命令三种原因分开说）。
+
+    以前这三种情况都只表现成一句「暂未检测到任何 Docker Compose 项目」，只能靠猜。
+    这里把 :attr:`DockerState.last_scan_error` 和 :attr:`DockerState.hidden_dirs` 翻成人话。
+    """
+    hints: list[str] = []
+    if include_compose and state.compose_bin is not None and not state.compose_bin:
+        hints.append("⚠️ 容器里没有 <code>docker compose</code> / <code>docker-compose</code> 命令。")
+
+    error = (state.last_scan_error or "").strip()
+    low = error.lower()
+    if error:
+        if "permission denied" in low:
+            hints.append(
+                "⚠️ 读不到 Docker：<code>permission denied</code> —— 容器里的 mtbots 用户不在宿主机 docker 组。"
+            )
+            hints.append(
+                "   修：<code>export DOCKER_GID=$(getent group docker | cut -d: -f3)</code> "
+                "后 <code>docker compose up -d</code> 重建。"
+            )
+        elif any(
+            mark in low
+            for mark in ("cannot connect", "no such file", "connection refused", "is the docker daemon running")
+        ):
+            hints.append(
+                "⚠️ 连不上 Docker 守护进程：确认挂载了 "
+                "<code>-v /var/run/docker.sock:/var/run/docker.sock</code>。"
+            )
+        else:
+            hints.append("⚠️ <code>docker compose ls</code> 失败：<code>%s</code>" % esc(error))
+
+    if state.hidden_dirs:
+        shown = "、".join(state.hidden_dirs[:2])
+        hints.append(
+            "ℹ️ 有 %d 个 compose 项目扫到了，但它们的目录在容器里不存在：<code>%s</code>"
+            % (len(state.hidden_dirs), esc(shown))
+        )
+        hints.append(
+            "   修：把宿主机目录按相同路径挂进容器，例如 <code>-v /opt/stacks:/opt/stacks</code>。"
+        )
+    return hints
 
 
 # ==================== 只读 docker 查询 ====================

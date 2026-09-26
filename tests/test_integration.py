@@ -15,6 +15,7 @@ from pathlib import Path
 from mtbots.app import build_application, build_core, load_modules, modules_summary
 from mtbots.config import Settings
 from tests.fakes import FakeBot, make_recording_app, real_update
+from tests.htmlcheck import assert_html_valid
 
 ROOT = Path(__file__).resolve().parent.parent
 RESERVED = {"start", "help", "status", "list", "home", "menu", "jobs", "id", "cancel"}
@@ -144,12 +145,16 @@ class DispatcherTests(unittest.TestCase):
         self.assertIn("Docker", bot.sent_texts[0])
 
     def test_commands_are_not_executed_twice(self):
+        """一条命令只渲染一次面板；兜底 handler 放错 group 时这里会看到 2 条消息。"""
         app, _core, bot = make_recording_app(modules="docker")
         self._drive(app, real_update(bot, text="/start", update_id=1))
+        self.assertEqual(len(bot.rec["sent"]), 1, bot.sent_texts)
+        self.assertEqual(bot.rec["edits"], [])  # 首次没有面板可编辑
         self._drive(app, real_update(bot, text="/status", update_id=2))
-        self.assertEqual(len(bot.rec["sent"]), 1, "第二条命令应编辑已有面板而不是新发")
-        self.assertEqual(len(bot.rec["edits"]), 1)
-        self.assertIn("控制台", bot.rec["edits"][0])
+        self.assertEqual(len(bot.rec["sent"]), 2, "命令触发的面板要新发到最底部")
+        self.assertEqual(bot.rec["edits"], [], "命令触发时不做原地编辑")
+        self.assertEqual(len(bot.rec["deleted"]), 1, "旧面板要删掉，避免聊天里堆一摞死面板")
+        self.assertIn("控制台", bot.sent_texts[-1])
 
     def test_full_width_command_is_rescued(self):
         app, _core, bot = make_recording_app(modules="docker")
@@ -176,17 +181,85 @@ class DispatcherTests(unittest.TestCase):
         self._drive(app, real_update(bot, text="/jobs"))
         self.assertIn("任务", bot.last_text)
 
+    def test_docker_list_panel_explains_empty_scan(self):
+        """空列表必须带上原因：以前只有一句「暂未检测到」，用户只能猜是不是权限。"""
+        app, core, bot = make_recording_app(modules="docker", docker_projects=[])
+        state = core.data["docker"]
+        state.last_scan_error = "permission denied while trying to connect to the Docker daemon socket"
+        self._drive(app, real_update(bot, text="/d_list"))
+        text = bot.last_text
+        self.assertIn("暂未检测到", text)
+        self.assertIn("DOCKER_GID", text)
+        self.assertIn("docker 组", text)
+
+    def test_every_panel_is_valid_telegram_html(self):
+        """所有面板文案都要能被 Telegram 的 HTML 解析器接受。
+
+        历史事故：LitePan 的 `/refresh <盘名>` 把整条消息打成
+        `Can't parse entities: unsupported start tag "盘名"`，面板刷不出来，按钮看起来失灵。
+        """
+        app, _core, bot = make_recording_app(modules="docker,litepan,cline")
+        commands = (
+            "/start",
+            "/help",
+            "/id",
+            "/jobs",
+            "/status",
+            "/list",
+            "/d_list",
+            "/p_list",
+            "/p_status",
+            "/c_list",
+            "/c_status",
+            "/refresh_光鸭A",
+            "/upgrade",
+        )
+        for index, command in enumerate(commands, start=1):
+            self._drive(app, real_update(bot, text=command, update_id=index))
+
+        bodies = [text for _chat, text, _kwargs in bot.rec["sent"]]
+        bodies += [text for text in bot.rec["edits"] if text]
+        self.assertTrue(bodies, "这些命令至少要产出一些文案")
+        for body in bodies:
+            assert_html_valid(self, body, "面板文案里有 Telegram 不认的标签")
+
     def test_nav_callback_answers_and_edits_same_panel(self):
+        """点按钮一律原地改同一条面板消息：home / help / 模块面板共用一条。"""
         app, _core, bot = make_recording_app(modules="docker")
         self._drive(app, real_update(bot, text="/start", update_id=1))
         self._drive(app, real_update(bot, data="nav|help", update_id=2))
         self.assertEqual(bot.rec["answers"], [""], "导航回调必须静默应答一次")
-        self.assertEqual(len(bot.rec["sent"]), 2, "帮助面板是第一次出现，应该新发一条")
-        # 再回首页：这次必须原地编辑，而不是又新发一条
+        self.assertEqual(len(bot.rec["sent"]), 1, "帮助面板要复用同一条消息，不新发")
+        self.assertEqual(len(bot.rec["edits"]), 1)
+        self.assertIn("帮助", bot.rec["edits"][0])
+        # 再回首页：还是编辑这一条，用户视线里一定看得见
         self._drive(app, real_update(bot, data="nav|home", update_id=3))
-        self.assertEqual(len(bot.rec["sent"]), 2)
+        self.assertEqual(len(bot.rec["sent"]), 1)
+        self.assertEqual(len(bot.rec["edits"]), 2)
+        self.assertIn("控制台", bot.rec["edits"][-1])
+
+    def test_back_button_from_module_panel_edits_the_same_message(self):
+        """模块面板里的「🏠 返回」必须原地改回首页（这条路径以前会改到另一条看不见的消息上）。"""
+        app, _core, bot = make_recording_app(modules="docker")
+        self._drive(app, real_update(bot, text="/d_list", update_id=1))
+        self.assertEqual(len(bot.rec["sent"]), 1)
+        panel_id = bot.rec["sent"][0]
+        back = self._find_back_data(bot)
+        self.assertIsNotNone(back, "模块面板必须带一个 🏠 返回 按钮")
+        self._drive(app, real_update(bot, data=back, update_id=2))
+        self.assertEqual(len(bot.rec["sent"]), 1, "返回不许新发消息")
         self.assertEqual(len(bot.rec["edits"]), 1)
         self.assertIn("控制台", bot.rec["edits"][0])
+        self.assertEqual(bot.rec["sent"][0], panel_id)
+
+    @staticmethod
+    def _find_back_data(bot) -> str | None:
+        markup = bot.rec["sent"][-1][2].get("reply_markup")
+        for row in getattr(markup, "inline_keyboard", []) or []:
+            for button in row:
+                if "返回" in (button.text or ""):
+                    return button.callback_data
+        return None
 
     def test_callback_of_disabled_module_gets_explained(self):
         app, _core, bot = make_recording_app(modules="docker")
@@ -202,6 +275,27 @@ class DispatcherTests(unittest.TestCase):
         self._drive(app, real_update(bot, data="d|nope|1", update_id=1))
         joined = " ".join(bot.rec["answers"])
         self.assertNotIn("模块可能已下线", joined)
+
+
+class HtmlGuardTests(unittest.TestCase):
+    """守卫本身也要有守卫：确认它能抓到线上那次 `<盘名>` 事故。"""
+
+    def test_old_litepan_text_would_have_been_caught(self):
+        from tests.htmlcheck import html_problems
+
+        broken = "未配置默认事件：可先 /info 查看规则，再用 /refresh <盘名>、/refresh_<规则> 或 /run <事件>。"
+        problems = html_problems(broken)
+        self.assertTrue(problems, "这个文案必须被判定为不合法")
+        self.assertTrue(any("盘名" in p for p in problems), problems)
+        # 转义之后必须干净
+        self.assertEqual(html_problems("未配置默认事件：/refresh &lt;盘名>、/run &lt;事件>。"), [])
+
+    def test_unbalanced_tag_is_caught(self):
+        from tests.htmlcheck import html_problems
+
+        self.assertTrue(any("未闭合" in p for p in html_problems("<b>没闭合")))
+        self.assertTrue(any("不匹配" in p for p in html_problems("<b>x</i>")))
+        self.assertEqual(html_problems("<b>粗</b> <code>码</code> <a href=\"https://x.y\">链</a>"), [])
 
 
 if __name__ == "__main__":

@@ -678,7 +678,7 @@ async def do_refresh(ctx: _Ctx, arg: str) -> None:
             if full:
                 await say(
                     ctx,
-                    "✅ 检测到全量规则「%s」，/refresh 本次只触发它（其他规则请用 /refresh_<规则> 单独触发）。"
+                    "✅ 检测到全量规则「%s」，/refresh 本次只触发它（其他规则请用 /refresh_〈规则〉 单独触发）。"
                     % esc(full[0]["name"]),
                 )
                 await run_rules_and_report(ctx, full)
@@ -689,7 +689,7 @@ async def do_refresh(ctx: _Ctx, arg: str) -> None:
         if not events:
             await say(
                 ctx,
-                "未配置默认事件：可先 /info 查看规则，再用 /refresh <盘名>、/refresh_<规则> 或 /run <事件>。",
+                "未配置默认事件：可先 /info 查看规则，再用 /refresh 〈盘名〉、/refresh_〈规则〉 或 /run 〈事件〉。",
             )
             return
         for ev in events:
@@ -697,7 +697,7 @@ async def do_refresh(ctx: _Ctx, arg: str) -> None:
         return
 
     if kind == "path":
-        await say(ctx, "路径参数已不再支持：/refresh 触发所有规则，/refresh <盘名> 触发指定盘。")
+        await say(ctx, "路径参数已不再支持：/refresh 触发所有规则，/refresh 〈盘名〉 触发指定盘。")
         return
 
     ev = profile.lookup_drive(value)
@@ -739,10 +739,10 @@ async def do_refresh_slug(ctx: _Ctx, slug: str) -> None:
 
 
 async def do_run(ctx: _Ctx, arg: str) -> None:
-    """`/run <事件> [path]`：高级触发接口。"""
+    """`/run 〈事件〉 [path]`：高级触发接口。"""
     parts = (arg or "").split(None, 1)
     if not parts:
-        await say(ctx, "用法：/run <事件名>，例如 /run quark01_refresh")
+        await say(ctx, "用法：/run 〈事件名〉，例如 /run quark01_refresh")
         return
     event = parts[0]
     path = parts[1] if len(parts) > 1 else ctx.profile.default_path
@@ -806,7 +806,7 @@ async def build_info_text(ctx: _Ctx) -> str:
             lines.append("· %s：%s" % (esc(name), "、".join(sorted(esc(e) for e in d.by_account[aid]))))
     lines.append("")
     lines.append("💡 提示")
-    lines.append("· /refresh 触发所有规则；/refresh <盘名>、/refresh_<规则> 精确执行；/run 为高级命令，同名事件会全部触发。")
+    lines.append("· /refresh 触发所有规则；/refresh 〈盘名〉、/refresh_〈规则〉 精确执行；/run 为高级命令，同名事件会全部触发。")
     return "\n".join(lines)
 
 
@@ -955,7 +955,7 @@ def _install_shutdown_hook(application: Any, state: LitePanState) -> None:
 def commands(core: Core, uid: int) -> list[tuple[str, str]]:
     """LitePan 贡献的静态命令片段。"""
     return [
-        ("refresh", "触发所有规则（/refresh <盘名> 指定盘）"),
+        ("refresh", "触发所有规则（/refresh 〈盘名〉 指定盘）"),
         ("strm", "触发所有规则（别名）"),
         ("info", "LitePan 状态、规则与盘名"),
         ("ping", "LitePan 连接检测"),

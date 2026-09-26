@@ -298,7 +298,30 @@ def real_update(
     return update
 
 
-def make_recording_app(*, modules: str = "docker"):
+#: 集成测试用的假 compose 项目（Docker 模块的真实扫描要跑 `docker compose ls`，测试里必须替换掉）
+FAKE_PROJECTS = [
+    {
+        "name": "media",
+        "dir": "/docker/media",
+        "status": "running(1)",
+        "services": ["emby"],
+        "config_files": ["/docker/media/docker-compose.yml"],
+    },
+    {
+        "name": "tools",
+        "dir": "/docker/tools",
+        "status": "exited(2)",
+        "services": ["uptime-kuma", "watchtower"],
+        "config_files": ["/docker/tools/docker-compose.yml"],
+    },
+]
+
+
+def make_recording_app(
+    *,
+    modules: str = "docker",
+    docker_projects: Optional[list[dict]] = None,
+):
     """构建真 Application + RecordingBot（不联网、不 run_polling）。"""
     from mtbots.app import build_application, build_core, load_modules
 
@@ -312,6 +335,12 @@ def make_recording_app(*, modules: str = "docker"):
     )
     core = load_modules(build_core(settings))
     app = build_application(settings, core)
+    # Docker 的项目扫描会真的执行宿主机命令，集成测试一律用假数据。
+    # 注意：DockerState 是 build_application() 里 register() 时才挂到 core.data["docker"] 的，
+    # 所以必须在装配**之后**再装 scan_hook（模块把状态存在 core.data，不是 core.state() 的 dict 槽）。
+    state = core.data.get("docker")
+    if state is not None and hasattr(state, "scan_hook"):
+        state.scan_hook = lambda: list(FAKE_PROJECTS if docker_projects is None else docker_projects)
     bot = RecordingBot()
     app.bot = bot  # 让 context.bot 也指向假 Bot
     app._initialized = True  # 跳过 initialize()（那会真的调 getMe）
@@ -332,4 +361,5 @@ __all__ = [
     "RecordingBot",
     "real_update",
     "make_recording_app",
+    "FAKE_PROJECTS",
 ]

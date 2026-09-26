@@ -19,6 +19,7 @@ from . import __version__
 from .app import build_application, build_core, load_modules, modules_summary
 from .config import TOKEN_VARS, Settings
 from .logging_setup import install_excepthook, redact, setup_logging
+from .text import strip_tags
 
 log = logging.getLogger("mtbots.main")
 
@@ -61,6 +62,11 @@ async def _health_probes(core) -> list[str]:
             projects = await state.get_projects() if hasattr(state, "get_projects") else None
             if projects is not None:
                 lines.append("🐳 可扫描到的 compose 项目：%d 个" % len(projects))
+                if not projects:
+                    # 空列表最需要原因：权限不足 / 目录没挂载 / 命令缺失
+                    hint_fn = getattr(docker_compose, "scan_hint", None)
+                    for hint in hint_fn(state) if hint_fn else []:
+                        lines.append("   " + redact(strip_tags(hint)))
         except Exception as exc:
             lines.append("🐳 docker compose：❌ %s" % redact(str(exc)))
 

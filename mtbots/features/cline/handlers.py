@@ -141,7 +141,7 @@ def _safe_args(args: object) -> str:
     """日志里描述命令参数，但绝不把 API Key 写进去。"""
     tokens = [str(a) for a in (args or [])]  # type: ignore[union-attr]
     shown = [
-        tok if len(tok) <= 16 and not tok.lower().startswith(("sk_", "sk-")) else f"<{len(tok)}字符>"
+        tok if len(tok) <= 16 and not tok.lower().startswith(("sk_", "sk-")) else f"〈{len(tok)}字符〉"
         for tok in tokens
     ]
     return f"共 {len(tokens)} 个 {shown}"

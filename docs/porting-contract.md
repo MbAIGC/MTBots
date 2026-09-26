@@ -143,8 +143,9 @@ class PanelManager:
     async def render(self, module_id: str, update: Update, text: str,
                      keyboard: InlineKeyboardMarkup | None = None, *,
                      force_new: bool = False, chat_id: int | None = None) -> None:
-        """把 text 渲染成「本会话本模块的唯一面板消息」：自动加面包屑与时间戳、末尾补 [🏠 返回]、
-        能编辑就原地编辑（BadRequest: Message is not modified 静默忽略），超长自动分片。"""
+        """把 text 渲染成「本会话唯一的面板消息」（home / docker / litepan / cline 共用一条）：
+        自动加面包屑与时间戳、末尾补 [🏠 返回]；点按钮触发时原地编辑
+        （`BadRequest: Message is not modified` 静默忽略），命令触发或超长时新发一条并删掉旧面板。"""
 
     async def send(self, chat_id: int, text: str, keyboard=None,
                    parse_mode: str = "HTML") -> Message: ...

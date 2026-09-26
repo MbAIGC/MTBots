@@ -2,7 +2,7 @@
 
 > 依据：[three-bots-merge-design.md](three-bots-merge-design.md)（可行性 + 交互设计）、
 > [three-bots-merge-ux.md](three-bots-merge-ux.md)（单人版交互图）、[porting-contract.md](porting-contract.md)（施工契约）。
-> 结果：三个 Bot 已合并为 **一个进程、一个 Python 包 `mtbots`**（Bot 名 MTBots，方案 A：单进程模块化），可运行、可自检、**288 个测试全绿**。
+> 结果：三个 Bot 已合并为 **一个进程、一个 Python 包 `mtbots`**（Bot 名 MTBots，方案 A：单进程模块化），可运行、可自检、**309 个测试全绿**。
 
 ---
 
@@ -55,27 +55,28 @@
 
 ```bash
 cd /root/DSH/MTBots
-PYTHONPATH=./.vendor:. python3 -m unittest discover -s tests -t .   # 288 tests OK
+PYTHONPATH=./.vendor:. python3 -m unittest discover -s tests -t .   # 309 tests OK
 PYTHONPATH=./.vendor:. python3 -m mtbots --check                      # exit 0，离线
 PYTHONPATH=./.vendor:. python3 -m mtbots --health                     # 真实探测（compose / LitePan / Cline 存储）
 ```
 
 | 测试文件 | 用例 | 结果 |
 |---|---|---|
-| `tests/test_core.py` | 45 | OK |
-| `tests/test_docker_module.py` | 31 | OK（含「把 `subprocess` 全换成抛异常的桩」反证） |
+| `tests/test_core.py` | 56 | OK（含 `safe_html` / `SafeBot` 降级的出口兜底用例） |
+| `tests/test_docker_module.py` | 36 | OK（含「把 `subprocess` 全换成抛异常的桩」反证 + 扫描失败诊断） |
 | `tests/test_litepan_module.py` | 58 | OK |
 | `tests/test_cline_module.py` | 140 | OK |
-| `tests/test_integration.py` | 14 | OK（5 个装配用例 + 9 个真 Update 端到端用例） |
-| **合计** | **288** | **OK（约 3.8s，无网络）** |
+| `tests/test_integration.py` | 19 | OK（5 个装配 + 12 个真 Update 端到端 + 2 个 HTML 守卫用例） |
+| **合计** | **309** | **OK（约 5.2s，无网络）** |
 
 端到端用例（`DispatcherTests`）用**真正的 `telegram.Update` + 记录型假 Bot** 跑 PTB 自己的
 `Application.process_update`，因此能抓到装配级事故：
 
 * `/start` 只渲染一次（兜底没有再执行一遍）；
-* `/status`、`nav|…` 是**原地编辑**同一条面板，不刷屏；
+* 点按钮触发的渲染**原地编辑同一条面板**（home / docker / litepan / cline 共用一条），命令触发时新发到最底部并删掉旧面板；
 * 全角 `／start`、代码块里粘出来的命令能被兜底救援；
-* 未启用模块留下的按钮会弹「该功能当前不可用」，而不是一直转圈。
+* 未启用模块留下的按钮会弹「该功能当前不可用」，而不是一直转圈；
+* 每个面板文案都要过一次 Telegram HTML 合法性校验（`tests/htmlcheck.py`）。
 
 装配期硬约束（`tests/test_integration.py` 自动断言）：
 
@@ -104,7 +105,7 @@ PYTHONPATH=./.vendor:. python3 -m mtbots --health                     # 真实�
 | ClinePass 的 `/status` 变为 `/c_status`（`/status` 现按模块解释） | `/quota` 仍可直接使用；在 Cline 模块内 `/status` 等价 |
 | LitePan 发现/回执未拆成独立开关（仍以「配了管理员账号」为整体条件） | 行为与旧版一致，未退化；见后续工作 |
 | LDMG 以**进程内模块**接入，而非设计稿建议的 sidecar + `docker-socket-proxy` | 单人自用可接受；已用 ACL 把 `docker` 限制在 owner/admin，并提供只读根 + 非 root + `no-new-privileges`。多用户建议补 socket-proxy |
-| 群里「回复某条面板消息定位上下文」未实现 | 单人私聊为主；面板仍是「一会话一模块一消息」 |
+| 群里「回复某条面板消息定位上下文」未实现 | 单人私聊为主；面板按会话唯一（home/docker/litepan/cline 共用一条） |
 
 ## 6. 有意偏差（施工中为了集成做的调整）
 
@@ -152,6 +153,18 @@ PYTHONPATH=./.vendor:. python3 -m mtbots --health                     # 真实�
 cp .env.example .env      # 填 MTBOTS_BOT_TOKEN 与 ALLOWED_USER_IDS
 python -m mtbots --check    # 先自检
 python -m mtbots            # 启动
-# 或
+# 或（镜像由 GitHub Actions 构建推 GHCR，公开可匿名拉，amd64 + arm64）
+DOCKER_GID=$(getent group docker | cut -d: -f3) docker compose up -d
+# 想就地构建就加 --build
 DOCKER_GID=$(getent group docker | cut -d: -f3) docker compose up -d --build
 ```
+
+## 10. 修复记录（v1.0.1，线上反馈驱动）
+
+首轮上线后收到三条反馈，全部已修并补了回归测试（309 个用例）：
+
+| 反馈 | 根因 | 修法 |
+|---|---|---|
+| 「第一次 `/start` 有效，后面再点就没反应」「🏠 返回 很多地方无效」 | 面板按 `(会话, 模块)` 各存一条：点「返回」改的是**另一条**消息（home 面板），而用户视线停在模块面板上；命令触发时也只编辑旧面板，旧面板却停在刚发出的命令**上方**，编辑了看不见 | ① `PanelManager` 改为**一会话一条消息**（`_panels: chat_id -> message_id`），返回/切模块都改用户正看的那条；② 命令触发的渲染新发到最底部并删掉旧面板；③ `global_error_handler` 补 `query.answer`，异常时按钮不再一直转圈 |
+| LitePan 报 `Can't parse entities: unsupported start tag "盘名"` | 文案里写了字面量 `<盘名>`、`<规则>`、`<事件>`，HTML 模式下被当成标签，整条消息被 Telegram 拒绝（`/id` 里的 `<DATA_DIR>`、Cline 的 `<{n}字符>` 同理） | ① 新增 `mtbots/bot.py::SafeBot`（`ExtBot` 子类，用 `Application.builder().bot(...)` 注入）：出站 HTML 一律先把白名单外的 `<` 转义，真解析失败再降级纯文本重发——模块漏 `esc()` 也不会整条挂掉；② 文案占位符改成全角 `〈盘名〉`；③ `tests/htmlcheck.py` + 集成用例把**每个面板文案**离线校验一遍 |
+| Docker「⚠️ 暂未检测到任何 Docker Compose 项目」，怀疑权限不够 | `scan_projects_sync` 里 `docker compose ls` 非 0 退出、以及「项目目录没挂进容器」两种情况都是**静默**返回 `[]` | `DockerState` 记录 `last_scan_error` / `hidden_dirs`，新增 `scan_hint()`：区分 permission denied（给 `DOCKER_GID` 修法）、连不上守护进程（挂 `/var/run/docker.sock`）、目录未挂载（按相同路径挂载），并在 `d_list` 面板与 `--health` 里显示 |
