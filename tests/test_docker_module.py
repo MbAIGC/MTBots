@@ -23,11 +23,13 @@ from mtbots.features.docker import MODULE, commands, help_text, id_lines, regist
 from mtbots.features.docker.compose import (
     DockerState,
     common_mount_root,
+    delete_message_quietly,
     filter_pull_noise,
     format_prune_snapshot,
     is_pull_noise,
     normalize_image_id,
     paginate_projects,
+    run_command_with_feedback,
     scan_hint,
     select_unused_images,
     socket_group_hint,
@@ -667,6 +669,96 @@ class ScanDiagnosticsTest(unittest.TestCase):
         self.assertEqual(state.last_scan_error, "")
         self.assertEqual(state.hidden_dirs, [])
         self.assertEqual(scan_hint(state), [])
+
+
+# ==================== 执行状态消息：成功可删、失败必留 ====================
+class _FakeStream:
+    def __init__(self, data: bytes):
+        self._data = data
+
+    async def read(self, _n: int = -1) -> bytes:
+        data, self._data = self._data, b""
+        return data
+
+
+class _FakeProcess:
+    def __init__(self, data: bytes = b"", returncode: int = 0):
+        self.stdout = _FakeStream(data)
+        self.returncode = returncode
+        self.pid = 4242
+
+    async def wait(self) -> int:
+        return self.returncode
+
+
+class _FakeStatusMessage:
+    """只记「编辑过什么、删没删」的执行消息替身（`reply_text` 返回自己）。"""
+
+    def __init__(self):
+        self.edits: list[str] = []
+        self.deleted = 0
+
+    async def reply_text(self, text: str, **kwargs):
+        self.edits.append(text)
+        return self
+
+    async def edit_text(self, text: str, **kwargs) -> None:
+        self.edits.append(text)
+
+    async def delete(self) -> None:
+        self.deleted += 1
+
+
+class CommandFeedbackTest(unittest.TestCase):
+    """`run_command_with_feedback` 的收尾策略：成功可删、失败必留。"""
+
+    def _run(self, returncode: int, *, delete_on_success: bool):
+        state = DockerState(DockerSettings())
+        msg = _FakeStatusMessage()
+        proc = _FakeProcess(b"Total reclaimed space: 1.2GB\n", returncode)
+        out: list[str] = []
+        with mock.patch(
+            "mtbots.features.docker.compose.asyncio.create_subprocess_exec",
+            new=mock.AsyncMock(return_value=proc),
+        ):
+            ok = asyncio.run(
+                run_command_with_feedback(
+                    state,
+                    msg,
+                    ["docker", "image", "prune", "-f"],
+                    title="清理系统镜像",
+                    delete_on_success=delete_on_success,
+                    out=out,
+                )
+            )
+        return ok, msg, out
+
+    def test_success_deletes_the_step_message(self):
+        ok, msg, out = self._run(0, delete_on_success=True)
+        self.assertTrue(ok)
+        self.assertEqual(msg.deleted, 1)
+        self.assertTrue(any("完成" in e for e in msg.edits), "先落成完成态，删不掉也不会留假进度")
+        self.assertIn("Total reclaimed space", "".join(out))
+
+    def test_success_keeps_the_step_message_by_default(self):
+        ok, msg, _out = self._run(0, delete_on_success=False)
+        self.assertTrue(ok)
+        self.assertEqual(msg.deleted, 0)
+        self.assertTrue(any("完成" in e for e in msg.edits))
+
+    def test_failure_never_deletes_the_step_message(self):
+        ok, msg, _out = self._run(1, delete_on_success=True)
+        self.assertFalse(ok)
+        self.assertEqual(msg.deleted, 0, "失败输出就是排错依据，必须留着")
+        self.assertTrue(any("失败" in e for e in msg.edits))
+
+    def test_delete_message_quietly_swallows_errors(self):
+        class _Boom:
+            async def delete(self):
+                raise RuntimeError("没有删消息权限")
+
+        self.assertFalse(asyncio.run(delete_message_quietly(_Boom())))
+        self.assertTrue(asyncio.run(delete_message_quietly(_FakeStatusMessage())))
 
 
 if __name__ == "__main__":

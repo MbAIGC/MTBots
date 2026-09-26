@@ -27,7 +27,7 @@ from telegram.ext import CallbackQueryHandler, CommandHandler, MessageHandler, f
 
 from ...core import Core, core_of
 from ...jobs import CANCELLED, DONE, FAILED
-from ...panels import cb_parts, cb_simple
+from ...panels import cb_parts, cb_simple, merge_keyboards, next_actions_keyboard
 from ...text import esc, humanize_delta
 from .client import TERMINAL_STATUSES, LitePanClient, LitePanError
 from .config import LitePanConfig, UserProfile
@@ -517,19 +517,23 @@ def _spawn_watch(ctx: _Ctx, rule_id: Any, rule_name: str, pre_base: int, client:
             rule_name,
             pre_base,
             client,
+            ctx.uid,
         )
     )
 
 
-def _actions_for(rule_id: Any, status: str) -> InlineKeyboardMarkup:
-    """回执卡片上的下一步按钮：失败去 Docker 升级，其余再跑一次。"""
+def _actions_for(rule_id: Any, status: str) -> Optional[InlineKeyboardMarkup]:
+    """回执卡片上「本模块」的动作。
+
+    只留跨模块那一行表达不了的动作（🔄 再跑一次）。失败时原来还有一个
+    「⬆️ 升级 LitePan 容器」，但它的 callback 其实就是 `nav|open|docker`——
+    和一行里的 🐳 按钮完全重复，标签还容易让人以为会直接升级，所以去掉。
+    """
     if status in ("failed", "error"):
-        button = InlineKeyboardButton("⬆️ 升级 LitePan 容器", callback_data="nav|open|docker")
-    else:
-        button = InlineKeyboardButton(
-            "🔄 再跑一次", callback_data=cb_simple("p", "run_rule", rule_id)
-        )
-    return InlineKeyboardMarkup([[button]])
+        return None
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("🔄 再跑一次", callback_data=cb_simple("p", "run_rule", rule_id))]]
+    )
 
 
 async def watch_run(
@@ -542,6 +546,7 @@ async def watch_run(
     rule_name: str,
     pre_base: int = 0,
     client: Optional[LitePanClient] = None,
+    user_id: Optional[int] = None,
 ) -> None:
     """异步版 `TelegramBot.watch_run`：等触发后新产生的运行并推回执（每个运行只回执一次）。
 
@@ -578,7 +583,9 @@ async def watch_run(
                 )
                 if job.running:
                     _finish(FAILED, detail)
-                await _announce(core, bot, chat_id, job, _actions_for(rule_id, "timeout"))
+                await _announce(
+                    core, bot, chat_id, job, _actions_for(rule_id, "timeout"), user_id
+                )
                 return
             try:
                 runs = await asyncio.to_thread(client.list_runs, rule_id, 5)
@@ -600,7 +607,7 @@ async def watch_run(
                 detail = render_result(rule_name, r)
                 if job.running:
                     _finish(DONE if status == "success" else FAILED, detail)
-                await _announce(core, bot, chat_id, job, _actions_for(rule_id, status))
+                await _announce(core, bot, chat_id, job, _actions_for(rule_id, status), user_id)
                 return
             try:
                 await asyncio.wait_for(stop.wait(), timeout=poll)
@@ -612,12 +619,22 @@ async def watch_run(
         raise
 
 
-async def _announce(core: Core, bot: Any, chat_id: int, job: Any, actions: Any) -> None:
+async def _announce(
+    core: Core,
+    bot: Any,
+    chat_id: int,
+    job: Any,
+    actions: Any,
+    user_id: Optional[int] = None,
+) -> None:
+    """后台回执卡片：本模块动作 + 一行跨模块入口（「本次操作只能留一条消息」不适用——
+    回执是几分钟后才到的异步结果，没有面板可改，所以按后台任务推卡片）。"""
     if bot is None:
         log.warning("没有 bot，跳过回执推送 job=%s", job.id)
         return
+    keyboard = merge_keyboards(actions, next_actions_keyboard(core, user_id, "litepan"))
     try:
-        await core.jobs.announce(bot, chat_id, job, actions=actions)
+        await core.jobs.announce(bot, chat_id, job, actions=keyboard)
     except Exception as exc:
         log.warning("回执推送失败 job=%s: %s", job.id, exc)
 

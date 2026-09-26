@@ -17,6 +17,12 @@ from .text import esc, humanize_delta, humanize_duration, progress_bar
 
 log = logging.getLogger("mtbots.jobs")
 
+MODULE_ICON = {
+    "docker": "🐳",
+    "litepan": "🎬",
+    "cline": "🤖",
+}
+
 STATUS_ICON = {
     "running": "⏳",
     "done": "✅",
@@ -29,6 +35,28 @@ DONE = "done"
 FAILED = "failed"
 CANCELLED = "cancelled"
 TERMINAL = (DONE, FAILED, CANCELLED)
+
+
+def card_text(job: "Job") -> str:
+    """任务收尾卡片的正文：第一行「状态 模块 标题 · 时间（耗时）」，第二行起是 detail。
+
+    **交互式任务**（有面板可改）把这段直接画在面板上，**后台任务**（没有面板上下文，
+    比如 LitePan 的回执轮询）用 :meth:`JobCenter.announce` 单发一条。两条路径共用同一份
+    文案，省得出现「面板写 🎉 升级成功、卡片写 ✅ 升级完成」这种各写一套的乱象。
+    """
+    icon = MODULE_ICON.get(job.module, "•")
+    mark = STATUS_ICON.get(job.status, "•")
+    when = time.strftime("%H:%M", time.localtime(job.finished_at or time.time()))
+    text = "%s %s <b>%s</b> · %s（%s）" % (
+        mark,
+        icon,
+        esc(job.title),
+        when,
+        humanize_duration(job.elapsed()),
+    )
+    if job.detail:
+        text += "\n%s" % esc(job.detail)
+    return text
 
 
 @dataclass
@@ -176,15 +204,14 @@ class JobCenter:
         return "\n".join(lines).strip()
 
     async def announce(self, bot, chat_id: int, job: Job, *, actions=None) -> None:
-        """长任务结束后推一条带模块标签的卡片（可带跨模块下一步按钮）。"""
+        """后台任务结束后推一条卡片（交互式任务请改用面板渲染 + :func:`card_text`）。
+
+        「交互式不推卡片、后台才推卡片」是合并后的统一规则：同一次操作只留一条消息，
+        否则用户升级一个项目会同时收到面板和卡片两份结论。
+        """
         from telegram.constants import ParseMode
 
-        icon = {"docker": "🐳", "litepan": "🎬", "cline": "🤖"}.get(job.module, "•")
-        mark = STATUS_ICON.get(job.status, "•")
-        when = time.strftime("%H:%M", time.localtime(job.finished_at or time.time()))
-        text = "%s %s <b>%s</b> · %s（%s）" % (mark, icon, esc(job.title), when, humanize_duration(job.elapsed()))
-        if job.detail:
-            text += "\n%s" % esc(job.detail)
+        text = card_text(job)
         try:
             await bot.send_message(chat_id, text, parse_mode=ParseMode.HTML, reply_markup=actions)
         except Exception as exc:  # 推送失败不影响任务本身

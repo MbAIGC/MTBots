@@ -155,6 +155,14 @@ class PanelManager:
         """两步确认面板：[✅ 确认]=confirm_data、[❌ 取消]=cancel_data|'nav|home'；
         登记 (confirm_data -> (发起人 uid, 截止 monotonic))。"""
 
+def next_actions_keyboard(core: Core, user_id: int | None, current: str | None = None, *,
+                          limit: int = NEXT_ACTIONS_LIMIT) -> InlineKeyboardMarkup | None:
+    """收尾面上的「下一步」一行：其他**已启用且有权限**的模块 + 🧰 任务中心；
+    当前模块不重复给按钮，超过 limit（默认 3）个按钮整体返回 None（调用方退回 🏠 返回）。"""
+
+def merge_keyboards(*markups: InlineKeyboardMarkup | None) -> InlineKeyboardMarkup | None:
+    """按顺序拼键盘（None 跳过），全空返回 None；「本模块动作 + 跨模块入口」用它拼。"""
+
     def validate_confirm(self, query: CallbackQuery, data: str) -> tuple[bool, str]:
         """消费确认令牌并校验「本人 + 未过期」；返回 (ok, 失败提示文案)。"""
 
@@ -201,10 +209,20 @@ class JobCenter:
     def render(self, icons: dict[str, str]) -> str: ...           # /jobs 面板正文
     async def announce(self, bot: Bot, chat_id: int, job: Job, *,
                        actions: InlineKeyboardMarkup | None = None) -> None:
-        """长任务跑完推一条带模块标签的卡片（含跨模块下一步按钮）。"""
+        """只给**后台任务**推卡片（正文与面板收尾共用 `card_text(job)`）。"""
+
+def card_text(job: Job) -> str:
+    """收尾文案唯一来源：`✅ 🐳 <b>标题</b> · 18:22（46 秒）` + 转义后的 detail。"""
 ```
 
 长任务（docker 升级/清理、litepan 回执轮询）必须注册 Job；完成推送带 `🐳/🎬/🤖` 标签。
+
+**收尾规则（一次操作一条消息）**：有面板的**交互式**任务不要 `announce()`，用
+`panels.render(module_id, update, _done_text(job), …)` 把 `card_text(job)` 画在面板上——
+否则同一个结果会播报两遍（线上 v1.0.4 修的就是这个）。只有拿不到面板上下文的**后台**任务
+（如 LitePan 回执轮询）才 `announce()`。收尾键盘用 `panels.next_actions_keyboard(core, user_id, current)`
+给一行跨模块入口（超过 3 个按钮返回 `None`，退回只有 `🏠 返回`）。执行类步骤消息用
+`run_command_with_feedback(..., delete_on_success=True)`：成功先改成完成态再删，失败/取消/超时保留。
 
 ## 6. 命令菜单（`mtbots/menu.py`）
 

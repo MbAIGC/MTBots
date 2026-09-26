@@ -18,8 +18,16 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
 
 from ...core import Core, core_of
-from ...jobs import CANCELLED, DONE, FAILED, Job
-from ...panels import cb, cb_args, cb_parse, cb_parts, cb_simple, nav_jobs, nav_open
+from ...jobs import CANCELLED, DONE, FAILED, Job, card_text
+from ...panels import (
+    cb,
+    cb_args,
+    cb_parse,
+    cb_parts,
+    cb_simple,
+    nav_jobs,
+    next_actions_keyboard,
+)
 from ...text import esc
 from .compose import (
     DockerState,
@@ -155,25 +163,30 @@ def _progress(core: Core, job: Job):
     return _on_progress
 
 
-def _next_actions(core: Core, user_id: Optional[int]) -> Optional[InlineKeyboardMarkup]:
-    """任务完成卡片上的下一步（有权限才给跨模块按钮）。"""
-    rows: list[list[InlineKeyboardButton]] = []
-    if core.has("litepan") and core.acl.can(user_id, "litepan"):
-        rows.append(
-            [InlineKeyboardButton("🎬 重跑 LitePan 刷新", callback_data=nav_open("litepan"))]
-        )
-    rows.append([InlineKeyboardButton("🧰 任务中心", callback_data=nav_jobs())])
-    return InlineKeyboardMarkup(rows)
-
-
-async def _announce_job(core: Core, update: Update, context: Any, job: Job) -> None:
-    """长任务跑完推一条卡片（跨模块下一步按权限给）。"""
-    chat_id = _chat_id(update)
-    if chat_id is None:
-        return
+def _user_id(update: Update) -> Optional[int]:
     user = update.effective_user
-    actions = _next_actions(core, user.id if user is not None else None)
-    await core.jobs.announce(context.bot, chat_id, job, actions=actions)
+    return user.id if user is not None else None
+
+
+def _done_text(job: Job, extra: str = "") -> str:
+    """收尾面板的正文：统一的完成卡片行 +（可选）本流程自己的明细。
+
+    合并后统一成「一次操作一条消息」：交互式任务不再另发「✅ 🐳 升级项目 mt」卡片，
+    结果直接画在这条面板上，`card_text()` 保证三个模块的收尾长得一样。
+    """
+    text = card_text(job)
+    if extra:
+        text += "\n" + extra.rstrip()
+    return text
+
+
+def _finish_keyboard(core: Core, user_id: Optional[int], page: int = 1) -> InlineKeyboardMarkup:
+    """收尾键盘：「🔙 返回列表」+ 一行跨模块入口；排不下就只剩面板补的 🏠 返回。"""
+    rows = [[InlineKeyboardButton("🔙 返回列表", callback_data=cb_simple("d", "page_turn", page))]]
+    extra = next_actions_keyboard(core, user_id, "docker")
+    if extra is not None:
+        rows.extend(extra.inline_keyboard)
+    return InlineKeyboardMarkup(rows)
 
 
 async def _busy(core: Core, update: Update) -> None:
@@ -454,7 +467,7 @@ async def _do_upgrade_project(
         cancel=state.request_cancel,
         chat_id=_chat_id(update),
     )
-    status, detail, text = FAILED, "未执行", ""
+    status, detail = FAILED, "未执行"
 
     try:
         await _answer(update)
@@ -462,11 +475,9 @@ async def _do_upgrade_project(
         target = next((p for p in projects if p.get("name") == project_name), None)
 
         if target is None:
-            status, detail = FAILED, "找不到项目 %s" % project_name
-            text = "❌ 找不到对应项目: <code>%s</code>" % esc(project_name)
+            status, detail = FAILED, "找不到项目 %s（可能已删除或改名，/d_list 可刷新）" % project_name
         elif not await asyncio.to_thread(state.get_compose_bin):
             status, detail = FAILED, "未检测到 docker compose / docker-compose 命令"
-            text = "❌ 未检测到 docker compose / docker-compose 命令"
         else:
             safe_name = esc(target["name"])
             await core.panels.render(
@@ -486,6 +497,7 @@ async def _do_upgrade_project(
                 progress_pct=30,
                 task_id=task_id,
                 on_progress=_progress(core, job),
+                delete_on_success=True,
             )
             up_ok = False
             if pull_ok and not state.cancel_requested:
@@ -504,31 +516,26 @@ async def _do_upgrade_project(
                     progress_pct=80,
                     task_id=task_id,
                     on_progress=_progress(core, job),
+                    delete_on_success=True,
                 )
 
             if state.cancel_requested:
                 status, detail = CANCELLED, "已按用户请求取消"
-                text = "🛑 <b>项目 %s 的升级已取消</b>" % safe_name
             elif pull_ok and up_ok:
                 status, detail = DONE, "项目整体升级完成"
-                text = "🎉 项目 <b>%s</b> 整体升级成功！" % safe_name
             else:
-                status, detail = FAILED, "拉取镜像或重建启动失败"
-                text = "❌ 项目 <b>%s</b> 升级失败（详见执行消息）" % safe_name
+                status, detail = FAILED, "拉取镜像或重建启动失败（详情见上面的执行消息）"
     except Exception as exc:
         log.exception("升级项目 %s 异常", project_name)
         status, detail = FAILED, "执行异常：%s" % exc
-        text = "❌ 升级项目 <b>%s</b> 时发生异常：<code>%s</code>" % (
-            esc(project_name),
-            esc(str(exc)),
-        )
     finally:
         state.invalidate_cache()
         state.end_task()
         core.jobs.finish(job, status, detail)
 
-    await core.panels.render("docker", update, text, _back_keyboard())
-    await _announce_job(core, update, context, job)
+    await core.panels.render(
+        "docker", update, _done_text(job), _finish_keyboard(core, _user_id(update))
+    )
 
 
 async def _do_upgrade_service(
@@ -550,7 +557,7 @@ async def _do_upgrade_service(
         cancel=state.request_cancel,
         chat_id=_chat_id(update),
     )
-    status, detail, text = FAILED, "未执行", ""
+    status, detail = FAILED, "未执行"
 
     try:
         await _answer(update)
@@ -558,17 +565,11 @@ async def _do_upgrade_service(
         target = next((p for p in projects if p.get("name") == project_name), None)
 
         if target is None:
-            status, detail = FAILED, "未找到项目 %s" % project_name
-            text = "❌ 未找到项目: <code>%s</code>" % esc(project_name)
+            status, detail = FAILED, "未找到项目 %s（/d_list 可刷新）" % project_name
         elif service_name not in list(target.get("services") or []):
-            status, detail = FAILED, "项目中没有服务 %s" % service_name
-            text = "❌ 项目 <b>%s</b> 中不存在服务 <code>%s</code>" % (
-                esc(project_name),
-                esc(service_name),
-            )
+            status, detail = FAILED, "项目 %s 中没有服务 %s" % (project_name, service_name)
         elif not await asyncio.to_thread(state.get_compose_bin):
             status, detail = FAILED, "未检测到 docker compose / docker-compose 命令"
-            text = "❌ 未检测到 docker compose / docker-compose 命令"
         else:
             safe_project = esc(target["name"])
             safe_service = esc(service_name)
@@ -590,6 +591,7 @@ async def _do_upgrade_service(
                 progress_pct=30,
                 task_id=task_id,
                 on_progress=_progress(core, job),
+                delete_on_success=True,
             )
             up_ok = False
             if pull_ok and not state.cancel_requested:
@@ -609,31 +611,26 @@ async def _do_upgrade_service(
                     progress_pct=80,
                     task_id=task_id,
                     on_progress=_progress(core, job),
+                    delete_on_success=True,
                 )
 
             if state.cancel_requested:
                 status, detail = CANCELLED, "已按用户请求取消"
-                text = "🛑 <b>服务 %s 的升级已取消</b>" % safe_service
             elif pull_ok and up_ok:
                 status, detail = DONE, "服务升级完成"
-                text = "🎉 服务 <code>%s</code> 升级成功！" % safe_service
             else:
-                status, detail = FAILED, "拉取镜像或重建启动失败"
-                text = "❌ 服务 <code>%s</code> 升级失败（详见执行消息）" % safe_service
+                status, detail = FAILED, "拉取镜像或重建启动失败（详情见上面的执行消息）"
     except Exception as exc:
         log.exception("升级服务 %s/%s 异常", project_name, service_name)
         status, detail = FAILED, "执行异常：%s" % exc
-        text = "❌ 升级服务 <code>%s</code> 时发生异常：<code>%s</code>" % (
-            esc(service_name),
-            esc(str(exc)),
-        )
     finally:
         state.invalidate_cache()
         state.end_task()
         core.jobs.finish(job, status, detail)
 
-    await core.panels.render("docker", update, text, _back_keyboard())
-    await _announce_job(core, update, context, job)
+    await core.panels.render(
+        "docker", update, _done_text(job), _finish_keyboard(core, _user_id(update))
+    )
 
 
 async def _do_upgrade_all(core: Core, update: Update, context: Any) -> None:
@@ -653,17 +650,17 @@ async def _do_upgrade_all(core: Core, update: Update, context: Any) -> None:
         cancel=state.request_cancel,
         chat_id=_chat_id(update),
     )
-    status, detail, text = FAILED, "未执行", ""
+    status, detail = FAILED, "未执行"
+    extra = ""
 
     try:
         await _answer(update)
         projects = sort_projects_for_display(await state.get_projects())
 
         if not projects:
-            status, detail, text = FAILED, "未检测到可升级的项目", "⚠️ 未检测到可升级的项目"
+            status, detail = FAILED, "未检测到可升级的项目"
         elif not await asyncio.to_thread(state.get_compose_bin):
             status, detail = FAILED, "未检测到 docker compose / docker-compose 命令"
-            text = "❌ 未检测到 docker compose / docker-compose 命令"
         else:
             await core.panels.render(
                 "docker",
@@ -693,6 +690,7 @@ async def _do_upgrade_all(core: Core, update: Update, context: Any) -> None:
                     progress_pct=pct,
                     task_id=task_id,
                     on_progress=_progress(core, job),
+                    delete_on_success=True,
                 )
                 up_ok = False
                 if pull_ok and not state.cancel_requested:
@@ -705,49 +703,42 @@ async def _do_upgrade_all(core: Core, update: Update, context: Any) -> None:
                         progress_pct=pct,
                         task_id=task_id,
                         on_progress=_progress(core, job),
+                        delete_on_success=True,
                     )
                 if pull_ok and up_ok:
                     success_list.append(project["name"])
                 else:
                     fail_list.append(project["name"])
 
-            if aborted:
-                summary = "🛑 <b>批量升级已中止</b>（剩余 %d 个项目未处理）\n" % (
-                    len(projects) - processed
-                )
-                status = CANCELLED
-                detail = "已中止（剩余 %d 个项目）" % (len(projects) - processed)
-            else:
-                summary = "🏁 <b>批量升级任务完成</b>\n"
-                if not success_list:
-                    status, detail = FAILED, "全部项目升级失败"
-                elif fail_list:
-                    status = DONE
-                    detail = "成功 %d / 失败 %d" % (len(success_list), len(fail_list))
-                else:
-                    status, detail = DONE, "全部 %d 个项目升级完成" % len(success_list)
-
-            summary += "───────────────────────────\n"
-            summary += "✅ <b>成功 (%d)：</b> %s\n" % (
+            # 批量升级的结论写在卡片行里，这里只补「谁成谁败」的明细
+            extra = "✅ <b>成功 (%d)：</b> %s\n❌ <b>失败 (%d)：</b> %s" % (
                 len(success_list),
                 esc(", ".join(success_list)) if success_list else "无",
-            )
-            summary += "❌ <b>失败 (%d)：</b> %s" % (
                 len(fail_list),
                 esc(", ".join(fail_list)) if fail_list else "无",
             )
-            text = summary
+            if aborted:
+                status = CANCELLED
+                detail = "已中止（剩余 %d 个项目）" % (len(projects) - processed)
+                extra = "剩余 %d 个项目未处理\n%s" % (len(projects) - processed, extra)
+            elif not success_list:
+                status, detail = FAILED, "全部项目升级失败"
+            elif fail_list:
+                status = DONE
+                detail = "成功 %d / 失败 %d" % (len(success_list), len(fail_list))
+            else:
+                status, detail = DONE, "全部 %d 个项目升级完成" % len(success_list)
     except Exception as exc:
         log.exception("批量升级异常")
         status, detail = FAILED, "执行异常：%s" % exc
-        text = "❌ 批量升级时发生异常：<code>%s</code>" % esc(str(exc))
     finally:
         state.invalidate_cache()
         state.end_task()
         core.jobs.finish(job, status, detail)
 
-    await core.panels.render("docker", update, text, _back_keyboard())
-    await _announce_job(core, update, context, job)
+    await core.panels.render(
+        "docker", update, _done_text(job, extra), _finish_keyboard(core, _user_id(update))
+    )
 
 
 # ==================== 镜像清理 ====================
@@ -856,7 +847,8 @@ async def _do_prune(core: Core, update: Update, context: Any, prune_all: bool) -
         cancel=state.request_cancel,
         chat_id=_chat_id(update),
     )
-    status, detail, text = FAILED, "未执行", ""
+    status, detail = FAILED, "未执行"
+    extra = ""
 
     try:
         await _answer(update)
@@ -867,6 +859,7 @@ async def _do_prune(core: Core, update: Update, context: Any, prune_all: bool) -
         if prune_all:
             cmd.append("-a")
 
+        captured: list[str] = []
         success = await run_command_with_feedback(
             state,
             update.effective_message,
@@ -875,27 +868,37 @@ async def _do_prune(core: Core, update: Update, context: Any, prune_all: bool) -
             progress_pct=90,
             task_id=task_id,
             on_progress=_progress(core, job),
+            delete_on_success=True,
+            out=captured,
         )
         if success:
             state.invalidate_cache()
             status, detail = DONE, "%s镜像清理完成" % label
-            text = "✅ <b>%s镜像清理完成</b>" % label
+            # 执行消息会被删掉，把回收空间这条结论抄进收尾面板
+            reclaimed = next(
+                (
+                    line.strip()
+                    for line in "".join(captured).splitlines()
+                    if "reclaimed space" in line.lower()
+                ),
+                "",
+            )
+            if reclaimed:
+                extra = esc(reclaimed)
         elif state.cancel_requested:
             status, detail = CANCELLED, "已按用户请求取消"
-            text = "🛑 <b>%s镜像清理已取消</b>" % label
         else:
-            status, detail = FAILED, "%s镜像清理失败" % label
-            text = "❌ <b>%s镜像清理失败</b>" % label
+            status, detail = FAILED, "%s镜像清理失败（详情见上面的执行消息）" % label
     except Exception as exc:
         log.exception("镜像清理异常")
         status, detail = FAILED, "执行异常：%s" % exc
-        text = "❌ 镜像清理时发生异常：<code>%s</code>" % esc(str(exc))
     finally:
         state.end_task()
         core.jobs.finish(job, status, detail)
 
-    await core.panels.render("docker", update, text, _back_keyboard())
-    await _announce_job(core, update, context, job)
+    await core.panels.render(
+        "docker", update, _done_text(job, extra), _finish_keyboard(core, _user_id(update))
+    )
 
 
 # ==================== 容器状态速览 ====================

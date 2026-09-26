@@ -21,9 +21,18 @@ from mtbots import text as textmod
 from mtbots.acl import ACL
 from mtbots.bot import SafeBot
 from mtbots.config import Settings
-from mtbots.jobs import DONE, JobCenter
+from mtbots.jobs import DONE, JobCenter, card_text
 from mtbots.menu import MenuManager
-from mtbots.panels import PanelManager, cb, cb_parse, nav_home, nav_open
+from mtbots.panels import (
+    PanelManager,
+    cb,
+    cb_parse,
+    merge_keyboards,
+    nav_home,
+    nav_jobs,
+    nav_open,
+    next_actions_keyboard,
+)
 from mtbots.store import JsonStore, StoreError, atomic_write_json
 from tests.fakes import (
     FAKE_TOKEN,
@@ -524,6 +533,105 @@ class RouterTests(unittest.TestCase):
         allowed = asyncio.run(self.router.ensure_allowed(self.core, self._update()))
         self.assertFalse(allowed)
         self.assertIn("白名单", self.bot.sent[-1].text)
+
+
+def _register_module(core, module_id: str, title: str, icon: str) -> None:
+    """注册一个只有外观信息的模块，专门用来验「跨模块入口」的取舍。"""
+    from mtbots.core import ModuleSpec
+
+    core.register(
+        ModuleSpec(
+            id=module_id,
+            icon=icon,
+            title=title,
+            description="测试用",
+            callback_prefix="x",
+            register=lambda app, c: None,
+            commands=lambda c, uid: [],
+            summary=lambda c, uid: "",
+            help_text=lambda c, uid: "",
+            open_panel=None,
+            show_status=None,
+            show_list=None,
+        )
+    )
+
+
+class NextActionsTests(unittest.TestCase):
+    """收尾面上的「下一步」一行：三个 Bot 合并后，任务跑完要能顺手跳到另一条线。"""
+
+    def _core_with_three(self):
+        core = make_core()
+        _register_module(core, "docker", "Docker 管理", "🐳")
+        _register_module(core, "litepan", "LitePan 联动", "🎬")
+        _register_module(core, "cline", "Cline 额度", "🤖")
+        return core
+
+    def test_lists_other_modules_and_jobs_in_one_row(self):
+        core = self._core_with_three()
+        markup = next_actions_keyboard(core, 123456789, "docker")
+        callbacks = [b.callback_data for row in markup.inline_keyboard for b in row]
+        labels = [b.text for row in markup.inline_keyboard for b in row]
+        self.assertEqual(len(markup.inline_keyboard), 1, "跨模块入口只占一行")
+        self.assertEqual(callbacks, [nav_open("litepan"), nav_open("cline"), nav_jobs()])
+        self.assertEqual(labels, ["🎬 LitePan", "🤖 Cline", "🧰 任务中心"])
+        self.assertNotIn(nav_open("docker"), callbacks, "当前模块不用再给一个按钮")
+
+    def test_disabled_modules_are_not_offered(self):
+        core = make_core()
+        _register_module(core, "docker", "Docker 管理", "🐳")
+        _register_module(core, "litepan", "LitePan 联动", "🎬")
+        markup = next_actions_keyboard(core, 123456789, "docker")
+        callbacks = [b.callback_data for row in markup.inline_keyboard for b in row]
+        self.assertEqual(callbacks, [nav_open("litepan"), nav_jobs()])
+
+    def test_acl_blocks_modules_without_permission(self):
+        core = self._core_with_three()
+        core.acl = ACL([999999])
+        markup = next_actions_keyboard(core, 123456789, "docker")
+        callbacks = [b.callback_data for row in markup.inline_keyboard for b in row]
+        self.assertEqual(callbacks, [nav_jobs()], "没权限的模块一个都不给")
+        unknown = next_actions_keyboard(core, None, "docker")
+        self.assertEqual(
+            [b.callback_data for row in unknown.inline_keyboard for b in row],
+            [nav_jobs()],
+            "认不出用户就按默认拒绝处理",
+        )
+
+    def test_too_many_buttons_falls_back_to_none(self):
+        core = self._core_with_three()
+        self.assertIsNone(next_actions_keyboard(core, 123456789, "docker", limit=2))
+
+    def test_merge_keyboards_skips_none(self):
+        core = self._core_with_three()
+        base = InlineKeyboardMarkup([[InlineKeyboardButton("🔄 再跑一次", callback_data="p|x")]])
+        merged = merge_keyboards(base, None, next_actions_keyboard(core, 123456789, "litepan"))
+        self.assertEqual(len(merged.inline_keyboard), 2)
+        self.assertEqual(merged.inline_keyboard[0][0].callback_data, "p|x")
+        self.assertIsNone(merge_keyboards(None, None))
+
+
+class JobCardTests(unittest.TestCase):
+    """任务收尾卡片文案：交互式面板和后台推送共用同一份，避免两边各写一套。"""
+
+    def test_card_text_carries_status_module_title_and_detail(self):
+        core = make_core()
+        job = core.jobs.add("docker", "升级项目 mt", chat_id=1)
+        core.jobs.finish(job, DONE, "项目整体升级完成")
+        text = card_text(job)
+        self.assertIn("✅", text)
+        self.assertIn("🐳", text)
+        self.assertIn("升级项目 mt", text)
+        self.assertIn("项目整体升级完成", text)
+
+    def test_card_text_escapes_title_and_detail(self):
+        core = make_core()
+        job = core.jobs.add("litepan", "规则 <x>", chat_id=1)
+        core.jobs.finish(job, "failed", "失败 <b>原因</b>")
+        text = card_text(job)
+        self.assertIn("❌", text)
+        self.assertNotIn("<b>原因</b>", text)
+        self.assertIn("&lt;b&gt;原因&lt;/b&gt;", text)
 
 
 class SafeBotTests(unittest.IsolatedAsyncioTestCase):

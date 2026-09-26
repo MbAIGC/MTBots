@@ -118,6 +118,60 @@ def job_cancel(job_id: str) -> str:
 
 BACK_LABEL = "🏠 返回"
 
+#: 完成面上「下一步」一行最多放几个按钮（放不下就整体不显示，退回只有 🏠 返回）
+NEXT_ACTIONS_LIMIT = 3
+
+
+def merge_keyboards(*markups: Optional[InlineKeyboardMarkup]) -> Optional[InlineKeyboardMarkup]:
+    """把几个键盘按顺序拼成一个（`None` 直接跳过）；全空则返回 `None`。
+
+    收尾面既要给本模块的动作（🔄 再跑一次），又要给一行跨模块入口，分成两个来源拼起来最省事。
+    """
+    rows: list[list[InlineKeyboardButton]] = []
+    for markup in markups:
+        if markup is not None:
+            rows.extend(list(row) for row in markup.inline_keyboard)
+    return InlineKeyboardMarkup(rows) if rows else None
+
+
+def next_actions_keyboard(
+    core: Any,
+    user_id: Optional[int],
+    current: Optional[str] = None,
+    *,
+    limit: int = NEXT_ACTIONS_LIMIT,
+) -> Optional[InlineKeyboardMarkup]:
+    """长任务收尾时的一行「下一步」：其他模块 + 🧰 任务中心。
+
+    合并后三个 Bot 共用一个面板，任务跑完顺手跳到另一条线是最常走的路，所以收尾面上
+    直接给按钮，而不是让用户先 🏠 返回 再找。规则：
+
+    * 只列**已启用**且**本人有权限**的模块，当前模块除外（面板就在眼前，再给一个按钮没意义）；
+    * 一行塞不下（> `limit` 个）就返回 ``None``，调用方退回只有 🏠 返回 的键盘——
+      宁可少给按钮，也不让键盘挤成两行乱糟糟的。
+    """
+    if core is None:
+        return None
+    icons = core.icons()
+    titles = core.titles()
+    buttons: list[InlineKeyboardButton] = []
+    for module_id in core.module_ids():
+        if module_id == current:
+            continue
+        if not core.can(user_id, module_id):  # 认不出用户就当没权限（默认拒绝）
+            continue
+        title = (titles.get(module_id) or module_id).split()[0]
+        buttons.append(
+            InlineKeyboardButton(
+                "%s %s" % (icons.get(module_id, "•"), title),
+                callback_data=nav_open(module_id),
+            )
+        )
+    buttons.append(InlineKeyboardButton("🧰 任务中心", callback_data=nav_jobs()))
+    if len(buttons) > limit:
+        return None
+    return InlineKeyboardMarkup([buttons])
+
 
 # ==================== 面板管理 ====================
 class PanelManager:
@@ -369,6 +423,9 @@ __all__ = [
     "nav_help",
     "job_cancel",
     "BACK_LABEL",
+    "NEXT_ACTIONS_LIMIT",
+    "merge_keyboards",
+    "next_actions_keyboard",
     "PREFIX_DOCKER",
     "PREFIX_LITEPAN",
     "PREFIX_CLINE",

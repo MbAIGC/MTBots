@@ -160,6 +160,16 @@ async def edit_html_safe(message: Any, html_text: str, fallback: Optional[str] =
             return False
 
 
+async def delete_message_quietly(message: Any) -> bool:
+    """删掉一条已经没用的执行消息；删不掉就算了（群里没删消息权限、消息超过 48 小时都会失败）。"""
+    try:
+        await message.delete()
+        return True
+    except Exception as exc:
+        log.debug("删除执行消息失败（忽略）：%s", exc)
+        return False
+
+
 # ==================== 全局状态 ====================
 class DockerState:
     """LDMG 全部可变全局状态的宿主（每个 register() 建一个）。"""
@@ -629,10 +639,19 @@ async def run_command_with_feedback(
     progress_pct: int = 50,
     task_id: Optional[str] = None,
     on_progress: Optional[ProgressCallback] = None,
+    delete_on_success: bool = False,
+    out: Optional[list[str]] = None,
 ) -> bool:
     """执行一条 compose / docker 命令，并把逐层进度原地刷新到同一条状态消息上。
 
     最终消息只保留关键结果行（过滤 pull 的逐层噪音），HTML 编辑失败自动降级纯文本。
+
+    `delete_on_success=True` 时，命令**成功**后把这条执行消息删掉：多步任务里每一步的
+    「✅ 拉取新镜像 - mt 完成」只是过程，留一串会盖住面板的结论。失败/取消/超时一律保留，
+    因为那几条输出就是排错依据（先改成「❌ 失败」再删，删不掉也不会留个假进度）。
+
+    `out` 是可选的结果回传（列表尾插一条过滤后的输出），给「删掉执行消息但结论还得留着」
+    的场景用，例如镜像清理要把 `Total reclaimed space` 抄进收尾面板。
     """
     start_time = time.time()
     safe_title = esc(title)
@@ -732,6 +751,8 @@ async def run_command_with_feedback(
         elapsed = round(time.time() - start_time, 1)
         # 最终消息只保留关键结果行，过滤逐层进度噪音
         full_output = "\n".join(filter_pull_noise(list(output_lines)[-FINAL_LINES:]))
+        if out is not None:
+            out.append(full_output)
         safe_full_output = esc(full_output[-PREVIEW_CHARS:])
 
         if state.cancel_requested:
@@ -748,6 +769,8 @@ async def run_command_with_feedback(
                 "✅ <b>%s 完成</b> [%s]\n⏱ <b>总耗时：</b>%ss\n<code>%s</code>"
                 % (safe_title, progress_bar(100), elapsed, safe_full_output),
             )
+            if delete_on_success:
+                await delete_message_quietly(status_msg)
             return True
 
         await edit_html_safe(
@@ -784,6 +807,7 @@ __all__ = [
     "DockerState",
     "ProgressCallback",
     "PULL_FINAL_NOISE_RE",
+    "delete_message_quietly",
     "edit_html_safe",
     "dump_container_status",
     "filter_pull_noise",

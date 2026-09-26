@@ -287,6 +287,66 @@ class DispatcherTests(unittest.TestCase):
         self.assertNotIn("模块可能已下线", joined)
 
 
+class FinishFlowTests(unittest.TestCase):
+    """收尾只留一条消息：交互式长任务的结论画在面板上，不再另发「✅ 🐳」卡片。
+
+    升级一个项目以前会留下四条消息：面板、`✅ 拉取新镜像 - mt 完成`、
+    `✅ 重建与启动 - mt 完成`、完成卡片。现在两步执行消息成功即删，结论合并进面板。
+    """
+
+    def _run_bulk_upgrade(self, extra_modules=()):
+        import asyncio
+
+        from mtbots.features.docker import handlers as docker_handlers
+        from tests.fakes import add_fake_module
+
+        app, core, bot = make_recording_app(modules="docker")
+        for module_id in extra_modules:
+            add_fake_module(core, module_id)
+        state = core.data["docker"]
+        state.compose_bin = ["docker", "compose"]  # 不依赖宿主真的装了 docker
+        update = real_update(bot, data="d|upgrade_all_confirm|tok")
+
+        calls: list[dict] = []
+
+        async def fake_run(_state, _message, _cmd, **kwargs):
+            calls.append(kwargs)
+            return True
+
+        with mock.patch.object(docker_handlers, "run_command_with_feedback", new=fake_run):
+            asyncio.run(docker_handlers._do_upgrade_all(core, update, None))
+        return core, bot, calls
+
+    def test_bulk_upgrade_finishes_on_the_panel_only(self):
+        _core, bot, calls = self._run_bulk_upgrade()
+
+        self.assertEqual(len(bot.rec["sent"]), 1, "只发面板这一条，不再推完成卡片")
+        self.assertEqual(len(bot.rec["edits"]), 1, "收尾就是把面板改成完成态")
+        final = bot.rec["edits"][-1]
+        self.assertIn("✅ 🐳 <b>批量升级全部项目</b>", final, "完成卡片那行画在面板上")
+        self.assertIn("全部 2 个项目升级完成", final)
+        self.assertIn("成功 (2)", final)
+        assert_html_valid(self, final)
+
+        self.assertTrue(calls, "两条命令都跑过")
+        self.assertTrue(all(c.get("delete_on_success") for c in calls), "执行消息成功即删")
+
+        markup = bot.rec["edit_kwargs"][-1]["reply_markup"]
+        labels = [b.text for row in markup.inline_keyboard for b in row]
+        self.assertIn("🔙 返回列表", labels)
+        self.assertIn("🧰 任务中心", labels)
+        self.assertIn("🏠 返回", labels)
+
+    def test_next_actions_row_lists_other_modules(self):
+        _core, bot, _calls = self._run_bulk_upgrade(extra_modules=("litepan", "cline"))
+        markup = bot.rec["edit_kwargs"][-1]["reply_markup"]
+        callbacks = [b.callback_data for row in markup.inline_keyboard for b in row]
+        self.assertIn("nav|open|litepan", callbacks)
+        self.assertIn("nav|open|cline", callbacks)
+        self.assertIn("nav|jobs", callbacks)
+        self.assertNotIn("nav|open|docker", callbacks, "当前模块不再重复给按钮")
+
+
 class HtmlGuardTests(unittest.TestCase):
     """守卫本身也要有守卫：确认它能抓到线上那次 `<盘名>` 事故。"""
 

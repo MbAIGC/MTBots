@@ -31,6 +31,7 @@ from tests.fakes import (
     FakeQuery,
     FakeUpdate,
     FakeUser,
+    add_fake_module,
     make_core,
 )
 
@@ -704,6 +705,12 @@ class PanelIntegrationTests(unittest.TestCase):
         self.assertIn("p|run_rule|1", callbacks)
 
     def test_failed_run_offers_docker_upgrade(self):
+        """失败回执要给「去 Docker」的入口。
+
+        本模块不再硬编一个假按钮（那个「⬆️ 升级 LitePan 容器」的 callback 其实就是打开
+        Docker 面板），改由跨模块那一行按「已启用 + 有权限」自动列出 🐳。
+        """
+        add_fake_module(self.core, "docker")
         runs = [{"id": 9, "status": "failed", "message": "boom", "result": {}}]
         discovery, client_cls = make_fake_discovery(runs=runs)
         patch_a, patch_b = self._patches(discovery, client_cls)
@@ -721,6 +728,8 @@ class PanelIntegrationTests(unittest.TestCase):
         markup = self.bot.sent[-1].kwargs["reply_markup"]
         callbacks = [b.callback_data for row in markup.inline_keyboard for b in row]
         self.assertIn("nav|open|docker", callbacks)
+        self.assertIn("nav|jobs", callbacks)
+        self.assertNotIn("p|run_rule|1", callbacks, "失败时不给「再跑一次」")
 
     def test_unbound_chat_gets_explicit_message(self):
         discovery, client_cls = make_fake_discovery()

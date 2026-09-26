@@ -211,8 +211,8 @@ class RecordingBot(Bot):
         object.__setattr__(
             self,
             "_rec",
-            {"sent": [], "edits": [], "deleted": [], "commands": [], "answers": [],
-             "deleted_commands": [], "actions": []},
+            {"sent": [], "edits": [], "edit_kwargs": [], "deleted": [], "commands": [],
+             "answers": [], "deleted_commands": [], "actions": []},
         )
         self._bot_user = User(id=999, first_name="FakeBot", is_bot=True, username="fakebot")
 
@@ -243,6 +243,7 @@ class RecordingBot(Bot):
 
     async def edit_message_text(self, text: str = None, chat_id: int = None, message_id: int = None, **kwargs: Any) -> bool:
         self.rec["edits"].append(text)
+        self.rec["edit_kwargs"].append(kwargs)
         return True
 
     async def edit_message_reply_markup(self, chat_id: int = None, message_id: int = None, **kwargs: Any) -> bool:
