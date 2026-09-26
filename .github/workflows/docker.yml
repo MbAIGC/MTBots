@@ -14,7 +14,7 @@ env:
 
 jobs:
   test:
-    name: 单元测试（288 个用例，不联网）
+    name: 单元测试（stdlib unittest，不联网）
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
