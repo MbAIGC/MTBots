@@ -442,6 +442,24 @@ def socket_group_hint(
     ]
 
 
+def common_mount_root(dirs: Sequence[str]) -> Optional[str]:
+    """一组「没挂进来」的目录的公共父目录，用来给一条能直接抄的 `-v` 建议。
+
+    太浅（`/`、`/mnt` 这种）就没有意义——挂 `/` 显然不行，返回 None 让调用方退回泛化提示。
+    """
+    cleaned = [os.path.abspath(str(d)) for d in dirs if d]
+    if not cleaned:
+        return None
+    try:
+        root = os.path.commonpath(cleaned)
+    except ValueError:  # 相对/绝对混用，或不同盘符（Windows）
+        return None
+    root = root.rstrip("/") or "/"
+    if len([part for part in root.split("/") if part]) < 2:
+        return None
+    return root
+
+
 def scan_hint(state: DockerState, *, include_compose: bool = True) -> list[str]:
     """扫描不到项目时的可操作提示（把权限 / 挂载 / 缺命令三种原因分开说）。
 
@@ -476,14 +494,23 @@ def scan_hint(state: DockerState, *, include_compose: bool = True) -> list[str]:
             hints.append("⚠️ <code>docker compose ls</code> 失败：<code>%s</code>" % esc(error))
 
     if state.hidden_dirs:
-        shown = "、".join(state.hidden_dirs[:2])
+        dirs = state.hidden_dirs
+        shown = "、".join(dirs[:2]) + (" 等 %d 个" % len(dirs) if len(dirs) > 2 else "")
         hints.append(
             "ℹ️ 有 %d 个 compose 项目扫到了，但它们的目录在容器里不存在：<code>%s</code>"
-            % (len(state.hidden_dirs), esc(shown))
+            % (len(dirs), esc(shown))
         )
-        hints.append(
-            "   修：把宿主机目录按相同路径挂进容器，例如 <code>-v /opt/stacks:/opt/stacks</code>。"
-        )
+        root = common_mount_root(dirs)
+        if root:
+            # 给出能直接抄的一行：这些目录都在同一个根下面时，挂一次就够
+            hints.append(
+                "   修：compose 命令按宿主机的原路径执行，所以要按相同路径挂进来——"
+                "在 compose 的 volumes 里加 <code>-v %s:%s</code>，再重建容器。" % (esc(root), esc(root))
+            )
+        else:
+            hints.append(
+                "   修：把宿主机目录按相同路径挂进容器，例如 <code>-v /opt/stacks:/opt/stacks</code>。"
+            )
     return hints
 
 

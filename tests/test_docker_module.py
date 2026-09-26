@@ -22,6 +22,7 @@ from mtbots.config import Settings
 from mtbots.features.docker import MODULE, commands, help_text, id_lines, register, summary
 from mtbots.features.docker.compose import (
     DockerState,
+    common_mount_root,
     filter_pull_noise,
     format_prune_snapshot,
     is_pull_noise,
@@ -611,7 +612,29 @@ class ScanDiagnosticsTest(unittest.TestCase):
 
         self.assertEqual(state.hidden_dirs, ["/opt/stacks/media"])
         self.assertEqual(state.last_scan_error, "")
-        self.assertIn("挂进容器", " ".join(scan_hint(state)))
+        hints = " ".join(scan_hint(state))
+        self.assertIn("在容器里不存在", hints)
+        self.assertIn("-v /opt/stacks/media:/opt/stacks/media", hints)
+
+    def test_common_mount_root_groups_sibling_projects(self) -> None:
+        self.assertEqual(
+            common_mount_root(["/mnt/data2/docker/a", "/mnt/data2/docker/b"]),
+            "/mnt/data2/docker",
+        )
+
+    def test_common_mount_root_rejects_too_shallow(self) -> None:
+        # 挂 "/" 或 "/mnt" 显然不现实 → 退回逐个提示
+        self.assertIsNone(common_mount_root(["/opt/a", "/srv/b"]))
+        self.assertIsNone(common_mount_root(["/mnt/a", "/mnt/b"]))
+        self.assertIsNone(common_mount_root([]))
+
+    def test_hidden_dirs_hint_suggests_one_mount_line(self) -> None:
+        """16 个项目散在同一个根下面时，只给一条能直接抄的 -v。"""
+        state = self._state()
+        state.hidden_dirs = ["/mnt/data2/docker/clinepass-tg-bot", "/mnt/data2/docker/cpa"]
+        hints = " ".join(scan_hint(state, include_compose=False))
+        self.assertIn("-v /mnt/data2/docker:/mnt/data2/docker", hints)
+        self.assertIn("2 个", hints)
 
     def test_missing_compose_binary_hint(self) -> None:
         state = DockerState(DockerSettings())

@@ -133,7 +133,7 @@ mtbots/
 ├── .github/workflows/docker.yml                      # CI：跑测试 + 构建 amd64/arm64 镜像推 GHCR
 ├── Makefile                                          # make check / health / test / run / list
 ├── docs/                                             # 设计稿、施工契约（porting-contract）、合并报告
-└── tests/                                            # 314 个 stdlib unittest 用例
+└── tests/                                            # 317 个 stdlib unittest 用例
 ```
 
 ## 配置
@@ -193,12 +193,12 @@ make check
 ```
 
 测试全部是 stdlib `unittest`、不联网也不碰真实 Telegram/Docker（Docker 用例还会把
-`subprocess` / `create_subprocess_exec` 换成抛异常的桩做反证）。当前 **314 个用例全绿**：
+`subprocess` / `create_subprocess_exec` 换成抛异常的桩做反证）。当前 **317 个用例全绿**：
 
 | 文件 | 用例 | 覆盖 |
 |---|---|---|
 | `tests/test_core.py` | 56 | 文本分片（HTML 标签闭合）、`safe_html` 出口转义、`SafeBot` 解析失败降级、ACL 默认拒绝、存储原子写/0600/损坏分类、任务中心、面板唯一与两步确认、菜单去重与作用域、配置兼容、日志脱敏（含 exc_info 的 traceback）、路由消歧与兜底救援 |
-| `tests/test_docker_module.py` | 41 | 项目排序/分页、pull 噪音过滤、清理候选、回调载荷、模块装配、**扫描失败诊断（权限/未挂载/缺命令 + 实测 socket GID）** |
+| `tests/test_docker_module.py` | 44 | 项目排序/分页、pull 噪音过滤、清理候选、回调载荷、模块装配、**扫描失败诊断（实测 socket GID、未挂载目录的公共挂载点、缺命令）** |
 | `tests/test_litepan_module.py` | 58 | slug 构建（拼音/限长/去重）、users.json 校验、发现解析与缓存、菜单预算、触发与回执 |
 | `tests/test_cline_module.py` | 140 | 额度解析/渲染、Key 掩码与指纹、别名校验、存储读写与自愈、默认拒绝 |
 | `tests/test_integration.py` | 19 | 三个真实模块一起装配、命令不重复、菜单合并、`--check` 离线可跑，以及**真 `telegram.Update` 走 PTB dispatcher 的端到端用例**（不重复执行、全角命令可救援、下线模块的按钮有反馈、点按钮原地改同一条面板、**所有面板文案都过一遍 Telegram HTML 合法性校验**） |
@@ -239,6 +239,25 @@ make check
 
 * 改完 `.env` **必须** `--force-recreate`：`docker compose restart` 不会重新套用 `group_add`。
 * 查出来是 `0`（socket 属 `root:root`，群晖等 NAS 上常见）时加组救不了：要么让容器用 root 跑（compose 里加 `user: "0:0"`），要么上 `docker-socket-proxy`（更安全，见「安全红线」）。
+
+**情况二：项目扫到了，但目录在容器里不存在。** 这是权限修好之后紧接着会撞上的第二个坑：
+
+```
+ℹ️ 有 16 个 compose 项目扫到了，但它们的目录在容器里不存在：/mnt/data2/docker/clinepass-tg-bot、/mnt/data2/docker/cpa 等 16 个
+   修：compose 命令按宿主机的原路径执行，所以要按相同路径挂进来——在 compose 的 volumes 里加 -v /mnt/data2/docker:/mnt/data2/docker，再重建容器。
+```
+
+原因：`docker compose ls` 给的是**宿主机路径**，而 mtbots 要用 `docker compose -f <那个路径>` 去执行，所以容器里必须存在同一个路径。
+按提示把公共父目录挂进来即可（面板会自动算出这条 `-v`）：
+
+```yaml
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /mnt/data2/docker:/mnt/data2/docker      # ← 你的 compose 项目根目录，路径左右必须一样
+      - ./data:/app/data
+```
+
+改完 `docker compose up -d`（加 `--force-recreate` 更保险）。项目散在不同根下时面板不给公共 `-v`，逐个挂即可。
 
 ## 已知限制
 
