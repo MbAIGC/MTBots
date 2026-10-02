@@ -215,6 +215,9 @@ class DockerState:
         self.host_notes: list[str] = list(host_notes or [])
         #: 远端 compose 命令探测结果（`docker compose` / `docker-compose`），按主机缓存
         self.remote_compose: dict[str, list[str]] = {}
+        #: 上一次扫描的结果签名/错误，仅用于「只在有变化时打 INFO」
+        self._last_scan_signature: Optional[tuple] = None
+        self._last_scan_errors: dict[str, str] = {}
 
     # ---------- 主机 ----------
     @property
@@ -412,6 +415,7 @@ class DockerState:
         的项目目录写进 `hidden_dirs`。**远端主机不做本地目录检查**——远端路径本来就不在本机，
         检查了会把它自己的项目全部误判成「没挂载」。
         """
+        started = time.monotonic()
         projects: list[dict] = []
         self.host_errors = {}
         self.last_scan_error = ""
@@ -424,6 +428,38 @@ class DockerState:
                 log.warning("主机 %s 扫描异常：%s", host.id, exc)
         self.last_scan_error = self.host_errors.get(self.local_host.id, "")
         projects.sort(key=lambda x: (str(x.get("host") or ""), x["name"]))
+
+        # 日志要说清「扫了什么」：面板每 15s 可能就扫一次，所以只在结果/错误有变化时 INFO，
+        # 其余降到 DEBUG —— 出问题时 `docker compose logs` 里一定有那几行，平时不刷屏。
+        summary = "、".join(
+            "%s %d" % (host.id, sum(1 for p in projects if p.get("host") == host.id))
+            for host in self.hosts
+        )
+        signature = tuple((str(p.get("host") or ""), str(p.get("name") or "")) for p in projects)
+        changed = signature != self._last_scan_signature
+        errors_changed = self.host_errors != self._last_scan_errors
+        if changed or errors_changed or not projects:
+            level = log.info if (changed or errors_changed) else log.debug
+            level(
+                "扫描完成（%.1fs）：%s，共 %d 个项目",
+                time.monotonic() - started,
+                summary,
+                len(projects),
+            )
+            for host_id, error in self.host_errors.items():
+                if self._last_scan_errors.get(host_id) != error:
+                    log.warning("主机 %s 扫描失败：%s", host_id, error)
+            for work_dir in self.hidden_dirs:
+                log.warning("compose 项目目录 %s 在容器里不存在（没挂进来？）", work_dir)
+        else:
+            log.debug(
+                "扫描完成（%.1fs）：%s，共 %d 个项目（无变化）",
+                time.monotonic() - started,
+                summary,
+                len(projects),
+            )
+        self._last_scan_signature = signature
+        self._last_scan_errors = dict(self.host_errors)
         return projects
 
     def _scan_host_sync(self, host: DockerHost) -> list[dict]:
