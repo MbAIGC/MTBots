@@ -320,11 +320,13 @@ async def _render_list(
     keyboard: list[list[InlineKeyboardButton]] = []
     start_idx = (page - 1) * settings.page_size
 
+    # 主机异常 / 未挂载目录这类提示**两种情况下都要说**：以前只在「一个项目都没有」时才打印，
+    # 于是「本机 5 个项目 + 远端连不上」的面板看着一切正常，只有主机计数里那个 0 露馅。
+    hints = scan_hint(state, include_compose=False)
+
     if not ordered:
         text += "⚠️ 暂未检测到任何 Docker Compose 项目\n"
-        # 空列表必须说清是「权限不够」「目录没挂进来」「compose 命令缺失」还是「远端连不上」，
-        # 否则用户只能猜（缺命令那行上面已经单独打印过了）。
-        for hint in scan_hint(state, include_compose=False):
+        for hint in hints:
             text += hint + "\n"
     else:
         last_group: Optional[str] = None
@@ -377,6 +379,9 @@ async def _render_list(
                 keyboard.append(
                     [InlineKeyboardButton("🚀 %s. %s" % (num, disp_name), callback_data=data)]
                 )
+
+        if hints:
+            text += "\n" + "\n".join(hints) + "\n"
 
     nav: list[InlineKeyboardButton] = []
     if page > 1:

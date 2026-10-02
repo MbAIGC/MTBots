@@ -146,7 +146,7 @@ mtbots/
 ├── Makefile                                          # make check / health / test / run / list
 ├── docs/                                             # 设计稿、施工契约（porting-contract）、合并报告
 │   └── examples/                                     # 多主机：主机清单样例、远端守卫脚本、authorized_keys 样例
-└── tests/                                            # 377 个 stdlib unittest 用例
+└── tests/                                            # 379 个 stdlib unittest 用例
 ```
 
 ## 配置
@@ -209,7 +209,7 @@ make check
 ```
 
 测试全部是 stdlib `unittest`、不联网也不碰真实 Telegram/Docker（Docker 用例还会把
-`subprocess` / `create_subprocess_exec` 换成抛异常的桩做反证）。当前 **377 个用例全绿**：
+`subprocess` / `create_subprocess_exec` 换成抛异常的桩做反证）。当前 **379 个用例全绿**：
 
 | 文件 | 用例 | 覆盖 |
 |---|---|---|
@@ -217,7 +217,7 @@ make check
 | `tests/test_docker_module.py` | 76 | 项目排序/分页、pull 噪音过滤、清理候选、回调载荷、模块装配、**扫描失败诊断（实测 socket GID、未挂载目录的公共挂载点、缺命令）**、执行消息收尾（成功即删、失败必留、结果回传）、失败尾部输出与进度键盘的中断入口、**多主机（主机清单校验 / ssh 包装与引号 / 逐主机扫描与提示 / 退出码映射 / 只认配置内的 host id）** |
 | `tests/test_litepan_module.py` | 59 | slug 构建（拼音/限长/去重）、users.json 校验、发现解析与缓存、菜单预算、触发与回执 |
 | `tests/test_cline_module.py` | 140 | 额度解析/渲染、Key 掩码与指纹、别名校验、存储读写与自愈、默认拒绝 |
-| `tests/test_integration.py` | 32 | 三个真实模块一起装配、命令不重复、菜单合并、`--check` 离线可跑，**真 `telegram.Update` 走 PTB dispatcher 的端到端用例**（不重复执行、全角命令可救援、下线模块的按钮有反馈、点按钮原地改同一条面板、**所有面板文案都过一遍 Telegram HTML 合法性校验**），多主机装配用例（按主机分组、单主机无主机标题、伪造 host id 被拒且不执行、`/upgrade` 编号与面板一致、状态与清理按主机），以及**收尾只留一条消息**（批量升级不再推卡片、执行消息带 `delete_on_success`、收尾面板带跨模块入口、`🔙 返回列表` 回原页、失败抄尾部输出、进度面板可中断、最后一步取消判为取消） |
+| `tests/test_integration.py` | 34 | 三个真实模块一起装配、命令不重复、菜单合并、`--check` 离线可跑，**真 `telegram.Update` 走 PTB dispatcher 的端到端用例**（不重复执行、全角命令可救援、下线模块的按钮有反馈、点按钮原地改同一条面板、**所有面板文案都过一遍 Telegram HTML 合法性校验**），多主机装配用例（按主机分组、单主机无主机标题、伪造 host id 被拒且不执行、`/upgrade` 编号与面板一致、状态与清理按主机），以及**收尾只留一条消息**（批量升级不再推卡片、执行消息带 `delete_on_success`、收尾面板带跨模块入口、`🔙 返回列表` 回原页、失败抄尾部输出、进度面板可中断、最后一步取消判为取消） |
 
 ## 管理多台服务器（多主机，v1.1.0+）
 
@@ -324,6 +324,7 @@ command="/usr/local/bin/mtbots-compose-guard",restrict ssh-ed25519 AAAA… mtbot
 | 「远端授权只允许 compose 操作」 | 守卫脚本拦下了这条命令。要么命令不在白名单（`docs/examples/mtbots-compose-guard.sh` 里补齐），要么根本没走守卫 |
 | 「私钥不存在：…」 | 私钥没放/没挂到容器里的那个路径，或 `chmod 600` 不对（ssh 会拒绝组/他人可读的私钥） |
 | 远端项目一个都看不到 | 检查 `roots` 白名单；再在容器里手跑一次 `ssh … docker compose ls -a --format json` |
+| 本机项目正常、某个远端静默少了项目 | 面板列表下方会给出该主机的故障原因与自测命令（v1.1.1 起**不再只在「一个项目都没有」时提示**）；`/d_status` 与 `--health` 也会逐主机显示 |
 | 中断了但远端还在跑 | 取消 = 断开 ssh（远端通常收到 SIGHUP 退出，但不保证）；`pull`/`up -d` 幂等，重跑即可 |
 
 安全提醒：私钥只放 `data/`（已 gitignore）；远端用**专用用户 + docker 组**；生产建议 `strict=yes` 配预置 `known_hosts`。

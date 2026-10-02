@@ -506,6 +506,46 @@ class MultiHostFlowTests(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_broken_host_is_reported_even_with_visible_projects(self):
+        """本机项目照常显示时，远端主机的故障也必须出现在面板上（不能只靠主机计数里那个 0）。"""
+        app, core, bot = self._make_app()
+        state = core.data["docker"]
+        projects = state.scan_hook()
+
+        def hook():
+            state.host_errors = {
+                "vps": "SSH 连不上或认证失败（检查网络、端口、私钥、known_hosts）"
+            }
+            return projects
+
+        state.scan_hook = hook
+        self._drive(app, real_update(bot, text="/d_list"))
+
+        text = bot.last_text
+        self.assertIn("nas/media", text, "本机项目照常显示")
+        self.assertIn("SSH 连不上", text, "远端故障必须有提示")
+        self.assertIn("自测：", text)
+        assert_html_valid(self, text)
+
+    def test_unmounted_dirs_hint_shows_alongside_projects(self):
+        """部分目录没挂进来时，提示不能只在「一个项目都没有」的情况下才出现。"""
+        app, core, bot = self._make_app()
+        state = core.data["docker"]
+        projects = state.scan_hook()
+
+        def hook():
+            state.hidden_dirs = ["/mnt/data2/docker/old"]
+            return projects
+
+        state.scan_hook = hook
+        self._drive(app, real_update(bot, text="/d_list"))
+
+        text = bot.last_text
+        self.assertIn("nas/media", text)
+        self.assertIn("在容器里不存在", text)
+        self.assertIn("-v /mnt/data2/docker/old:/mnt/data2/docker/old", text)
+        assert_html_valid(self, text)
+
     def test_list_groups_projects_by_host(self):
         app, _core, bot = self._make_app()
         self._drive(app, real_update(bot, text="/d_list"))
