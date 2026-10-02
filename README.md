@@ -273,13 +273,24 @@ ssh -p 22 -i /app/data/ssh/id_ed25519 \
 # 远端执行：建一个专用用户（别用你的登录账号，更别用 root），并加入 docker 组
 sudo useradd -m -s /bin/bash mtbots
 sudo usermod -aG docker mtbots
-sudo install -d -m 700 -o mtbots -g mtbots /home/mtbots/.ssh
 
-# 远端执行：确认这个用户真的能用 docker / compose（很多「连不上」其实是这一步没过）
+# 取这个用户**真正的**家目录：NAS 上常常不在 /home（群晖是 /var/services/homes/mtbots）
+HOME_DIR=$(getent passwd mtbots | cut -d: -f6)
+echo "$HOME_DIR"
+
+# 家目录和 .ssh 的属主都必须是 mtbots，否则它连自己的家都进不去（下一步会 Permission denied）
+sudo mkdir -p "$HOME_DIR/.ssh"
+sudo chown mtbots:mtbots "$HOME_DIR" "$HOME_DIR/.ssh"
+sudo chmod 700 "$HOME_DIR/.ssh"
+
+# 确认这个用户真的能用 docker / compose（很多「连不上」其实是这一步没过）
 sudo -u mtbots docker compose version
 ```
 
-`docker compose version` 报 `permission denied while trying to connect to the Docker daemon socket` 就是组没生效——重新登录（或 `newgrp docker`）后再试。
+两个常见的坑：
+
+* `docker compose version` 报 `permission denied while trying to connect to the Docker daemon socket` → docker 组没生效，重新登录（或 `newgrp docker`）后再试；
+* 后面写 `authorized_keys` 时若报 `Permission denied` → 家目录或 `.ssh` 属主不是 `mtbots`（`useradd` 忘了 `-m`、家目录早先被 root 建过、或家目录在 NAS 的非标准路径）。先用 `sudo ls -ld "$HOME_DIR" "$HOME_DIR/.ssh"` 看一眼，属主不对就 `sudo chown mtbots:mtbots …`。
 
 ### 3. 在 MTBots 这边生成密钥
 
@@ -310,11 +321,20 @@ sudo install -m 755 mtbots-compose-guard.sh /usr/local/bin/mtbots-compose-guard
 然后把公钥写进远端的 `authorized_keys`，**并加上 `command=` 与 `restrict`**：
 
 ```bash
-sudo -u mtbots tee -a /home/mtbots/.ssh/authorized_keys <<'EOF'
-command="/usr/local/bin/mtbots-compose-guard",restrict ssh-ed25519 AAAAC3Nza... mtbots@bot
-EOF
-sudo chmod 600 /home/mtbots/.ssh/authorized_keys
+HOME_DIR=$(getent passwd mtbots | cut -d: -f6)
+
+# 用 root 写（避免 sudo -u mtbots 在家目录属主不对时 Permission denied），写完再把属主交回去
+echo 'command="/usr/local/bin/mtbots-compose-guard",restrict ssh-ed25519 AAAAC3Nza... mtbots@bot' \
+  | sudo tee -a "$HOME_DIR/.ssh/authorized_keys" >/dev/null
+sudo chown mtbots:mtbots "$HOME_DIR/.ssh/authorized_keys"
+sudo chmod 600 "$HOME_DIR/.ssh/authorized_keys"
+
+# 确认内容进去了、且 mtbots 自己能读
+sudo -u mtbots tail -n 2 "$HOME_DIR/.ssh/authorized_keys"
 ```
+
+> 如果你手边报的是 `tee: /home/mtbots/.ssh/authorized_keys: Permission denied`：那是**家目录或 `.ssh` 的属主不是 `mtbots`**，跟公钥内容无关。
+> 先 `sudo ls -ld "$HOME_DIR" "$HOME_DIR/.ssh"` 看属主，`sudo chown mtbots:mtbots "$HOME_DIR" "$HOME_DIR/.ssh"` 修好即可（或者就一直用上面的 `sudo tee` + `chown` 写法，`sudo -u` 这步可以完全不用）。
 
 （更严一点可以再加来源限制：`from="10.0.0.9",command="…",restrict ssh-ed25519 …`，样例见 [`docs/examples/authorized_keys.sample`](docs/examples/authorized_keys.sample)。）
 
@@ -431,6 +451,7 @@ docker compose exec mtbots python -m mtbots --health | grep 🐳
 | 现象 | 处理 |
 |---|---|
 | 面板：「主机 vps：SSH 连不上或认证失败」 | 按面板给的自测命令在容器里跑（见第 4 节最后一段）。它其实已经把原因写在输出里：`Connection refused`=端口/网络、`Permission denied (publickey)`=公钥没装对、`not accessible: Permission denied`=私钥权限/属主不对（见第 1 节 ⚠️） |
+| 远端 `sudo -u mtbots tee …/authorized_keys` 报 `Permission denied` | 家目录或 `.ssh` 的属主不是 `mtbots`（`useradd` 没带 `-m` / 家目录早先被 root 建过 / NAS 家目录不在 `/home`）。用 `getent passwd mtbots` 取真实家目录并 `chown mtbots:mtbots`，或者按第 4 节用 `sudo tee` + `chown` 写文件（不用 `sudo -u`） |
 | 「私钥不存在：/app/data/ssh/id_ed25519」 | 密钥没生成或没放进 `/mbots/data/ssh/`；确认 `ls -l /mbots/data/ssh` 里属主是 `10001`。若报的是 `Permission denied (publickey)`，先查权限再看远端公钥——容器读不到私钥时也是这个表现 |
 | 「远端未安装 docker compose / docker」 | 远端 `sudo -u mtbots docker compose version` 不过；装 CLI 或修 PATH |
 | 「远端授权只允许 compose 操作」 | 守卫脚本拦下了这条命令：要么命令不在白名单（`docs/examples/mtbots-compose-guard.sh` 里补齐），要么远端没走守卫但命令拼错了 |

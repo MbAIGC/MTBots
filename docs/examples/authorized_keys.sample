@@ -4,6 +4,12 @@
 #   2) restrict   关掉端口转发 / pty / agent 转发
 #   3) from=...   （可选）只允许 bot 主机这个 IP 连过来
 #
+# 注意：写这个文件时若用 `sudo -u mtbots tee …` 报 Permission denied，说明家目录或 .ssh 的属主
+# 不是 mtbots（群晖等 NAS 的家目录还常常不在 /home）。稳妥写法（root 写、再 chown）：
+#   HOME_DIR=$(getent passwd mtbots | cut -d: -f6)
+#   echo '<下面这一行>' | sudo tee -a "$HOME_DIR/.ssh/authorized_keys" >/dev/null
+#   sudo chown mtbots:mtbots "$HOME_DIR/.ssh/authorized_keys" && sudo chmod 600 "$HOME_DIR/.ssh/authorized_keys"
+#
 # 举例（未加 from=，内网自用够）：
 command="/usr/local/bin/mtbots-compose-guard",restrict ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI... mtbots@bot
 
