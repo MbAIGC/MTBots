@@ -2,7 +2,7 @@
 
 > 依据：[three-bots-merge-design.md](three-bots-merge-design.md)（可行性 + 交互设计）、
 > [three-bots-merge-ux.md](three-bots-merge-ux.md)（单人版交互图）、[porting-contract.md](porting-contract.md)（施工契约）。
-> 结果：三个 Bot 已合并为 **一个进程、一个 Python 包 `mtbots`**（Bot 名 MTBots，方案 A：单进程模块化），可运行、可自检、**405 个测试全绿**。
+> 结果：三个 Bot 已合并为 **一个进程、一个 Python 包 `mtbots`**（Bot 名 MTBots，方案 A：单进程模块化），可运行、可自检、**409 个测试全绿**。
 
 ---
 
@@ -55,7 +55,7 @@
 
 ```bash
 cd /root/DSH/MTBots
-PYTHONPATH=./.vendor:. python3 -m unittest discover -s tests -t .   # 405 tests OK
+PYTHONPATH=./.vendor:. python3 -m unittest discover -s tests -t .   # 409 tests OK
 PYTHONPATH=./.vendor:. python3 -m mtbots --check                      # exit 0，离线
 PYTHONPATH=./.vendor:. python3 -m mtbots --health                     # 真实探测（compose / LitePan / Cline 存储）
 ```
@@ -67,7 +67,7 @@ PYTHONPATH=./.vendor:. python3 -m mtbots --health                     # 真实�
 | `tests/test_litepan_module.py` | 59 | OK |
 | `tests/test_cline_module.py` | 140 | OK |
 | `tests/test_integration.py` | 34 | OK（5 个装配 + 13 个真 Update 端到端 + 6 个收尾流程 + 6 个多主机流程 + 2 个 HTML 守卫用例） |
-| **合计** | **405** | **OK（约 11s，无网络）** |
+| **合计** | **409** | **OK（约 12s，无网络）** |
 
 端到端用例（`DispatcherTests`）用**真正的 `telegram.Update` + 记录型假 Bot** 跑 PTB 自己的
 `Application.process_update`，因此能抓到装配级事故：
@@ -183,3 +183,4 @@ DOCKER_GID=$(getent group docker | cut -d: -f3) docker compose up -d --build
 | 看到 authorized_keys 里是 `command="…",restrict ssh-ed25519 AAAA…`（没有注释），怀疑写错了 | 这行本身是对的（sshd 的格式就是「选项在前、注释可省」），但脚本当时既不校验公钥、也不管老 sshd：粘贴被截断会静默写进去，OpenSSH < 7.2 的 NAS 不认 restrict 会把整行判为无效 | 写入前用 `ssh-keygen -l -f` 校验公钥（截断就早报错并打印内容），落盘后再解析一次；`sshd -V` 检测到 < 7.2 时自动换成 `no-port-forwarding,no-agent-forwarding,no-X11-forwarding,no-pty,no-user-rc` 长格式（也可 `--legacy-options` 强制）；摘要里带上指纹；测试 400 → 402 |
 | 容器部署里跑向导，报「远端还没有这把公钥」并让输密码，ssh-copy-id 又直接 ERROR | 向导用 `ssh … true` 探测登录：`true` 不在守卫白名单里 → 被守卫拒（exit 126）→ 误判成「公钥没装」；ssh-copy-id 内部也用 `exit` 之类的命令探测 → 同样被守卫拒，于是根本没有输密码那一步 | 探测改用守卫放行的 `docker compose version`；识别出 `command not allowed` = 「公钥已装 + 守卫生效」，跳过 ssh-copy-id 与所有远端写操作（只验证 + 写清单）；守卫白名单缺 compose 时给出「到远端重跑那条 curl」的提示；另外把脚本与镜像解耦（`make add-host` 走 `curl main` 拿最新向导、远端脚本守卫默认跟 main、镜像补 curl），脚本改动不再需要升级镜像；测试 402 → 403 |
 | 修完上一个还有下一个：探测成功（`密钥可用：Docker Compose version`）之后，向导去取 `printf %s "$HOME"` 又被守卫拒 | 只靠 compose 探测分不清「普通 key」和「守卫态 key」——两者跑 compose 都成功；于是向导以为可以改远端文件，结果第一步就被拒 | 再探一条守卫**不会**放行的命令（`printf $HOME`）：通得过 = 普通 key（可装守卫/改 authorized_keys）；被拒（command not allowed）= 守卫已生效 → 跳过所有远端写操作，只验证 + 写清单；实测用**真守卫脚本**当作 ssh 桩跑通全流程；测试 403 → 404 |
+| 明明配好了远端（日志 `主机=local,192-168-1-xxx`），面板上却「只有本机，没有远端」 | 多主机面板的主机标题是**从项目行推导**出来的：某台主机 0 个项目（或连不上、配置写错）时，它连标题都不会出现，只剩顶部计数里一个 0——看起来就像没配上 | 多主机时改成**按 `state.hosts` 逐台画段**：0 个项目写「（未检测到 Compose 项目）」、扫描失败写具体原因、配置错写配置错、本页没有该项目写「翻页看看」；顺带把清单路径/存在性打进 `/id` 与 `--health`，向导写完清单自动 chown 10001 + 644；测试 405 → 409 |
