@@ -18,9 +18,11 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 
-# 只有开发时才用得到的
+# 只有开发时才用得到的（注意：docs/examples 例外——一键接入脚本要进镜像，
+# 所以这里必须写 docs/* 而不是 docs/：父目录被整体排除时，子目录无法再被 ! 拉回来）
 tests/
-docs/
+docs/*
+!docs/examples
 AGENTS.md
 Makefile
 docker-compose.yml
