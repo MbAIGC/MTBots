@@ -54,6 +54,20 @@ printf '%s\\n' "$*" >> "$FAKE_DIR/sudo.log"
 exit 1
 """
 
+CURL_STUB = """#!/bin/sh
+# curl -fsSL URL -o DEST  → 从 FIXTURE_DIR 里按 basename 取
+url=""; dest=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) dest=$2; shift 2 ;;
+    http*) url=$1; shift ;;
+    *) shift ;;
+  esac
+done
+printf '%s\\n' "$url" >> "$FAKE_DIR/curl.log"
+cp "$FIXTURE_DIR/$(basename "$url")" "$dest"
+"""
+
 COPY_ID_STUB = """#!/bin/sh
 printf '%s\\n' "$*" >> "$FAKE_DIR/ssh-copy-id.log"
 exit 0
@@ -96,6 +110,7 @@ class WizardScriptTest(unittest.TestCase):
             ("scp", SCP_STUB),
             ("sudo", SUDO_STUB),
             ("ssh-copy-id", COPY_ID_STUB),
+            ("curl", CURL_STUB),
         ):
             path = self.fake / name
             path.write_text(body, encoding="utf-8")
@@ -104,6 +119,10 @@ class WizardScriptTest(unittest.TestCase):
         self.env = dict(os.environ)
         self.env["PATH"] = "%s:%s" % (self.fake, os.environ.get("PATH", ""))
         self.env["FAKE_DIR"] = str(self.fake)
+        self.env["FIXTURE_DIR"] = str(base / "fixtures")
+        (base / "fixtures").mkdir()
+        shutil.copy2(GUARD, base / "fixtures" / "mtbots-compose-guard.sh")
+        shutil.copy2(REMOTE_SETUP, base / "fixtures" / "mtbots-remote-setup.sh")
         self.script = self.root / "scripts" / "setup-remote-host.sh"
         self.hosts_file = self.root / "data" / "docker-hosts.json"
 
@@ -215,6 +234,62 @@ class WizardScriptTest(unittest.TestCase):
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn("主机 id", proc.stderr)
         self.assertFalse(self.hosts_file.exists())
+
+    def test_piped_run_uses_cwd_as_project_root(self):
+        """`curl … | sh`（stdin 是脚本）时项目根取当前目录，且不再往 stdin 要输入。"""
+        project = Path(self.tmp.name) / "plain-project"
+        (project / "data").mkdir(parents=True)
+        (project / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
+        script_text = self.script.read_text(encoding="utf-8")
+
+        proc = subprocess.run(
+            ["sh", "-s", "--",
+             "--mode", "existing", "--host", "10.0.0.5", "--user", "admin",
+             "--id", "vps", "--label", "VPS", "--roots", "", "--no-guard",
+             "--yes", "--no-restart"],
+            cwd=str(project),
+            env=self.env,
+            input=script_text,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("curl 模式", proc.stdout)
+
+        hosts = json.loads((project / "data" / "docker-hosts.json").read_text(encoding="utf-8"))
+        self.assertEqual([h["id"] for h in hosts["hosts"]], ["local", "vps"])
+        self.assertNotIn("roots", hosts["hosts"][1], "空 --roots 不能被写成 []")
+        self.assertFalse(self.hosts_file.exists(), "不能写到别的项目根里")
+
+    def test_fetches_companions_when_repo_files_are_absent(self):
+        """脚本旁边没有 docs/examples 时，按 --ref 从 GitHub 取守卫与远端准备脚本。"""
+        bare = Path(self.tmp.name) / "bare"
+        (bare / "scripts").mkdir(parents=True)
+        (bare / "data").mkdir()
+        (bare / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
+        shutil.copy2(WIZARD, bare / "scripts" / "setup-remote-host.sh")
+
+        proc = subprocess.run(
+            ["sh", str(bare / "scripts" / "setup-remote-host.sh"),
+             "--mode", "create", "--host", "10.0.0.5", "--login-user", "root", "--user", "mtbots",
+             "--id", "vps", "--label", "VPS", "--roots", "/opt", "--ref", "v1.2.1",
+             "--yes", "--no-restart"],
+            cwd=str(bare),
+            env=self.env,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+
+        urls = self._log("curl.log")
+        self.assertIn("https://raw.githubusercontent.com/MbAIGC/MTBots/v1.2.1/docs/examples/mtbots-compose-guard.sh", urls)
+        self.assertIn("https://raw.githubusercontent.com/MbAIGC/MTBots/v1.2.1/docs/examples/mtbots-remote-setup.sh", urls)
+        self.assertIn("sudo sh /tmp/mtbots-setup/mtbots-remote-setup.sh", self._log("ssh.log"))
+
+        hosts = json.loads((bare / "data" / "docker-hosts.json").read_text(encoding="utf-8"))
+        self.assertEqual([h["id"] for h in hosts["hosts"]], ["local", "vps"])
 
     def test_local_host_can_be_omitted(self):
         proc = self._wizard("--mode", "existing", "--host", "10.0.0.5", "--user", "admin",

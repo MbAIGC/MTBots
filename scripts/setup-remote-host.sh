@@ -23,11 +23,17 @@
 # 不想用脚本也行：README「管理多台服务器」章节保留了完整手动步骤，
 # docs/examples/mtbots-remote-setup.sh 也可以单独在远端 sudo 跑。
 
+# 也能直接 curl 下来跑（stdin 是脚本时，项目根 = 当前目录）：
+#   cd /mbots && curl -fsSL https://raw.githubusercontent.com/MbAIGC/MTBots/v1.2.1/scripts/setup-remote-host.sh \
+#     | sh -s -- --mode create --host 10.0.0.5 --login-user root --user mtbots --id vps
+# 这种情况下守卫/远端脚本不在本地，脚本会按 --ref（默认取当前 MTBots 版本）从 GitHub 拉。
+
 set -eu
 
-SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-PROJECT_ROOT=$(dirname -- "$SCRIPT_DIR")
 CONTAINER_DATA=${MTBOTS_CONTAINER_DATA:-/app/data}
+REPO=${MTBOTS_REPO:-MbAIGC/MTBots}
+REF=""
+PROJECT_ROOT_OPT=""
 
 TARGET_HOST=""
 SSH_PORT="22"
@@ -40,6 +46,8 @@ HOST_LABEL=""
 ROOTS=""
 STRICT="accept-new"
 USE_GUARD=1
+ROOTS_SET=0
+LABEL_SET=0
 DRY_RUN=0
 ASSUME_YES=0
 DO_RESTART="ask"
@@ -66,13 +74,16 @@ usage() {
   --login-key FILE     仅 create 模式：登录账号的私钥（默认走你 ~/.ssh/agent）
   --id ID              主机 id（小写字母/数字/_/-，≤16；默认从 --host 推导）
   --label LABEL        面板显示名（默认 = id）
-  --roots PATHS        只允许管理的路径前缀，逗号分隔（可空；例如 /opt,/srv）
+  --roots PATHS        只允许管理的路径前缀，逗号分隔（给空串表示不限，且不再提问）
   --strict MODE        known_hosts 策略：accept-new（默认）或 yes
   --guard-dest DIR     守卫安装目录（默认 /usr/local/bin）
   --no-guard           不装守卫（不推荐：等于给了一把能登远端 shell 的 key）
   --no-local           主机清单里不自动带上「本机」
   --restart            写完清单直接 docker compose up -d --force-recreate
   --no-restart         写完只打印重启命令
+  --project-root DIR   项目根目录（默认取脚本所在仓库的上一级；curl|sh 时取当前目录）
+  --repo OWNER/REPO    脚本来源仓库（默认 MbAIGC/MTBots，仅当需要下载配套脚本时用）
+  --ref REF            下载用的 git ref（默认取当前 MTBots 版本，如 v1.2.1；取不到就 main）
   --data-dir DIR       项目根的 data 目录（默认 <项目根>/data）
   --guard FILE         守卫脚本路径（默认 <项目根>/docs/examples/mtbots-compose-guard.sh）
   --remote-setup FILE  远端准备脚本路径（默认 <项目根>/docs/examples/mtbots-remote-setup.sh）
@@ -91,8 +102,8 @@ while [ $# -gt 0 ]; do
         --login-key) LOGIN_KEY=${2:-}; shift 2 ;;
         --mode) MODE=${2:-}; shift 2 ;;
         --id) HOST_ID=${2:-}; shift 2 ;;
-        --label) HOST_LABEL=${2:-}; shift 2 ;;
-        --roots) ROOTS=${2:-}; shift 2 ;;
+        --label) HOST_LABEL=${2:-}; LABEL_SET=1; shift 2 ;;
+        --roots) ROOTS=${2:-}; ROOTS_SET=1; shift 2 ;;
         --strict) STRICT=${2:-}; shift 2 ;;
         --guard-dest) GUARD_DEST=${2:-}; shift 2 ;;
         --guard) GUARD_SRC=${2:-}; shift 2 ;;
@@ -101,6 +112,9 @@ while [ $# -gt 0 ]; do
         --no-local) WITH_LOCAL=0; shift ;;
         --restart) DO_RESTART=1; shift ;;
         --no-restart) DO_RESTART=0; shift ;;
+        --project-root) PROJECT_ROOT_OPT=${2:-}; shift 2 ;;
+        --repo) REPO=${2:-}; shift 2 ;;
+        --ref) REF=${2:-}; shift 2 ;;
         --data-dir) DATA_DIR=${2:-}; shift 2 ;;
         --yes|-y) ASSUME_YES=1; shift ;;
         --dry-run) DRY_RUN=1; shift ;;
@@ -109,14 +123,27 @@ while [ $# -gt 0 ]; do
     esac
 done
 
+# 自己是怎么被执行的：仓库里的文件，还是 `curl … | sh`（此时 stdin 是脚本本身）
+case "$0" in
+    ""|-|sh|dash|ash|bash|*/sh|*/dash|*/ash|*/bash) PIPED=1 ;;
+    *) PIPED=0 ;;
+esac
+if [ "$PIPED" = 1 ] || [ ! -f "$0" ]; then
+    PIPED=1
+    SCRIPT_DIR=""
+    DEFAULT_ROOT=$PWD
+else
+    SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+    DEFAULT_ROOT=$(dirname -- "$SCRIPT_DIR")
+fi
+PROJECT_ROOT=${PROJECT_ROOT_OPT:-$DEFAULT_ROOT}
+
 DATA_DIR=${DATA_DIR:-$PROJECT_ROOT/data}
 SSH_DIR=$DATA_DIR/ssh
 KEY=$SSH_DIR/id_ed25519
 PUB=$KEY.pub
 KNOWN_HOSTS=$SSH_DIR/known_hosts
 HOSTS_FILE=$DATA_DIR/docker-hosts.json
-GUARD_SRC=${GUARD_SRC:-$PROJECT_ROOT/docs/examples/mtbots-compose-guard.sh}
-REMOTE_SETUP_SRC=${REMOTE_SETUP_SRC:-$PROJECT_ROOT/docs/examples/mtbots-remote-setup.sh}
 STAGE_DIR=${TMPDIR:-/tmp}/mtbots-setup.$$
 
 say()  { printf '%s\n' "$*"; }
@@ -128,6 +155,17 @@ trap cleanup EXIT INT TERM
 
 need_cmd() { command -v "$1" >/dev/null 2>&1 || die "缺少命令：$1"; }
 
+# 交互输入优先读 /dev/tty：`curl … | sh` 时 stdin 是脚本正文，读 stdin 会把脚本吃光。
+# 注意不能在这里 `exec 9</dev/tty`——没有控制终端时 exec 的重定向失败会让脚本直接退出。
+read_answer() {
+    if [ -r /dev/tty ] && ( : < /dev/tty ) 2>/dev/null; then
+        IFS= read -r _answer < /dev/tty || _answer=""
+    else
+        IFS= read -r _answer || _answer=""
+    fi
+    printf '%s' "$_answer"
+}
+
 ask() {
     _prompt=$1
     _default=${2:-}
@@ -136,7 +174,7 @@ ask() {
     else
         printf '%s: ' "$_prompt" >&2
     fi
-    IFS= read -r _answer || _answer=""
+    _answer=$(read_answer)
     [ -n "$_answer" ] || _answer=$_default
     printf '%s' "$_answer"
 }
@@ -145,12 +183,60 @@ ask_yes() {
     _prompt=$1
     _default=${2:-y}
     printf '%s (y/n) [%s]: ' "$_prompt" "$_default" >&2
-    IFS= read -r _answer || _answer=""
+    _answer=$(read_answer)
     [ -n "$_answer" ] || _answer=$_default
     case "$_answer" in
         [Yy]*) return 0 ;;
         *) return 1 ;;
     esac
+}
+
+# 取「当前 MTBots 版本」当默认 ref：优先本地可导入的包（容器里就是它），否则退回 main
+detect_ref() {
+    if [ -n "$REF" ]; then
+        printf '%s' "$REF"
+        return
+    fi
+    if [ -n "${MTBOTS_REF:-}" ]; then
+        printf '%s' "$MTBOTS_REF"
+        return
+    fi
+    _v=$(python3 -c 'import mtbots; print(mtbots.__version__)' 2>/dev/null || true)
+    if [ -n "$_v" ]; then
+        printf 'v%s' "$_v"
+        return
+    fi
+    printf 'main'
+}
+
+fetch_file() {
+    _url=https://raw.githubusercontent.com/$REPO/$REF/$1
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL "$_url" -o "$2" || die "下载失败：$_url"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -qO "$2" "$_url" || die "下载失败：$_url"
+    else
+        die "没有 curl/wget，拉不到配套脚本 $1；请用 --guard / --remote-setup 指到本地文件"
+    fi
+    say "  已下载 $1（$REF）" >&2
+}
+
+# 配套脚本：优先用参数指定的本地文件；其次用脚本旁边的仓库文件；最后按 ref 下载
+resolve_companion() {
+    if [ -n "$2" ] && [ -f "$2" ]; then
+        printf '%s' "$2"
+        return
+    fi
+    if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/../$1" ]; then
+        printf '%s' "$SCRIPT_DIR/../$1"
+        return
+    fi
+    # 下到 fetched/ 子目录：create 模式还要把同名文件 cp 进 $STAGE_DIR 打包，
+    # 直接下到 $STAGE_DIR 会撞名（cp 报 "are the same file"）
+    mkdir -p "$STAGE_DIR/fetched"
+    _dest=$STAGE_DIR/fetched/$(basename "$1")
+    fetch_file "$1" "$_dest"
+    printf '%s' "$_dest"
 }
 
 valid_id() { printf '%s' "$1" | grep -Eq '^[a-z0-9_-]{1,16}$'; }
@@ -211,7 +297,13 @@ scp_run() {
 
 # ==================== 1. 收集参数 ====================
 say "== MTBots 远端接入向导 =="
+if [ "$PIPED" = 1 ]; then
+    say "（curl 模式：项目根取当前目录，配套脚本按需下载）"
+fi
 say "项目根：$PROJECT_ROOT"
+if [ ! -f "$PROJECT_ROOT/docker-compose.yml" ]; then
+    warn "$PROJECT_ROOT 里没看到 docker-compose.yml —— 确认这是 MTBots 项目根吗？（可用 --project-root 指定）"
+fi
 say ""
 
 if [ -z "$TARGET_HOST" ]; then
@@ -256,10 +348,11 @@ if [ -z "$HOST_ID" ]; then
 fi
 valid_id "$HOST_ID" || die "主机 id 只能用 [a-z0-9_-]，长度 1-16：$HOST_ID"
 
-if [ -z "$HOST_LABEL" ]; then
+if [ "$LABEL_SET" != 1 ] && [ -z "$HOST_LABEL" ]; then
     HOST_LABEL=$(ask "面板显示名" "$HOST_ID")
 fi
-if [ -z "$ROOTS" ]; then
+[ -n "$HOST_LABEL" ] || HOST_LABEL=$HOST_ID
+if [ "$ROOTS_SET" != 1 ]; then
     ROOTS=$(ask "只允许管理的路径前缀（逗号分隔，留空=不限）" "")
 fi
 
@@ -279,6 +372,9 @@ else
     say "  · 远端：把公钥装到 $TARGET（已存在账号），守卫装到 $([ "$USE_GUARD" = 1 ] && echo "$GUARD_DEST 或 ~/.local/bin" || echo "（--no-guard 跳过）")"
 fi
 say "  · 密钥：$KEY（不存在则生成，属主交给容器用户 10001）"
+if [ "$USE_GUARD" = 1 ]; then
+    say "  · 守卫脚本：${GUARD_SRC:-$PROJECT_ROOT/docs/examples/mtbots-compose-guard.sh}（本地没有就按 ref 下载）"
+fi
 say "  · 清单：$HOSTS_FILE（id=$HOST_ID，label=$HOST_LABEL$([ -n "$ROOTS" ] && echo "，roots=$ROOTS")）"
 say "  · known_hosts 策略：$STRICT"
 if [ "$DRY_RUN" = 1 ]; then
@@ -295,10 +391,13 @@ fi
 
 need_cmd ssh
 need_cmd scp
+REF=$(detect_ref)
 if [ "$USE_GUARD" = 1 ]; then
+    GUARD_SRC=$(resolve_companion docs/examples/mtbots-compose-guard.sh "$GUARD_SRC")
     [ -f "$GUARD_SRC" ] || die "找不到守卫脚本：$GUARD_SRC（用 --guard 指定，或 --no-guard 跳过）"
 fi
 if [ "$MODE" = "create" ]; then
+    REMOTE_SETUP_SRC=$(resolve_companion docs/examples/mtbots-remote-setup.sh "$REMOTE_SETUP_SRC")
     [ -f "$REMOTE_SETUP_SRC" ] || die "找不到远端准备脚本：$REMOTE_SETUP_SRC（用 --remote-setup 指定）"
     need_cmd tar
 fi
@@ -336,11 +435,15 @@ if [ "$MODE" = "create" ]; then
     say "→ 远端准备（$LOGIN_TARGET 上用 sudo 跑 mtbots-remote-setup.sh）..."
     mkdir -p "$STAGE_DIR"
     cp "$PUB" "$STAGE_DIR/id_ed25519.pub"
+    # shellcheck disable=SC2086  # 这里就是要把文件名列表拆成多个参数
+    _bundle="id_ed25519.pub"
     if [ "$USE_GUARD" = 1 ]; then
         cp "$GUARD_SRC" "$STAGE_DIR/mtbots-compose-guard.sh"
+        _bundle="$_bundle mtbots-compose-guard.sh"
     fi
     cp "$REMOTE_SETUP_SRC" "$STAGE_DIR/mtbots-remote-setup.sh"
-    ( cd "$STAGE_DIR" && tar czf bundle.tgz ./* )
+    _bundle="$_bundle mtbots-remote-setup.sh"
+    ( cd "$STAGE_DIR" && tar czf bundle.tgz $_bundle )
     say "  上传脚本与公钥 ..."
     ssh_admin_pipe 'rm -rf /tmp/mtbots-setup && mkdir -p /tmp/mtbots-setup && tar xzf - -C /tmp/mtbots-setup && chmod 755 /tmp/mtbots-setup/mtbots-remote-setup.sh' < "$STAGE_DIR/bundle.tgz" \
         || die "上传失败（检查 $LOGIN_TARGET 能不能登录，或换 --login-key）"
