@@ -2,7 +2,7 @@
 
 > 依据：[three-bots-merge-design.md](three-bots-merge-design.md)（可行性 + 交互设计）、
 > [three-bots-merge-ux.md](three-bots-merge-ux.md)（单人版交互图）、[porting-contract.md](porting-contract.md)（施工契约）。
-> 结果：三个 Bot 已合并为 **一个进程、一个 Python 包 `mtbots`**（Bot 名 MTBots，方案 A：单进程模块化），可运行、可自检、**402 个测试全绿**。
+> 结果：三个 Bot 已合并为 **一个进程、一个 Python 包 `mtbots`**（Bot 名 MTBots，方案 A：单进程模块化），可运行、可自检、**403 个测试全绿**。
 
 ---
 
@@ -55,7 +55,7 @@
 
 ```bash
 cd /root/DSH/MTBots
-PYTHONPATH=./.vendor:. python3 -m unittest discover -s tests -t .   # 402 tests OK
+PYTHONPATH=./.vendor:. python3 -m unittest discover -s tests -t .   # 403 tests OK
 PYTHONPATH=./.vendor:. python3 -m mtbots --check                      # exit 0，离线
 PYTHONPATH=./.vendor:. python3 -m mtbots --health                     # 真实探测（compose / LitePan / Cline 存储）
 ```
@@ -67,7 +67,7 @@ PYTHONPATH=./.vendor:. python3 -m mtbots --health                     # 真实�
 | `tests/test_litepan_module.py` | 59 | OK |
 | `tests/test_cline_module.py` | 140 | OK |
 | `tests/test_integration.py` | 34 | OK（5 个装配 + 13 个真 Update 端到端 + 6 个收尾流程 + 6 个多主机流程 + 2 个 HTML 守卫用例） |
-| **合计** | **402** | **OK（约 11s，无网络）** |
+| **合计** | **403** | **OK（约 11s，无网络）** |
 
 端到端用例（`DispatcherTests`）用**真正的 `telegram.Update` + 记录型假 Bot** 跑 PTB 自己的
 `Application.process_update`，因此能抓到装配级事故：
@@ -181,3 +181,4 @@ DOCKER_GID=$(getent group docker | cut -d: -f3) docker compose up -d --build
 | 远端那条命令还是一长串参数（`--user/--guard-url/--pubkey-line …`），没人愿意记 | 远端脚本原来只支持「全参数」或「预传文件」，没有交互；另外 `bash <(curl …)` 这种常见写法下 $0 是 /dev/fd/63，被当成了仓库路径 | 远端脚本加交互向导（账号 / 公钥粘贴 / 是否装守卫 / 守卫装哪，全部有默认值；守卫默认从官方 URL 拉，不用手打），于是远端就一句 `sudo bash <(curl -fsSL …/mtbots-remote-setup.sh)`；同时把 `/dev/fd/*`、`/proc/self/fd/*` 也算作「非仓库布局」，项目根取当前目录；README 与 make remote-setup 都改成这个短写法；测试 396 → 399 |
 | 向导卡在 `ssh-copy-id` 的密码提示上，用户不知道要输什么、也不知道还能绕开 | 密钥登不上时脚本直接跑去 ssh-copy-id，只留下一句「会提示输入远端密码」；远端禁用密码登录的 NAS 上这条路根本走不通 | 登不上时先摆出两条路（① 输入远端密码；② 到远端 root 跑 `sudo bash <(curl …/mtbots-remote-setup.sh)` 再回来重跑），并先问一句再用 ssh-copy-id；失败信息里带上公钥与远端一行命令；测试 399 → 400 |
 | 看到 authorized_keys 里是 `command="…",restrict ssh-ed25519 AAAA…`（没有注释），怀疑写错了 | 这行本身是对的（sshd 的格式就是「选项在前、注释可省」），但脚本当时既不校验公钥、也不管老 sshd：粘贴被截断会静默写进去，OpenSSH < 7.2 的 NAS 不认 restrict 会把整行判为无效 | 写入前用 `ssh-keygen -l -f` 校验公钥（截断就早报错并打印内容），落盘后再解析一次；`sshd -V` 检测到 < 7.2 时自动换成 `no-port-forwarding,no-agent-forwarding,no-X11-forwarding,no-pty,no-user-rc` 长格式（也可 `--legacy-options` 强制）；摘要里带上指纹；测试 400 → 402 |
+| 容器部署里跑向导，报「远端还没有这把公钥」并让输密码，ssh-copy-id 又直接 ERROR | 向导用 `ssh … true` 探测登录：`true` 不在守卫白名单里 → 被守卫拒（exit 126）→ 误判成「公钥没装」；ssh-copy-id 内部也用 `exit` 之类的命令探测 → 同样被守卫拒，于是根本没有输密码那一步 | 探测改用守卫放行的 `docker compose version`；识别出 `command not allowed` = 「公钥已装 + 守卫生效」，跳过 ssh-copy-id 与所有远端写操作（只验证 + 写清单）；守卫白名单缺 compose 时给出「到远端重跑那条 curl」的提示；另外把脚本与镜像解耦（`make add-host` 走 `curl main` 拿最新向导、远端脚本守卫默认跟 main、镜像补 curl），脚本改动不再需要升级镜像；测试 402 → 403 |

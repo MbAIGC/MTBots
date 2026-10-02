@@ -206,6 +206,11 @@ detect_ref() {
         printf '%s' "$MTBOTS_REF"
         return
     fi
+    # curl/进程替换拿到的脚本：配套脚本也按 main 取，保持「脚本跟 main 走、不用升级镜像」
+    if [ "$PIPED" = 1 ]; then
+        printf 'main'
+        return
+    fi
     _v=$(python3 -c 'import mtbots; print(mtbots.__version__)' 2>/dev/null || true)
     if [ -n "$_v" ]; then
         printf 'v%s' "$_v"
@@ -472,10 +477,24 @@ if [ "$MODE" = "create" ]; then
     fi
 else
     say ""
-    say "→ 测试登录 $TARGET ..."
-    if ssh_run true >/dev/null 2>&1; then
-        say "  密钥已被远端接受（重复执行时会走到这里）"
-    else
+    # 探测命令必须用守卫白名单里的（docker compose version）：
+    # 老写法 `ssh … true` 在守卫已生效时会被拒（exit 126 command not allowed），
+    # 于是被误判成「远端还没有这把公钥」，还会白白去跑注定失败的 ssh-copy-id。
+    say "→ 测试登录 $TARGET（用 docker compose version 探测，守卫只放行这类命令）..."
+    PROBE_OUT=$(ssh_run 'docker compose version' 2>&1) && PROBE_RC=0 || PROBE_RC=$?
+    KEY_OK=0
+    KEY_GUARDED=0
+    if [ "$PROBE_RC" = 0 ]; then
+        KEY_OK=1
+        say "  密钥可用：$PROBE_OUT"
+    elif printf '%s' "$PROBE_OUT" | grep -q "command not allowed"; then
+        KEY_OK=1
+        KEY_GUARDED=1
+        warn "公钥其实已经装上了：远端守卫拒绝了探测命令（$PROBE_OUT）"
+        say "  说明 authorized_keys 里已经是有 command=\"…\" 的守卫行——这是重复运行时的正常状态。" >&2
+    fi
+
+    if [ "$KEY_OK" = 0 ]; then
         warn "用密钥登录失败：远端还没有这把公钥。接下来两条路，任选一条："
         say "" >&2
         say "  ① 这个账号能用密码登录 → 接着输入它的密码即可（只这一次，用来把公钥装上去）" >&2
@@ -497,16 +516,27 @@ else
   照上面 ② 在远端跑那条 curl，或者手动把下面这行加到远端 ~/.ssh/authorized_keys：
   $(cat "$PUB")"
         fi
-        ssh_run true >/dev/null 2>&1 || die "装了公钥还是连不上，请检查远端 sshd 配置"
+        ssh_run 'docker compose version' >/dev/null 2>&1 || die "装了公钥还是连不上（远端可能没装 docker compose），请检查远端 sshd 与 docker"
+        KEY_OK=1
         say "  公钥已装上"
     fi
 
-    REMOTE_HOME=$(ssh_run 'printf %s "$HOME"')
-    [ -n "$REMOTE_HOME" ] || die "拿不到远端 HOME"
-    say "  远端家目录：$REMOTE_HOME"
-
     GUARD_REMOTE=""
-    if [ "$USE_GUARD" = 1 ]; then
+    if [ "$KEY_GUARDED" = 1 ]; then
+        # 守卫行已生效 = 远端只允许白名单命令，mkdir/cp/chmod/写 authorized_keys 全都会被拒。
+        # 这种时候只能验证 + 写清单；要更新公钥或守卫，得在远端跑那条 curl。
+        say "→ 守卫已在生效，跳过往远端写文件（要更新守卫/公钥：到远端 sudo bash <(curl -fsSL $RAW_BASE/docs/examples/mtbots-remote-setup.sh)）"
+        GUARD_REMOTE=$(printf '%s' "$PROBE_OUT" | sed -n 's/.*\(\/[^ ]*mtbots-compose-guard\).*/\1/p' | head -1)
+    fi
+
+    REMOTE_HOME=""
+    if [ "$KEY_GUARDED" != 1 ]; then
+        REMOTE_HOME=$(ssh_run 'printf %s "$HOME"')
+        [ -n "$REMOTE_HOME" ] || die "拿不到远端 HOME"
+        say "  远端家目录：$REMOTE_HOME"
+    fi
+
+    if [ "$USE_GUARD" = 1 ] && [ "$KEY_GUARDED" != 1 ]; then
         say "→ 安装守卫脚本 ..."
         mkdir -p "$STAGE_DIR"
         scp_run "$GUARD_SRC" "$TARGET:/tmp/mtbots-compose-guard.sh" >/dev/null
@@ -519,7 +549,10 @@ else
         say "  已安装：$GUARD_REMOTE"
     fi
 
-    # ---- 改写 authorized_keys（幂等，按公钥 blob 去重）----
+    # ---- 改写 authorized_keys（幂等，按公钥 blob 去重）——守卫态没有权限做，跳过 ----
+    if [ "$KEY_GUARDED" = 1 ]; then
+        :
+    else
     say "→ 更新 authorized_keys ..."
     mkdir -p "$STAGE_DIR"
     PUB_BLOB=$(awk '{print $2}' "$PUB")
@@ -561,6 +594,7 @@ APPLY
     AK_RESULT=$(ssh_run "sh /tmp/mtbots-apply-ak.sh '$REMOTE_HOME' /tmp/mtbots-ak-line /tmp/mtbots-ak-blob")
     say "  authorized_keys：$AK_RESULT"
     ssh_run 'rm -f /tmp/mtbots-ak-line /tmp/mtbots-ak-blob /tmp/mtbots-apply-ak.sh /tmp/mtbots-compose-guard.sh' >/dev/null 2>&1 || true
+    fi
 fi
 
 # ==================== 4. 验证链路 ====================
@@ -570,7 +604,8 @@ VERIFY=$(ssh_run 'docker compose version' 2>&1) || {
     warn "验证失败，远端输出："
     printf '%s\n' "$VERIFY" >&2
     case "$VERIFY" in
-        *"command not allowed"*) die "守卫脚本拦下了这条命令：检查 ${GUARD_REMOTE:-守卫} 是否存在且可执行" ;;
+        *"command not allowed"*) die "远端守卫白名单里没有 docker compose：远端那份守卫可能比 bot 旧。
+  到远端重跑一次即可更新：sudo bash <(curl -fsSL $RAW_BASE/docs/examples/mtbots-remote-setup.sh)" ;;
         *"not found"*|*"No such file"*) die "远端没有 docker compose（先在远端 sudo -u $SSH_USER -H docker compose version 确认）" ;;
         *) die "远端的 docker 调用失败（见上面的输出）" ;;
     esac

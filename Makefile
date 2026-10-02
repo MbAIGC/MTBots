@@ -31,8 +31,15 @@ run:
 	$(PY) -m mtbots
 
 # 一键接入远端主机：向导会问远端地址/账号，然后建用户、装守卫、写公钥、写主机清单并验证
+# 优先从 $(REF) 拉最新向导（脚本改动不跟镜像走，改了就能用）；没 curl 就退回镜像里那份
 add-host:
-	docker compose exec mtbots sh /app/scripts/setup-remote-host.sh
+	@if command -v curl >/dev/null 2>&1; then \
+	  echo "→ 使用 $(RAW)/scripts/setup-remote-host.sh"; \
+	  curl -fsSL $(RAW)/scripts/setup-remote-host.sh | sh; \
+	else \
+	  echo "⚠️ 宿主机没有 curl：改用镜像里那份（脚本不跟镜像版本，可能不是最新）"; \
+	  docker compose exec mtbots sh /app/scripts/setup-remote-host.sh; \
+	fi
 
 # 远端那台自己跑（bot 这边没有能 ssh 过去的账号/root 时用）：打印短命令 + 要粘的公钥
 RAW := https://raw.githubusercontent.com/MbAIGC/MTBots/$(REF)

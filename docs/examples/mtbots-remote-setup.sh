@@ -34,7 +34,8 @@ GUARD=""
 GUARD_DEST=/usr/local/bin
 GUARD_NAME=mtbots-compose-guard
 #: 本脚本自带的版本号（跟这次提交一致）：守卫默认按它从 GitHub 拉，所以不需要手打 URL
-MTBOTS_REF=${MTBOTS_REF:-v1.3.4}
+# 守卫默认跟 main 走（脚本本身也从 main 取时天然一致）；要锁版本用 --ref v1.3.4
+MTBOTS_REF=${MTBOTS_REF:-main}
 DEFAULT_GUARD_URL=https://raw.githubusercontent.com/MbAIGC/MTBots/$MTBOTS_REF/docs/examples/mtbots-compose-guard.sh
 PUBKEY_LINE=""
 PUBKEY_URL=""
@@ -67,7 +68,7 @@ usage() {
   --legacy-options   用长格式选项代替 restrict（远端 sshd < 7.2 时自动切换）
   --no-useradd       不建用户、不加组，只写 authorized_keys（账号已存在）
   --home DIR         指定家目录（默认按 getent 解析；NAS 上家目录不在 /home 时有用）
-  --ref REF          拉守卫用的 git ref（默认 v1.3.4）
+  --ref REF          拉守卫用的 git ref（默认 main）
   -y, --yes          不再提问，全部用默认值/已给的值（自动化用）
   --ask              强制进入交互（没有终端时也能用，例如把答案用管道喂进来）
   --dry-run          只打印将要做什么

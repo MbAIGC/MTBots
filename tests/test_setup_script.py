@@ -25,11 +25,21 @@ WIZARD = REPO / "scripts" / "setup-remote-host.sh"
 GUARD = REPO / "docs" / "examples" / "mtbots-compose-guard.sh"
 
 #: ssh 桩：记录调用，并对向导需要的几个远端命令给出确定答案
-SSH_STUB = """#!/bin/sh
+SSH_STUB = r"""#!/bin/sh
 log=$FAKE_DIR/ssh.log
-printf '%s\\n' "$*" >> "$log"
+printf '%s\n' "$*" >> "$log"
 last=""
 for a in "$@"; do last=$a; done
+# 模拟「远端还没有这把公钥」：任何命令都是 Permission denied
+if [ -f "$FAKE_DIR/deny-login" ]; then
+  echo 'mtbots@remote: Permission denied (publickey).' >&2
+  exit 255
+fi
+# 模拟「公钥已装 + 守卫已生效」：守卫把这个命令拒了
+if [ -f "$FAKE_DIR/guard-active" ]; then
+  echo "mtbots: command not allowed: $last" >&2
+  exit 126
+fi
 case "$last" in
   'printf %s "$HOME"') printf '/home/mtbots'; exit 0 ;;
 esac
@@ -37,16 +47,12 @@ case "$last" in
   *'docker compose version'*) echo 'Docker Compose version v2.35.1'; exit 0 ;;
   *'sudo -n install'*) exit 1 ;;
 esac
-# 模拟「远端还没有这把公钥」：deny-login 标记存在时，连 true 都失败
-case "$last" in
-  true) [ -f "$FAKE_DIR/deny-login" ] && exit 255 ;;
-esac
 exit 0
 """
 
-SCP_STUB = """#!/bin/sh
+SCP_STUB = r"""#!/bin/sh
 log=$FAKE_DIR/scp.log
-printf '%s\\n' "$*" >> "$log"
+printf '%s\n' "$*" >> "$log"
 prev=""; last=""
 for a in "$@"; do prev=$last; last=$a; done
 mkdir -p "$FAKE_DIR/upload"
@@ -59,7 +65,7 @@ printf '%s\\n' "$*" >> "$FAKE_DIR/sudo.log"
 exit 1
 """
 
-CURL_STUB = """#!/bin/sh
+CURL_STUB = r"""#!/bin/sh
 # curl -fsSL URL -o DEST  → 从 FIXTURE_DIR 里按 basename 取
 url=""; dest=""
 while [ $# -gt 0 ]; do
@@ -69,7 +75,7 @@ while [ $# -gt 0 ]; do
     *) shift ;;
   esac
 done
-printf '%s\\n' "$url" >> "$FAKE_DIR/curl.log"
+printf '%s\n' "$url" >> "$FAKE_DIR/curl.log"
 cp "$FIXTURE_DIR/$(basename "$url")" "$dest"
 """
 
@@ -329,6 +335,23 @@ class WizardScriptTest(unittest.TestCase):
         self.assertIn("远端还没有这把公钥", err)
         self.assertIn("sudo bash <(curl -fsSL https://raw.githubusercontent.com/MbAIGC/MTBots/", err)
         self.assertIn("mtbots-remote-setup.sh", err)
+        self.assertFalse(self.hosts_file.exists())
+
+    def test_guarded_key_is_not_mistaken_for_missing_key(self):
+        """公钥已装 + 守卫生效（命令被拒）时：不能再去 ssh-copy-id，也不该瞎写远端。"""
+        (self.fake / "guard-active").write_text("1", encoding="utf-8")
+        proc = self._wizard("--mode", "existing", "--host", "10.0.0.5", "--user", "admin",
+                            "--id", "vps", "--label", "V", "--roots", "", "--no-guard",
+                            "--yes", "--no-restart")
+        self.assertNotEqual(proc.returncode, 0, "守卫挡住 compose 时不该继续写清单")
+        out = proc.stdout + proc.stderr
+        self.assertIn("公钥其实已经装上了", out)
+        self.assertIn("守卫已在生效", out)
+        self.assertIn("守卫白名单里没有 docker compose", out)
+        self.assertEqual(self._log("ssh-copy-id.log"), "", "守卫态不该再跑 ssh-copy-id")
+        ssh_log = self._log("ssh.log")
+        self.assertNotIn("mkdir -p", ssh_log, "守卫态跑不了远端写操作，不该尝试")
+        self.assertNotIn("apply-ak", ssh_log)
         self.assertFalse(self.hosts_file.exists())
 
     def test_local_host_can_be_omitted(self):

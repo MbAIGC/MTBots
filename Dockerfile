@@ -32,7 +32,7 @@ ENV PYTHONUNBUFFERED=1 \
     LOG_DIR=/app/data/logs
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends tzdata ca-certificates openssh-client \
+    && apt-get install -y --no-install-recommends tzdata ca-certificates openssh-client curl \
     && rm -rf /var/lib/apt/lists/*
 
 # docker CLI 静态二进制 + compose 插件（另给一个 docker-compose 独立命令回退，兼容老环境）
