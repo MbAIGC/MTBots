@@ -53,6 +53,9 @@ class ModuleSpec:
     scope_chats: Callable[["Core"], list[int]] = lambda core: []
     #: `python -m mtbots --check` 的自检项（返回待打印的行，不要在这里连网络）
     check: Optional[Callable[["Core"], list[str]]] = None
+    #: 首页上这个模块额外想挂的入口：返回 [(按钮文字, callback_data), …]
+    #: （多主机时 Docker 用它把每台主机直接摆到首页，少点一次）
+    home_entries: Callable[["Core", int], list[tuple[str, str]]] = lambda core, uid: []
 
 
 @dataclass

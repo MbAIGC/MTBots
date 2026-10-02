@@ -356,6 +356,27 @@ class PanelManager:
         for spec in self._core.modules.values():
             if not self._core.acl.can(user_id, spec.id):
                 continue
+            entries: list[tuple[str, str]] = []
+            getter = getattr(spec, "home_entries", None)
+            if getter is not None:
+                try:
+                    entries = list(getter(self._core, user_id) or [])
+                except Exception as exc:  # 首页绝不能因为某个模块出错而打不开
+                    log.warning("模块 %s 的首页入口失败：%s", spec.id, exc)
+            if entries:
+                # 有额外入口（例如多主机）：模块按钮 + 每台主机一个按钮
+                rows.append(
+                    [InlineKeyboardButton("%s %s" % (spec.icon, spec.title), callback_data=nav_open(spec.id))]
+                )
+                extra: list[InlineKeyboardButton] = []
+                for label, data in entries:
+                    extra.append(InlineKeyboardButton(label, callback_data=data))
+                    if len(extra) == 2:
+                        rows.append(extra)
+                        extra = []
+                if extra:
+                    rows.append(extra)
+                continue
             row.append(InlineKeyboardButton("%s %s" % (spec.icon, spec.title), callback_data=nav_open(spec.id)))
             if len(row) == 2:
                 rows.append(row)

@@ -506,6 +506,64 @@ class MultiHostFlowTests(unittest.TestCase):
 
         asyncio.run(run())
 
+    def _open_all(self, app, bot):
+        """多主机首屏是选主机；这个辅助直接进「全部主机」混合视图。"""
+        self._drive(app, real_update(bot, data="d|page_turn|1|all"))
+
+    def _open_host(self, app, bot, host_id):
+        self._drive(app, real_update(bot, data="d|host_list|%s" % host_id))
+
+    def test_first_screen_asks_which_host(self):
+        """点 Docker 进来第一屏就是选主机（每台一个按钮 + 全部主机）。"""
+        app, core, bot = self._make_app()
+        self._drive(app, real_update(bot, text="/d_list"))
+        text = bot.last_text
+        self.assertIn("请选择要管理的主机", text)
+        self.assertNotIn("nas/media", text, "第一屏不该直接铺项目")
+        callbacks = [
+            b.callback_data
+            for row in bot.rec["sent"][-1][2]["reply_markup"].inline_keyboard
+            for b in row
+        ]
+        self.assertIn("d|host_list|nas", callbacks)
+        self.assertIn("d|host_list|vps", callbacks)
+        self.assertIn("d|page_turn|1|all", callbacks)
+        assert_html_valid(self, text)
+
+    def test_picking_a_host_lists_only_that_host(self):
+        app, core, bot = self._make_app()
+        self._open_host(app, bot, "vps")
+        text = bot.last_text
+        self.assertIn("🖥 <b>主机：</b>Oracle（1 个项目）", text)
+        self.assertIn("vps/blog", text)
+        self.assertNotIn("nas/media", text, "只该显示选中的主机")
+        callbacks = [
+            b.callback_data
+            for row in bot.rec["sent"][-1][2]["reply_markup"].inline_keyboard
+            for b in row
+        ]
+        self.assertIn("d|page_turn|1", callbacks, "要有「换主机」")
+        self.assertIn("d|upgrade_all|vps", callbacks, "这台主机的批量升级")
+        assert_html_valid(self, text)
+
+    def test_home_page_lists_each_host(self):
+        """首页直接把每台主机摆出来（少一步）：🐳 docker（本机 NAS）。"""
+        from mtbots.features.docker import home_entries
+
+        app, core, bot = self._make_app()
+        entries = home_entries(core, 123456789)
+        labels = [label for label, _ in entries]
+        callbacks = [data for _, data in entries]
+        self.assertEqual(len(entries), 2)
+        self.assertTrue(any("本机 NAS" in label for label in labels), labels)
+        self.assertTrue(any("Oracle" in label for label in labels), labels)
+        self.assertIn("d|host_list|nas", callbacks)
+        self.assertIn("d|host_list|vps", callbacks)
+
+        # 单主机时首页不多挂按钮（与老版本一致）
+        app2, core2, _bot2 = self._make_app(hosts="single")
+        self.assertEqual(home_entries(core2, 123456789), [])
+
     def test_broken_host_is_reported_even_with_visible_projects(self):
         """本机项目照常显示时，远端主机的故障也必须出现在面板上（不能只靠主机计数里那个 0）。"""
         app, core, bot = self._make_app()
@@ -519,7 +577,7 @@ class MultiHostFlowTests(unittest.TestCase):
             return projects
 
         state.scan_hook = hook
-        self._drive(app, real_update(bot, text="/d_list"))
+        self._open_all(app, bot)
 
         text = bot.last_text
         self.assertIn("nas/media", text, "本机项目照常显示")
@@ -538,7 +596,7 @@ class MultiHostFlowTests(unittest.TestCase):
             return projects
 
         state.scan_hook = hook
-        self._drive(app, real_update(bot, text="/d_list"))
+        self._open_all(app, bot)
 
         text = bot.last_text
         self.assertIn("nas/media", text)
@@ -548,7 +606,7 @@ class MultiHostFlowTests(unittest.TestCase):
 
     def test_list_groups_projects_by_host(self):
         app, _core, bot = self._make_app()
-        self._drive(app, real_update(bot, text="/d_list"))
+        self._open_all(app, bot)
         text = bot.last_text
 
         self.assertIn("主机：", text)
@@ -566,7 +624,7 @@ class MultiHostFlowTests(unittest.TestCase):
         local_only = [p for p in state.scan_hook() if p.get("host") == "nas"]
         state.scan_hook = lambda: list(local_only)
 
-        self._drive(app, real_update(bot, text="/d_list"))
+        self._open_all(app, bot)
         text = bot.last_text
         self.assertIn("nas/media", text)
         self.assertIn("🖥 <b>Oracle</b>", text, "0 个项目的远端主机也要有标题")
@@ -583,7 +641,7 @@ class MultiHostFlowTests(unittest.TestCase):
             return list(local_only)
 
         state.scan_hook = hook
-        self._drive(app, real_update(bot, text="/d_list"))
+        self._open_all(app, bot)
         text = bot.last_text
         self.assertIn("🖥 <b>Oracle</b>", text)
         self.assertIn("SSH 连不上", text)
@@ -602,7 +660,7 @@ class MultiHostFlowTests(unittest.TestCase):
             "name": "media", "dir": "/data/media", "status": "running(1)", "services": [],
             "config_files": ["/x/docker-compose.yml"], "host": "nas", "host_label": "本机 NAS",
         }]]
-        self._drive(app, real_update(bot, text="/d_list"))
+        self._open_all(app, bot)
         text = bot.last_text
         self.assertIn("🖥 <b>Oracle</b>", text)
         self.assertIn("私钥不存在", text)
@@ -623,7 +681,7 @@ class MultiHostFlowTests(unittest.TestCase):
         })
         state.scan_hook = lambda: list(projects)
 
-        self._drive(app, real_update(bot, text="/d_list"))
+        self._open_all(app, bot)
         text = bot.last_text
         self.assertIn("🖥 <b>Oracle</b>", text)
         self.assertIn("这一页没有它的项目", text)
@@ -645,7 +703,7 @@ class MultiHostFlowTests(unittest.TestCase):
             {"name": "r1", "dir": "/opt/r1", "status": "running(1)", "services": [],
              "config_files": ["/x/c.yml"], "host": "aaa-remote", "host_label": "远端 AAA"},
         ]
-        self._drive(app, real_update(bot, text="/d_list"))
+        self._open_all(app, bot)
         text = bot.last_text
         # aaa-remote 排在 local 前（order() 按 host id 排）→ 它的段和「01.」也必须在前面
         self.assertLess(text.index("远端 AAA"), text.index("🖥 <b>本机</b>"))

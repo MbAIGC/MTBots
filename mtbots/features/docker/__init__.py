@@ -12,6 +12,7 @@ from typing import Any, Optional
 from ...core import Core, ModuleSpec
 from pathlib import Path
 
+from ...panels import cb_simple
 from ...text import esc
 from . import handlers
 from .compose import DockerState, make_state
@@ -41,6 +42,24 @@ def _state(core: Core) -> Optional[DockerState]:
 def commands(core: Core, uid: int) -> list[tuple[str, str]]:
     """本模块贡献给统一命令菜单的片段（与 uid 无关）。"""
     return list(_COMMANDS)
+
+
+def home_entries(core: Core, user_id: int) -> list[tuple[str, str]]:
+    """多主机时把每台主机直接摆到首页：`🐳 docker（本机 NAS）`。
+
+    单主机时返回空列表 —— 首页按钮与老版本一字不差。
+    """
+    state = _state(core)
+    if state is None or not state.multi_host:
+        return []
+    entries: list[tuple[str, str]] = []
+    for host in state.hosts:
+        label = (host.label or host.id)[:20]
+        mark = "⚠️" if (host.error or (state.host_errors or {}).get(host.id)) else ""
+        entries.append(
+            ("🐳 docker（%s）%s" % (label, mark), cb_simple("d", "host_list", host.id))
+        )
+    return entries
 
 
 async def summary(core: Core, user_id: int) -> str:
@@ -147,6 +166,7 @@ MODULE = ModuleSpec(
     open_panel=handlers.open_panel,
     show_status=handlers.show_status,
     show_list=handlers.show_list,
+    home_entries=home_entries,
     rescue=dict(handlers.RESCUE),
     startup=None,
 )

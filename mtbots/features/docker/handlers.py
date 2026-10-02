@@ -28,6 +28,7 @@ from ...panels import (
     cb_parse,
     cb_parts,
     cb_simple,
+    nav_home,
     nav_jobs,
     next_actions_keyboard,
 )
@@ -163,10 +164,20 @@ def _progress_keyboard(task_id: Optional[str]) -> InlineKeyboardMarkup:
     )
 
 
-def _back_keyboard(page: int = 1) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [[InlineKeyboardButton("🔙 返回列表", callback_data=cb_simple("d", "page_turn", page))]]
+def _list_back(core: Core, page: int, host: Optional[str] = None) -> InlineKeyboardMarkup:
+    """项目/确认页面的「返回列表」：多主机时回到那台主机的列表，单主机保持原回调。"""
+    state = _state(core)
+    return _back_keyboard(page, (host or "all") if state.multi_host else None)
+
+
+def _back_keyboard(page: int = 1, list_host: Optional[str] = None) -> InlineKeyboardMarkup:
+    """返回列表；多主机时带上「当前看的是哪台」，免得又跳回选主机页。"""
+    data = (
+        cb_simple("d", "page_turn", page, list_host)
+        if list_host
+        else cb_simple("d", "page_turn", page)
     )
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回列表", callback_data=data)]])
 
 
 def _progress(core: Core, job: Job):
@@ -289,17 +300,76 @@ async def _busy(core: Core, update: Update) -> None:
 
 # ==================== 项目列表 ====================
 async def _render_list(
-    core: Core, update: Update, *, page: int = 1, force_refresh: bool = False
+    core: Core,
+    update: Update,
+    *,
+    page: int = 1,
+    force_refresh: bool = False,
+    host: Optional[str] = None,
 ) -> None:
-    """主面板列表（支持分页、统计与运行状态分组）。"""
+    """主面板：多主机时先选主机，再列那台的项目（单主机时不分层，文案与以前完全一致）。
+
+    `host=None` = 多主机时的「选主机」页；`host="all"` = 全部主机的混合列表；
+    其它值 = 指定主机（回调里只认配置内的 id）。
+    """
     await _answer(update)
     state = _state(core)
     settings = state.settings
     projects = await state.get_projects(force_refresh=force_refresh)
+    if await _reject_unknown_host(core, update, host if host != "all" else None):
+        return
+    target_host = state.host_by_id(host) if host and host != "all" else None
+
+    # 编号永远是「全库连续」（与 /upgrade NN 同序），换主机查看不会改变编号
+    all_ordered = state.order(projects)
+    numbers = {(p.get("host"), p.get("name")): i + 1 for i, p in enumerate(all_ordered)}
+
+    # ---------- 多主机：第一屏先选主机 ----------
+    if state.multi_host and target_host is None and host is None:
+        total = len(all_ordered)
+        running = sum(1 for p in all_ordered if "running" in str(p.get("status", "")).lower())
+        text = "📊 <b>共 %d 个项目</b>（🟢 %d 运行中），分布在 %d 台主机\n" % (
+            total,
+            running,
+            len(state.hosts),
+        )
+        text += "🖥 <b>主机：</b>%s\n\n" % esc(
+            " / ".join(
+                "%s %d" % (h.label or h.id, sum(1 for p in all_ordered if p.get("host") == h.id))
+                for h in state.hosts
+            )
+        )
+        text += "请选择要管理的主机：\n"
+        for hint in scan_hint(state, include_compose=False):
+            text += hint + "\n"
+        rows: list[list[InlineKeyboardButton]] = []
+        for h in state.hosts:
+            count = sum(1 for p in all_ordered if p.get("host") == h.id)
+            mark = " ⚠️" if (h.error or (state.host_errors or {}).get(h.id)) else ""
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        "🖥 %s（%d 个项目）%s" % ((h.label or h.id)[:22], count, mark),
+                        callback_data=cb_simple("d", "host_list", h.id),
+                    )
+                ]
+            )
+        rows.append(
+            [InlineKeyboardButton("📚 全部主机（%d 个项目）" % total, callback_data=cb_simple("d", "page_turn", 1, "all"))]
+        )
+        rows.append(
+            [
+                InlineKeyboardButton("🧹 镜像清理菜单", callback_data=cb_simple("d", "prune_menu")),
+                InlineKeyboardButton("🏠 返回", callback_data=nav_home()),
+            ]
+        )
+        await core.panels.render("docker", update, text, InlineKeyboardMarkup(rows))
+        return
+
+    visible = all_ordered if target_host is None else [p for p in all_ordered if p.get("host") == target_host.id]
     total_projects = len(projects)
     running_cnt = sum(1 for p in projects if "running" in str(p.get("status", "")).lower())
-    ordered = state.order(projects)
-    page_projects, page, total_pages = paginate_projects(ordered, page, settings.page_size)
+    page_projects, page, total_pages = paginate_projects(visible, page, settings.page_size)
 
     text = "📊 <b>统计：</b>共 %d 个项目 | 🟢 %d 运行中 | 🟡 %d 停止\n" % (
         total_projects,
@@ -307,27 +377,27 @@ async def _render_list(
         total_projects - running_cnt,
     )
     if state.multi_host:
-        per_host = " / ".join(
-            "%s %d" % (host.id, sum(1 for p in ordered if p.get("host") == host.id))
-            for host in state.hosts
-        )
-        text += "🖥 <b>主机：</b>%s\n" % esc(per_host)
+        if target_host is not None:
+            text += "🖥 <b>主机：</b>%s（%d 个项目）\n" % (
+                esc(target_host.display),
+                len(visible),
+            )
+        else:
+            text += "🖥 <b>主机：</b>%s\n" % esc(
+                " / ".join(
+                    "%s %d" % (h.id, sum(1 for p in all_ordered if p.get("host") == h.id))
+                    for h in state.hosts
+                )
+            )
     text += "📖 <b>页码：</b>%d / %d\n" % (page, total_pages)
     if state.compose_bin is not None and not state.compose_bin:
         text += "⚠️ 未检测到 <code>docker compose</code> / <code>docker-compose</code> 命令\n"
     text += "\n"
 
     keyboard: list[list[InlineKeyboardButton]] = []
-    start_idx = (page - 1) * settings.page_size
-
-    # 主机异常 / 未挂载目录这类提示**两种情况下都要说**：以前只在「一个项目都没有」时才打印，
-    # 于是「本机 5 个项目 + 远端连不上」的面板看着一切正常，只有主机计数里那个 0 露馅。
-    hints = scan_hint(state, include_compose=False)
-
-    numbers = {(p.get("host"), p.get("name")): i + 1 for i, p in enumerate(ordered)}
 
     def row_text(p: dict) -> str:
-        """画一条项目（编号与 `/upgrade NN` 同序），并把按钮挂进 keyboard。"""
+        """画一条项目（编号全局连续，与 `/upgrade NN` 同序），并把按钮挂进 keyboard。"""
         num = "%02d" % numbers.get((p.get("host"), p.get("name")), 0)
         name = str(p.get("name", ""))
         label = state.project_label(p)
@@ -338,12 +408,12 @@ async def _render_list(
         services_str = ", ".join(services) if services else "-"
 
         out = "<b>%s.</b> %s %s <code>[%s]</code>\n" % (num, esc(label), status_icon, esc(status))
-        if state.multi_host:
+        if state.multi_host and target_host is None:
             out += "     主机：%s\n" % esc(str(p.get("host_label") or p.get("host") or ""))
         out += "     路径：<code>%s</code>\n" % esc(p.get("dir", ""))
         out += "     容器：%s\n\n" % esc(services_str)
 
-        payload = {"name": name, "page": page, "host": p.get("host")}
+        payload = {"name": name, "page": page, "host": p.get("host"), "list_host": host or ""}
         if len(services) > 1:
             data = cb("d", "p_sel", payload)
             keyboard.append(
@@ -356,88 +426,103 @@ async def _render_list(
             )
         return out
 
-    if not ordered:
-        text += "⚠️ 暂未检测到任何 Docker Compose 项目\n"
+    hints = scan_hint(state, include_compose=False)
+
+    if not visible:
+        if target_host is not None:
+            text += "⚠️ 这台主机上未检测到 Docker Compose 项目\n"
+        else:
+            text += "⚠️ 暂未检测到任何 Docker Compose 项目\n"
         for hint in hints:
             text += hint + "\n"
-    elif state.multi_host:
-        # 多主机：**每台主机都画一段**，0 个项目 / 连不上的主机也要看得见——
-        # 否则「远端没项目或没连上」在面板上完全看不出来，只剩顶部计数里一个 0。
+    elif target_host is not None or not state.multi_host:
+        last_group: Optional[str] = None
+        for p in page_projects:
+            if not state.multi_host:
+                is_running = "running" in str(p.get("status", "")).lower()
+                group = "running" if is_running else "stopped"
+                if group != last_group:
+                    text += "🟢 <b>运行中</b>\n" if is_running else "🟡 <b>已停止</b>\n"
+                    last_group = group
+            text += row_text(p)
+        if hints:
+            text += "\n" + "\n".join(hints) + "\n"
+    else:
+        # 全部主机混合视图：每台主机都画一段（0 项目/故障也要看得见）
         page_by_host: dict[str, list[dict]] = {}
         for p in page_projects:
             page_by_host.setdefault(str(p.get("host") or ""), []).append(p)
         total_by_host: dict[str, int] = {}
-        for p in ordered:
+        for p in all_ordered:
             key = str(p.get("host") or "")
             total_by_host[key] = total_by_host.get(key, 0) + 1
 
         drawn: set[str] = set()
-        # 段顺序必须跟 order() 的排序键（host id）一致，否则会出现
-        # 「本机 11、12 排在远端 07~10 上面」这种编号跳来跳去的页面。
-        for host in sorted(state.hosts, key=lambda h: str(h.id)):
-            text += "🖥 <b>%s</b>\n" % esc(host.display)
-            drawn.add(host.id)
-            if host.error:
-                text += "     ⚠️ %s\n\n" % esc(host.error)
+        # 段顺序必须跟 order() 的排序键（host id）一致，否则编号会在同一页里来回跳
+        for h in sorted(state.hosts, key=lambda item: str(item.id)):
+            text += "🖥 <b>%s</b>\n" % esc(h.display)
+            drawn.add(h.id)
+            if h.error:
+                text += "     ⚠️ %s\n\n" % esc(h.error)
                 continue
-            mine = page_by_host.get(host.id, [])
+            mine = page_by_host.get(h.id, [])
             if mine:
                 for p in mine:
                     text += row_text(p)
                 continue
-            err = (state.host_errors or {}).get(host.id)
-            if total_by_host.get(host.id):
+            err = (state.host_errors or {}).get(h.id)
+            if total_by_host.get(h.id):
                 text += "     （这一页没有它的项目，翻页看看）\n\n"
             elif err:
                 text += "     ⚠️ %s\n\n" % esc(err)
             else:
                 text += "     （未检测到 Compose 项目）\n\n"
-
-        # 兜底：不在 state.hosts 里的项目（正常不会出现）也不能凭空消失
         for p in page_projects:
             if str(p.get("host") or "") not in drawn:
                 text += row_text(p)
+        if hints:
+            text += "\n" + "\n".join(hints) + "\n"
 
-        if hints:
-            text += "\n" + "\n".join(hints) + "\n"
-    else:
-        last_group: Optional[str] = None
-        for p in page_projects:
-            is_running = "running" in str(p.get("status", "")).lower()
-            group = "running" if is_running else "stopped"
-            if group != last_group:
-                text += "🟢 <b>运行中</b>\n" if is_running else "🟡 <b>已停止</b>\n"
-                last_group = group
-            text += row_text(p)
-        if hints:
-            text += "\n" + "\n".join(hints) + "\n"
+    host_arg = host or ("all" if state.multi_host else None)
+
+    def turn(n: int) -> str:
+        return cb_simple("d", "page_turn", n, host_arg) if host_arg else cb_simple("d", "page_turn", n)
 
     nav: list[InlineKeyboardButton] = []
     if page > 1:
-        nav.append(
-            InlineKeyboardButton("◀ 上一页", callback_data=cb_simple("d", "page_turn", page - 1))
-        )
+        nav.append(InlineKeyboardButton("◀ 上一页", callback_data=turn(page - 1)))
     nav.append(
         InlineKeyboardButton("📄 %d/%d" % (page, total_pages), callback_data=cb_simple("d", "noop"))
     )
     if page < total_pages:
-        nav.append(
-            InlineKeyboardButton("下一页 ▶", callback_data=cb_simple("d", "page_turn", page + 1))
-        )
+        nav.append(InlineKeyboardButton("下一页 ▶", callback_data=turn(page + 1)))
     keyboard.append(nav)
-    keyboard.append(
-        [
-            InlineKeyboardButton("🧹 镜像清理菜单", callback_data=cb_simple("d", "prune_menu")),
-            InlineKeyboardButton("⬆️ 升级全部项目", callback_data=cb_simple("d", "upgrade_all")),
-        ]
+    prune_data = (
+        cb_simple("d", "prune_menu", target_host.id) if target_host is not None else cb_simple("d", "prune_menu")
+    )
+    upgrade_data = (
+        cb_simple("d", "upgrade_all", target_host.id)
+        if target_host is not None
+        else cb_simple("d", "upgrade_all", "all")
     )
     keyboard.append(
         [
+            InlineKeyboardButton("🧹 镜像清理菜单", callback_data=prune_data),
             InlineKeyboardButton(
-                "🔄 刷新状态", callback_data=cb_simple("d", "refresh", page)
-            )
+                "⬆️ 升级全部项目" if target_host is None else "⬆️ 升级这台全部项目",
+                callback_data=upgrade_data,
+            ),
         ]
     )
+    refresh_row = [
+        InlineKeyboardButton(
+            "🔄 刷新状态",
+            callback_data=cb_simple("d", "refresh", page, host_arg) if host_arg else cb_simple("d", "refresh", page),
+        )
+    ]
+    if state.multi_host:
+        refresh_row.append(InlineKeyboardButton("🖥 换主机", callback_data=cb_simple("d", "page_turn", 1)))
+    keyboard.append(refresh_row)
 
     await core.panels.render("docker", update, text, InlineKeyboardMarkup(keyboard))
 
@@ -493,7 +578,10 @@ async def _show_detail(
     keyboard.append(
         [
             InlineKeyboardButton(
-                "🔙 返回列表", callback_data=cb_simple("d", "page_turn", back_page)
+                "🔙 返回列表",
+                callback_data=cb_simple("d", "page_turn", back_page, host_id)
+                if state.multi_host
+                else cb_simple("d", "page_turn", back_page),
             )
         ]
     )
@@ -583,23 +671,35 @@ async def _ask_service_upgrade(
     )
 
 
-async def _ask_upgrade_all(core: Core, update: Update) -> None:
-    """批量升级全部项目的确认（LDMG upgrade_all）。"""
+async def _ask_upgrade_all(core: Core, update: Update, host: Optional[str] = None) -> None:
+    """批量升级的确认（LDMG upgrade_all）。给了 host 就只升那台主机。"""
     await _answer(update)
     state = _state(core)
+    if await _reject_unknown_host(core, update, host if host != "all" else None):
+        return
+    target_host = state.host_by_id(host) if host and host != "all" else None
     projects = await state.get_projects()
+    if target_host is not None:
+        projects = [p for p in projects if p.get("host") == target_host.id]
+        scope = "主机 <b>%s</b> 上的 %d 个" % (esc(target_host.display), len(projects))
+    else:
+        scope = "全部 %d 个" % len(projects)
     text = (
-        "⚠️ <b>确认批量升级全部项目？</b>\n"
-        "共有 %d 个 Compose 项目，将依次执行 <code>pull</code> + <code>up -d</code>。\n"
-        "过程可在 🧰 任务中心或进度消息里中断。" % len(projects)
+        "⚠️ <b>确认批量升级？</b>\n"
+        "%s Compose 项目将依次执行 <code>pull</code> + <code>up -d</code>。\n"
+        "过程可在 🧰 任务中心或进度消息里中断。" % scope
     )
+    confirm_extra = [target_host.id] if target_host is not None else []
+    cancel_extra = [target_host.id] if target_host is not None else []
     await core.panels.ask_confirm(
         "docker",
         update,
         text,
-        cb_simple("d", "upgrade_all_confirm"),
-        cancel_data=cb_simple("d", "page_turn", 1),
-        confirm_label="🚀 确认升级全部",
+        cb_simple("d", "upgrade_all_confirm", *confirm_extra),
+        cancel_data=cb_simple("d", "page_turn", 1, *cancel_extra)
+        if cancel_extra
+        else cb_simple("d", "page_turn", 1),
+        confirm_label="🚀 确认升级全部" if target_host is None else "🚀 确认升级这台",
         cancel_label="❌ 取消",
     )
 
@@ -821,12 +921,17 @@ async def _do_upgrade_service(
     )
 
 
-async def _do_upgrade_all(core: Core, update: Update, context: Any) -> None:
-    """批量升级全部项目（LDMG do_upgrade_all）。"""
+async def _do_upgrade_all(
+    core: Core, update: Update, context: Any, host: Optional[str] = None
+) -> None:
+    """批量升级（LDMG do_upgrade_all）。给了 host 就只升那台主机。"""
     state = _state(core)
     if update.effective_message is None:
         await _answer(update, "⚠️ 当前会话不可用，请重新用 /d_list 打开面板")
         return
+    if await _reject_unknown_host(core, update, host if host != "all" else None):
+        return
+    target_host = state.host_by_id(host) if host and host != "all" else None
     task_id = uuid.uuid4().hex
     if not await state.begin_task(task_id):
         await _busy(core, update)
@@ -834,7 +939,11 @@ async def _do_upgrade_all(core: Core, update: Update, context: Any) -> None:
 
     job = core.jobs.add(
         "docker",
-        "批量升级全部项目" if not state.multi_host else "批量升级全部项目（%d 台主机）" % len(state.hosts),
+        (
+            "批量升级 %s" % target_host.display
+            if target_host is not None
+            else ("批量升级全部项目" if not state.multi_host else "批量升级全部项目（%d 台主机）" % len(state.hosts))
+        ),
         cancel=state.request_cancel,
         chat_id=_chat_id(update),
     )
@@ -843,7 +952,10 @@ async def _do_upgrade_all(core: Core, update: Update, context: Any) -> None:
 
     try:
         await _answer(update)
-        projects = state.order(await state.get_projects())
+        all_projects = await state.get_projects()
+        if target_host is not None:
+            all_projects = [p for p in all_projects if p.get("host") == target_host.id]
+        projects = state.order(all_projects)
 
         if not projects:
             status, detail = FAILED, "未检测到可升级的项目"
@@ -1274,13 +1386,23 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     if action == "page_turn":
-        await _render_list(core, update, page=_to_int(parts[2] if len(parts) > 2 else 1))
+        await _render_list(
+            core,
+            update,
+            page=_to_int(parts[2] if len(parts) > 2 else 1),
+            host=parts[3] if len(parts) > 3 else None,
+        )
+    elif action == "host_list":
+        await _render_list(
+            core, update, page=1, host=parts[2] if len(parts) > 2 else None
+        )
     elif action == "refresh":
         await _render_list(
             core,
             update,
             page=_to_int(parts[2] if len(parts) > 2 else 1),
             force_refresh=True,
+            host=parts[3] if len(parts) > 3 else None,
         )
     elif action == "p_sel":
         await _show_detail(
@@ -1327,13 +1449,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             payload.get("host"),
         )
     elif action == "upgrade_all":
-        await _ask_upgrade_all(core, update)
+        await _ask_upgrade_all(core, update, parts[2] if len(parts) > 2 else None)
     elif action == "upgrade_all_confirm":
         ok, why = core.panels.validate_confirm(query, data)
         if not ok:
             await _answer(update, why, alert=True)
             return
-        await _do_upgrade_all(core, update, context)
+        await _do_upgrade_all(core, update, context, parts[2] if len(parts) > 2 else None)
     elif action == "prune_menu":
         await _show_prune_menu(core, update, parts[2] if len(parts) > 2 else None)
     elif action == "prune_req":

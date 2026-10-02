@@ -163,7 +163,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/MbAIGC/MTBots/main/scripts/s
 
 > URL 里用的是 `main`，所以不用跟着版本号改，**脚本升级也不牵扯镜像**（这两件事现在解耦了：
 > 脚本在仓库里，镜像只是顺带带一份离线副本）。想锁死某个版本：
-> 把 URL 里的 `main` 换成 `v1.3.6`，或加 `--ref v1.3.6`。
+> 把 URL 里的 `main` 换成 `v1.4.0`，或加 `--ref v1.4.0`。
 
 ### 一键接入：远端侧一条命令
 
@@ -203,7 +203,7 @@ cd /mbots && make remote-setup
 cd /mbots && make add-host          # 方式选 1「复用已有账号」，账号填 mtbots
 ```
 
-> 远端脚本里的守卫默认从 `main` 拉（跟脚本同源），所以不用手写守卫 URL；要指定版本就加 `--ref v1.3.6`。
+> 远端脚本里的守卫默认从 `main` 拉（跟脚本同源），所以不用手写守卫 URL；要指定版本就加 `--ref v1.4.0`。
 
 ### 非交互（CI / 批量，可选）
 
@@ -414,6 +414,43 @@ docker compose exec mtbots python -m mtbots --health | grep 🐳
 
 ### 8. 生效后的面板长这样（真代码渲染）
 
+**第一屏先选主机**（点 Docker 进来的就是这屏）：
+
+```text
+📊 共 2 个项目（🟢 2 运行中），分布在 2 台主机
+🖥 主机：NAS 1 / VPS 1
+
+请选择要管理的主机：
+   [🖥 NAS（1 个项目）]
+   [🖥 VPS（1 个项目）]
+   [📚 全部主机（2 个项目）]
+   [🧹 镜像清理菜单]  [🏠 返回]
+```
+
+选一台之后就**只看那台**，批量升级也只作用于那台：
+
+```text
+📊 统计：共 2 个项目 | 🟢 2 运行中 | 🟡 0 停止
+🖥 主机：VPS（1 个项目）
+📖 页码：1 / 1
+
+01. 192-168-1-5/docker 🟢 [running(4)]
+     路径：/mnt/data1/docker
+     容器：a
+   [🚀 01. 192-168-1-5/docker]
+   [📄 1/1]
+   [🧹 镜像清理菜单]  [⬆️ 升级这台全部项目]
+   [🔄 刷新状态]  [🖥 换主机]  [🏠 返回]
+```
+
+**首页直接把每台主机摆出来**（少点一次，`/start` 或 `/menu`）：
+
+```text
+🐳 docker（NAS）    🐳 docker（VPS）
+```
+
+### 8.1 合并视图（「📚 全部主机」里，仍然保留）
+
 ```
 📊 统计：共 2 个项目 | 🟢 1 运行中 | 🟡 1 停止
 🖥 主机：nas 1 / vps 1
@@ -435,7 +472,10 @@ docker compose exec mtbots python -m mtbots --health | grep 🐳
 
 行为上的变化（与单机对比）：
 
-* **每台主机都会有一段**：0 个项目的、连不上的、配置写错的都会显示出来并写明原因（以前只画「有项目的主机」，远端空空如也就完全看不见）；
+* **第一屏是选主机**，选完只看那台；「📚 全部主机」里每台都有独立一段——
+  0 个项目的、连不上的、配置写错的都会写明原因（以前只画「有项目的主机」，远端空空如也就完全看不见）；
+* **首页有每台主机的直达按钮**：`🐳 docker（NAS）` / `🐳 docker（VPS）`；
+* 项目编号是**全库连续**的（与 `/upgrade NN` 同序），换主机查看不会改变编号；
 * 项目标签带主机前缀 `vps/blog`；`/upgrade 02` 的编号与面板**同序**（跨主机连续编号，面板与命令行共用同一套排序）；
 * **镜像清理按主机执行**：多主机时先选主机，再选清理范围；
 * `/d_status` 每台主机一段；`--health` 逐主机报项目数；
@@ -492,7 +532,7 @@ mtbots/
 ├── scripts/                                          # setup-remote-host.sh：一键接入远端主机（交互向导）
 ├── docs/                                             # 设计稿、施工契约（porting-contract）、合并报告
 │   └── examples/                                     # 多主机：主机清单样例、远端守卫脚本、authorized_keys 样例
-└── tests/                                            # 409 个 stdlib unittest 用例
+└── tests/                                            # 412 个 stdlib unittest 用例
 ```
 
 ## 配置
@@ -555,7 +595,7 @@ make check
 ```
 
 测试全部是 stdlib `unittest`、不联网也不碰真实 Telegram/Docker（Docker 用例还会把
-`subprocess` / `create_subprocess_exec` 换成抛异常的桩做反证）。当前 **409 个用例全绿**：
+`subprocess` / `create_subprocess_exec` 换成抛异常的桩做反证）。当前 **412 个用例全绿**：
 
 | 文件 | 用例 | 覆盖 |
 |---|---|---|
@@ -564,7 +604,7 @@ make check
 | `tests/test_litepan_module.py` | 59 | slug 构建（拼音/限长/去重）、users.json 校验、发现解析与缓存、菜单预算、触发与回执 |
 | `tests/test_setup_script.py` | 26 | 两个接入脚本：ssh/scp 打桩跑完整向导流程（主机清单幂等合并 / `command=` 守卫行 / create 模式驱动远端脚本 / dry-run 不落地 / 非法 id 被拒），远端准备脚本（dry-run、参数校验、真跑时守卫 0755 + authorized_keys 0600 + 幂等 + 别人的 key 不动）、curl 模式（项目根取当前目录、不读 stdin、按 `--ref` 下载配套脚本）、远端侧交互向导（账号/公钥/守卫三问 + `--pubkey-line`/`--guard-url`）、`bash <(curl …)` 形式（$0=/dev/fd/* 时项目根取当前目录）、公钥被截断时早报错、老 sshd（<7.2）自动改用长格式选项、公钥已装+守卫生效时不被误判成「没装公钥」（先用守卫放行的 `docker compose version` 探连通，再用 `printf $HOME` 探「是不是守卫态」——compose 能跑不等于 key 没被 command= 限制，两者都要判对，且守卫态绝不写远端） |
 | `tests/test_cline_module.py` | 140 | 额度解析/渲染、Key 掩码与指纹、别名校验、存储读写与自愈、默认拒绝 |
-| `tests/test_integration.py` | 38 | 三个真实模块一起装配、命令不重复、菜单合并、`--check` 离线可跑，**真 `telegram.Update` 走 PTB dispatcher 的端到端用例**（不重复执行、全角命令可救援、下线模块的按钮有反馈、点按钮原地改同一条面板、**所有面板文案都过一遍 Telegram HTML 合法性校验**），多主机装配用例（按主机分组、**0 项目/故障/配置错的远端都要有段并写明原因、跨页提示**、单主机无主机标题、伪造 host id 被拒且不执行、`/upgrade` 编号与面板一致、状态与清理按主机），以及**收尾只留一条消息**（批量升级不再推卡片、执行消息带 `delete_on_success`、收尾面板带跨模块入口、`🔙 返回列表` 回原页、失败抄尾部输出、进度面板可中断、最后一步取消判为取消） |
+| `tests/test_integration.py` | 41 | 三个真实模块一起装配、命令不重复、菜单合并、`--check` 离线可跑，**真 `telegram.Update` 走 PTB dispatcher 的端到端用例**（不重复执行、全角命令可救援、下线模块的按钮有反馈、点按钮原地改同一条面板、**所有面板文案都过一遍 Telegram HTML 合法性校验**），多主机装配用例（按主机分组、**0 项目/故障/配置错的远端都要有段并写明原因、跨页提示**、单主机无主机标题、伪造 host id 被拒且不执行、`/upgrade` 编号与面板一致、状态与清理按主机），以及**收尾只留一条消息**（批量升级不再推卡片、执行消息带 `delete_on_success`、收尾面板带跨模块入口、`🔙 返回列表` 回原页、失败抄尾部输出、进度面板可中断、最后一步取消判为取消） |
 
 ## 与原三个 Bot 的差异（有意为之）
 
