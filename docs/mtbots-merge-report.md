@@ -2,7 +2,7 @@
 
 > 依据：[three-bots-merge-design.md](three-bots-merge-design.md)（可行性 + 交互设计）、
 > [three-bots-merge-ux.md](three-bots-merge-ux.md)（单人版交互图）、[porting-contract.md](porting-contract.md)（施工契约）。
-> 结果：三个 Bot 已合并为 **一个进程、一个 Python 包 `mtbots`**（Bot 名 MTBots，方案 A：单进程模块化），可运行、可自检、**412 个测试全绿**。
+> 结果：三个 Bot 已合并为 **一个进程、一个 Python 包 `mtbots`**（Bot 名 MTBots，方案 A：单进程模块化），可运行、可自检、**413 个测试全绿**。
 
 ---
 
@@ -55,7 +55,7 @@
 
 ```bash
 cd /root/DSH/MTBots
-PYTHONPATH=./.vendor:. python3 -m unittest discover -s tests -t .   # 412 tests OK
+PYTHONPATH=./.vendor:. python3 -m unittest discover -s tests -t .   # 413 tests OK
 PYTHONPATH=./.vendor:. python3 -m mtbots --check                      # exit 0，离线
 PYTHONPATH=./.vendor:. python3 -m mtbots --health                     # 真实探测（compose / LitePan / Cline 存储）
 ```
@@ -67,7 +67,7 @@ PYTHONPATH=./.vendor:. python3 -m mtbots --health                     # 真实�
 | `tests/test_litepan_module.py` | 59 | OK |
 | `tests/test_cline_module.py` | 140 | OK |
 | `tests/test_integration.py` | 34 | OK（5 个装配 + 13 个真 Update 端到端 + 6 个收尾流程 + 6 个多主机流程 + 2 个 HTML 守卫用例） |
-| **合计** | **412** | **OK（约 13s，无网络）** |
+| **合计** | **413** | **OK（约 13s，无网络）** |
 
 端到端用例（`DispatcherTests`）用**真正的 `telegram.Update` + 记录型假 Bot** 跑 PTB 自己的
 `Application.process_update`，因此能抓到装配级事故：
@@ -160,7 +160,7 @@ DOCKER_GID=$(getent group docker | cut -d: -f3) docker compose up -d
 DOCKER_GID=$(getent group docker | cut -d: -f3) docker compose up -d --build
 ```
 
-## 10. 修复记录（线上反馈驱动，v1.0.1 → v1.5.0）
+## 10. 修复记录（线上反馈驱动，v1.0.1 → v1.5.1）
 
 上线后按线上反馈修了七轮，又加了一轮功能（多主机），全部带回归测试（377 个用例）：
 
@@ -186,3 +186,4 @@ DOCKER_GID=$(getent group docker | cut -d: -f3) docker compose up -d --build
 | 明明配好了远端（日志 `主机=local,192-168-1-xxx`），面板上却「只有本机，没有远端」 | 多主机面板的主机标题是**从项目行推导**出来的：某台主机 0 个项目（或连不上、配置写错）时，它连标题都不会出现，只剩顶部计数里一个 0——看起来就像没配上 | 多主机时改成**按 `state.hosts` 逐台画段**：0 个项目写「（未检测到 Compose 项目）」、扫描失败写具体原因、配置错写配置错、本页没有该项目写「翻页看看」；顺带把清单路径/存在性打进 `/id` 与 `--health`，向导写完清单自动 chown 10001 + 644；测试 405 → 409 |
 | 多主机时 25 个项目混在一个列表里，远端被挤到第 2~5 页；「点 Docker 应该先选主机」 | 面板只有一个混合列表（多主机段是后加的），没有主机层级；首页也只有模块一个入口 | 多主机时 `/d_list` **第一屏就是选主机**（每台一行 + 「📚 全部主机」），选中后只看那台、批量升级也只作用于那台（按钮变「⬆️ 升级这台全部项目」），并给「🖥 换主机」；首页新增模块钩子 `ModuleSpec.home_entries`，Docker 用它把每台主机摆到首页（`🐳 docker（NAS）`）；单主机路径一字未改；测试 409 → 412 |
 | 「实测没变化」时日志一片安静，看不出扫描到底跑没跑、哪台扫到几个 | 扫描成功不打日志（只有失败才 WARNING），面板又可能只是没刷新 | 每次扫描汇总一行：`扫描完成（0.4s）：local 15、192-168-1-5 10，共 25 个项目`，主机失败 `主机 X 扫描失败：…`，未挂载目录也提示；结果与错误都没变化时降到 DEBUG 不刷屏。版本跳到 1.5.0 |
+| 新增的多主机日志里有远端地址/用户名/密钥路径，日志脱敏没覆盖这些 | `redact()` 原来只管 Token/Key/邮箱/密码；多主机日志会把 `mtbots@192.168.155.89`、`192-168-155-89`、`/app/data/ssh/id_ed25519` 这类信息原样落盘 | 脱敏模式补齐：IPv4 只留网段（`192.168.*.*`）、`192-168-1-5` 形态、ssh 目标里的用户名（`***@…`）、私钥文件名（`id_***`）、`Authorization/Bearer`；时间戳等普通文本不受影响；`RedactingFilter` 仍挂在 root handler 上，所有模块日志与 traceback 都过一遍；测试 412 → 413 |

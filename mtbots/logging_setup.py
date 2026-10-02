@@ -28,6 +28,15 @@ _SECRET_PATTERNS = (
     # 管理员密码字段（JSON / 查询串 / 表单三种形态）
     (re.compile(r'("(?:password|admin_password)"\s*:\s*")[^"]*(")'), r"\1***\2"),
     (re.compile(r"((?:password|admin_password)=)[^&\s]+"), r"\1***"),
+    # 认证头（万一上游库把 header 打出来）
+    (re.compile(r"(?i)\b(bearer|authorization)\b\s*[:=]?\s*[A-Za-z0-9._\-]{8,}"), r"\1 ***"),
+    # 多主机：IPv4 只留网段（远端地址、主机 id 都可能是 IP）
+    (re.compile(r"\b(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}\b"), r"\1.\2.*.*"),
+    (re.compile(r"\b(\d{1,3})-(\d{1,3})-\d{1,3}-\d{1,3}\b"), r"\1-\2-*-*"),
+    # ssh 目标里的用户名：mtbots@192.168.*.* -> ***@192.168.*.*
+    (re.compile(r"\b[A-Za-z0-9._\-]{1,32}@(?=[A-Za-z0-9._\-]|\d)"), "***@"),
+    # 私钥文件名（保留目录，方便排查「私钥不存在」）
+    (re.compile(r"\bid_(?:rsa|dsa|ecdsa|ed25519)\b"), "id_***"),
 )
 
 _REDACT_KEYS = ("password", "api_key", "apikey", "token", "secret")

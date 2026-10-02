@@ -437,6 +437,27 @@ class LoggingTests(unittest.TestCase):
         self.assertIn("***", redact('{"admin_password": "hunter2"}'))
         self.assertIn("***", redact("admin_password=hunter2&x=1"))
 
+    def test_redact_multi_host_details(self):
+        """多主机日志：IP、ssh 目标里的用户名、私钥文件名都要脱敏，但不能把时间戳搅了。"""
+        from mtbots.logging_setup import redact
+
+        out = redact("ssh mtbots@192.168.155.89: Permission denied (publickey).")
+        self.assertNotIn("192.168.155.89", out)
+        self.assertNotIn("mtbots@", out)
+        self.assertIn("***@192.168.*.*", out)
+
+        out = redact("扫描完成（0.4s）：local 15、192-168-155-89 10，共 25 个项目")
+        self.assertNotIn("192-168-155-89", out)
+        self.assertIn("192-168-*-*", out)
+
+        out = redact("私钥不存在：/app/data/ssh/id_ed25519")
+        self.assertNotIn("id_ed25519", out)
+        self.assertIn("/app/data/ssh/id_***", out)
+
+        self.assertIn("Bearer ***", redact("Authorization: Bearer abcdefghijklmnop"))
+        # 时间戳/普通文本不能被动
+        self.assertEqual(redact("2026-10-03 01:56:23,434 INFO ok"), "2026-10-03 01:56:23,434 INFO ok")
+
     def test_token_mask_filter(self):
         import logging
 
