@@ -331,6 +331,9 @@ def load_hosts(path) -> tuple[list[DockerHost], list[str]]: ...   # (主机列�
   退出码语义：`255` ssh 连不上/认证失败、`126` 被远端守卫拒绝、`127` 远端没装 compose。
 * 远端准备与 `authorized_keys` 强制命令守卫见 `docs/examples/`；守卫必须覆盖 bot 会发的**全部**命令形态
   （新增命令要同步改守卫，否则远端以 126 拒绝）。
+* 接入过程脚本化：`scripts/setup-remote-host.sh`（bot 侧向导，`make add-host`）驱动
+  `docs/examples/mtbots-remote-setup.sh`（远端一次性准备，幂等、改前备份）；两个脚本都要
+  能重复执行，且被 `tests/test_setup_script.py` 覆盖（ssh/scp 打桩，不联网）。
 
 ## 9. 兼容与迁移
 

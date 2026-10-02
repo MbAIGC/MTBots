@@ -46,6 +46,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY mtbots ./mtbots
 COPY README.md ./
+# 多主机接入向导与示例（容器内可直接跑：docker compose exec mtbots sh /app/scripts/setup-remote-host.sh）
+COPY scripts ./scripts
+COPY docs/examples ./docs/examples
 
 # 非 root 运行（uid 固定 10001，方便把宿主机挂载目录 chown 给它）
 RUN useradd --uid 10001 --create-home --shell /usr/sbin/nologin mtbots \

@@ -144,9 +144,10 @@ mtbots/
 ├── Dockerfile / docker-compose.yml / .dockerignore   # 镜像与部署（非 root、只读根、自带 docker CLI）
 ├── .github/workflows/docker.yml                      # CI：跑测试 + 构建 amd64/arm64 镜像推 GHCR
 ├── Makefile                                          # make check / health / test / run / list
+├── scripts/                                          # setup-remote-host.sh：一键接入远端主机（交互向导）
 ├── docs/                                             # 设计稿、施工契约（porting-contract）、合并报告
 │   └── examples/                                     # 多主机：主机清单样例、远端守卫脚本、authorized_keys 样例
-└── tests/                                            # 379 个 stdlib unittest 用例
+└── tests/                                            # 391 个 stdlib unittest 用例
 ```
 
 ## 配置
@@ -209,13 +210,14 @@ make check
 ```
 
 测试全部是 stdlib `unittest`、不联网也不碰真实 Telegram/Docker（Docker 用例还会把
-`subprocess` / `create_subprocess_exec` 换成抛异常的桩做反证）。当前 **379 个用例全绿**：
+`subprocess` / `create_subprocess_exec` 换成抛异常的桩做反证）。当前 **391 个用例全绿**：
 
 | 文件 | 用例 | 覆盖 |
 |---|---|---|
 | `tests/test_core.py` | 70 | 文本分片（HTML 标签闭合）、`safe_html` 出口转义、`SafeBot` 解析失败降级、ACL 默认拒绝、存储原子写/0600/损坏分类、任务中心（运行中显示最后一行输出、终态不再翻转）与收尾卡片文案、跨模块入口按钮的取舍（启用/权限/排不下）、**命令菜单的作用域规则（私聊按权限裁剪 / 群取全量 / 空片段不下发）**、面板唯一与两步确认、菜单去重与作用域、配置兼容、日志脱敏（含 exc_info 的 traceback）、路由消歧与兜底救援 |
 | `tests/test_docker_module.py` | 76 | 项目排序/分页、pull 噪音过滤、清理候选、回调载荷、模块装配、**扫描失败诊断（实测 socket GID、未挂载目录的公共挂载点、缺命令）**、执行消息收尾（成功即删、失败必留、结果回传）、失败尾部输出与进度键盘的中断入口、**多主机（主机清单校验 / ssh 包装与引号 / 逐主机扫描与提示 / 退出码映射 / 只认配置内的 host id）** |
 | `tests/test_litepan_module.py` | 59 | slug 构建（拼音/限长/去重）、users.json 校验、发现解析与缓存、菜单预算、触发与回执 |
+| `tests/test_setup_script.py` | 12 | 两个接入脚本：ssh/scp 打桩跑完整向导流程（主机清单幂等合并 / `command=` 守卫行 / create 模式驱动远端脚本 / dry-run 不落地 / 非法 id 被拒），远端准备脚本（dry-run、参数校验、真跑时守卫 0755 + authorized_keys 0600 + 幂等 + 别人的 key 不动） |
 | `tests/test_cline_module.py` | 140 | 额度解析/渲染、Key 掩码与指纹、别名校验、存储读写与自愈、默认拒绝 |
 | `tests/test_integration.py` | 34 | 三个真实模块一起装配、命令不重复、菜单合并、`--check` 离线可跑，**真 `telegram.Update` 走 PTB dispatcher 的端到端用例**（不重复执行、全角命令可救援、下线模块的按钮有反馈、点按钮原地改同一条面板、**所有面板文案都过一遍 Telegram HTML 合法性校验**），多主机装配用例（按主机分组、单主机无主机标题、伪造 host id 被拒且不执行、`/upgrade` 编号与面板一致、状态与清理按主机），以及**收尾只留一条消息**（批量升级不再推卡片、执行消息带 `delete_on_success`、收尾面板带跨模块入口、`🔙 返回列表` 回原页、失败抄尾部输出、进度面板可中断、最后一步取消判为取消） |
 
@@ -225,6 +227,60 @@ make check
 
 > **不配这一节的文件时，行为与以前完全一致**：只有一台「本机」，面板上没有主机字样，也不会执行任何 ssh。
 > 远端是**可选能力**，随时可以加、也可以删（删掉配置文件就回到单机）。
+
+### 一键接入（推荐）
+
+远端那侧要做的所有事（建用户、加 docker 组、修家目录权限、装守卫、写 `authorized_keys`）都收在一个脚本里，
+bot 这侧的向导会自动驱动它，并顺手把主机清单写好、链路验证过：
+
+```bash
+cd /mbots
+make add-host          # = docker compose exec mtbots sh /app/scripts/setup-remote-host.sh
+```
+
+它会问你几件事（都有默认值，直接回车也行）：
+
+| 问题 | 说明 |
+|---|---|
+| 远端 IP 或域名 | 例如 `10.0.0.5` |
+| 远端准备方式 | `1` 复用已有账号（它已经能用 docker）；`2` 新建专用用户（更干净，需要一个能 sudo 的登录账号） |
+| 账号 | 方式 2 会问「要创建的专用用户名」（默认 `mtbots`）和「用哪个账号登录做初始化」（默认 `root`） |
+| 主机 id / 显示名 | 面板与回调里用的短名（默认从地址推导），例如 `vps` / `Oracle 东京` |
+| 路径白名单 | 可选，例如 `/opt`（只允许管理这个前缀下的项目） |
+
+然后它会：
+
+1. 生成 `data/ssh/id_ed25519`（已存在就复用），并把属主交给容器用户 `10001`；
+2. 方式 2：把公钥、守卫脚本、远端准备脚本打包上传，用 `sudo` 在远端一次跑完「建用户 + 加组 + 家目录权限 + 装守卫 + 写 `authorized_keys`」（sudo 要密码时会就地提示输入）；
+   方式 1：用 `ssh-copy-id` 装公钥（提示输入远端密码），再把守卫装到 `~/.local/bin`（有免密 sudo 就装 `/usr/local/bin`）；
+3. 验证 `ssh → 守卫 → docker compose version` 整条链路；
+4. 把主机**合并**写进 `data/docker-hosts.json`（按 id 幂等，已有清单不会被覆盖；会自动带上 `local`）；
+5. 最后问你要不要直接 `docker compose up -d --force-recreate`。
+
+重复执行安全：同一台主机再跑一次只会更新那一条，同一把 key 在 `authorized_keys` 里始终只有一行（改前自动备份 `authorized_keys.bak.<时间戳>`）。
+
+不想交互也可以一行到底：
+
+```bash
+# 新建专用用户（远端 root 或能 sudo 的账号 + 密码登录；-y 表示不再确认，最后仍需你重建容器）
+docker compose exec mtbots sh /app/scripts/setup-remote-host.sh \
+  --mode create --host 10.0.0.5 --login-user root --user mtbots --id vps --label "Oracle 东京" --roots /opt -y
+
+# 复用已有账号
+docker compose exec mtbots sh /app/scripts/setup-remote-host.sh \
+  --mode existing --host 10.0.0.5 --user admin --id nas2 -y
+```
+
+**不想让向导 ssh 出去**（比如远端只能从别的跳板进）就这么办：
+
+```bash
+make remote-setup      # 打印 3 条命令：scp 公钥 / scp 守卫 / ssh 远端 sudo sh -s -- …
+```
+
+那 3 条里的第 3 条会把 [`docs/examples/mtbots-remote-setup.sh`](docs/examples/mtbots-remote-setup.sh) 直接喂给远端的 `sudo sh`，一次跑完远端那串；之后回到 bot 这边只差写清单（`make add-host` 或手写）。
+
+> 脚本要求镜像 **v1.2.0+**（`scripts/` 与 `docs/examples/` 在镜像里）。老镜像先 `docker compose pull && docker compose up -d`。
+> 下面 §0–§10 的手动步骤**完整保留**，脚本做的和手动做的完全等价；想搞清楚每一步在干什么，或者脚本在你环境里跑不通，就照手动步骤来。
 
 ### 0. 先讲清楚它到底怎么跑（为什么是 SSH）
 
@@ -467,7 +523,7 @@ docker compose exec mtbots python -m mtbots --health | grep 🐳
 * 权限仍然归 ACL：`docker` 模块默认只给 owner/admin，`upgrade`/`prune` 走两步确认；
 * **回滚**：删掉 `/mbots/data/docker-hosts.json` → `docker compose up -d --force-recreate`，立刻回到单机；密钥留着不影响（以后想再加不用重新生成）。
 
-相关文件：[`docs/examples/docker-hosts.json`](docs/examples/docker-hosts.json)（清单样例）、[`docs/examples/mtbots-compose-guard.sh`](docs/examples/mtbots-compose-guard.sh)（守卫脚本）、[`docs/examples/authorized_keys.sample`](docs/examples/authorized_keys.sample)（authorized_keys 样例）、[`docs/docker-multi-host-design.md`](docs/docker-multi-host-design.md)（设计与落地清单）。
+相关文件：[`scripts/setup-remote-host.sh`](scripts/setup-remote-host.sh)（bot 侧向导，`make add-host`）、[`docs/examples/mtbots-remote-setup.sh`](docs/examples/mtbots-remote-setup.sh)（远端一次性准备）、[`docs/examples/mtbots-compose-guard.sh`](docs/examples/mtbots-compose-guard.sh)（守卫脚本）、[`docs/examples/docker-hosts.json`](docs/examples/docker-hosts.json)（清单样例）、[`docs/examples/authorized_keys.sample`](docs/examples/authorized_keys.sample)（authorized_keys 样例）、[`docs/docker-multi-host-design.md`](docs/docker-multi-host-design.md)（设计与落地清单）。
 
 ## 与原三个 Bot 的差异（有意为之）
 
