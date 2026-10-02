@@ -379,6 +379,16 @@ class WizardScriptTest(unittest.TestCase):
         hosts = json.loads(self.hosts_file.read_text(encoding="utf-8"))
         self.assertEqual([h["id"] for h in hosts["hosts"]], ["local", "vps"])
 
+    def test_account_prompt_default_is_mtbots(self):
+        """回车走默认时，账号必须是 mtbots（跟远端脚本一致），不能是本机用户名。"""
+        proc = self._wizard("--mode", "existing", "--host", "10.0.0.5",
+                            "--id", "vps", "--label", "V", "--roots", "", "--no-guard",
+                            "--yes", "--no-restart", stdin="\n")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("mtbots", proc.stderr, "提问里应把 mtbots 作为默认值")
+        hosts = json.loads(self.hosts_file.read_text(encoding="utf-8"))
+        self.assertEqual(hosts["hosts"][1]["target"], "mtbots@10.0.0.5")
+
     def test_local_host_can_be_omitted(self):
         proc = self._wizard("--mode", "existing", "--host", "10.0.0.5", "--user", "admin",
                             "--id", "vps", "--no-local", "--yes", "--no-restart")

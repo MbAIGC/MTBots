@@ -343,12 +343,14 @@ if [ "$MODE" = "create" ]; then
         SSH_USER=$(ask "要创建/授权的专用用户名" "mtbots")
     fi
     if [ -z "$LOGIN_USER" ]; then
-        LOGIN_USER=$(ask "用哪个账号登录远端做初始化（需要 sudo）" "root")
+        LOGIN_USER=$(ask "用哪个账号登录远端做初始化（远端已存在、能 sudo；默认 root）" "root")
     fi
     LOGIN_TARGET="$LOGIN_USER@$TARGET_HOST"
 else
     if [ -z "$SSH_USER" ]; then
-        SSH_USER=$(ask "远端已有账号（要能用 docker）" "$(id -un 2>/dev/null || echo root)")
+        # 默认跟远端脚本保持一致（mtbots），不要拿本机用户名当默认——
+        # 在 NAS 上通常是用 root 跑这个向导，默认成 root 会让人顺着回车误授权 root。
+        SSH_USER=$(ask "远端已有账号（要能用 docker）" "mtbots")
     fi
 fi
 [ -n "$SSH_USER" ] || die "远端账号不能为空"

@@ -229,7 +229,8 @@ if [ "$DRY_RUN" != 1 ]; then
 fi
 
 if [ -z "$TARGET_USER" ]; then
-    TARGET_USER=$(id -un)
+    # 跟交互提问的默认值保持一致；要授权当前用户就显式 --user "$(id -un)"
+    TARGET_USER=mtbots
 fi
 say "== MTBots 远端准备 =="
 say "目标账号：$TARGET_USER$([ "$DO_USERADD" = 1 ] && echo "（必要时创建并加入 $DOCKER_GROUP 组）" || echo "（--no-useradd：只写公钥）")"
