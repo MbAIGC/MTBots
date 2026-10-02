@@ -163,7 +163,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/MbAIGC/MTBots/main/scripts/s
 
 > URL 里用的是 `main`，所以不用跟着版本号改，**脚本升级也不牵扯镜像**（这两件事现在解耦了：
 > 脚本在仓库里，镜像只是顺带带一份离线副本）。想锁死某个版本：
-> 把 URL 里的 `main` 换成 `v1.3.5`，或加 `--ref v1.3.5`。
+> 把 URL 里的 `main` 换成 `v1.3.6`，或加 `--ref v1.3.6`。
 
 ### 一键接入：远端侧一条命令
 
@@ -203,7 +203,7 @@ cd /mbots && make remote-setup
 cd /mbots && make add-host          # 方式选 1「复用已有账号」，账号填 mtbots
 ```
 
-> 远端脚本里的守卫默认从 `main` 拉（跟脚本同源），所以不用手写守卫 URL；要指定版本就加 `--ref v1.3.5`。
+> 远端脚本里的守卫默认从 `main` 拉（跟脚本同源），所以不用手写守卫 URL；要指定版本就加 `--ref v1.3.6`。
 
 ### 非交互（CI / 批量，可选）
 

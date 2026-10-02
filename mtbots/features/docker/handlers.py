@@ -372,7 +372,9 @@ async def _render_list(
             total_by_host[key] = total_by_host.get(key, 0) + 1
 
         drawn: set[str] = set()
-        for host in state.hosts:
+        # 段顺序必须跟 order() 的排序键（host id）一致，否则会出现
+        # 「本机 11、12 排在远端 07~10 上面」这种编号跳来跳去的页面。
+        for host in sorted(state.hosts, key=lambda h: str(h.id)):
             text += "🖥 <b>%s</b>\n" % esc(host.display)
             drawn.add(host.id)
             if host.error:

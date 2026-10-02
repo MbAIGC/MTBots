@@ -629,7 +629,30 @@ class MultiHostFlowTests(unittest.TestCase):
         self.assertIn("这一页没有它的项目", text)
         assert_html_valid(self, text)
 
-    def test_single_host_list_has_no_host_chrome(self):
+    def test_host_sections_follow_the_numbering_order(self):
+        """段顺序要跟编号顺序一致：host id 排序在前的主机，段也在前面（否则页码内编号乱跳）。"""
+        from mtbots.features.docker.hosts import DockerHost
+
+        app, core, bot = self._make_app()
+        state = core.data["docker"]
+        state.hosts = [
+            DockerHost(id="local", label="本机", kind="local"),
+            DockerHost(id="aaa-remote", label="远端 AAA", kind="ssh", target="mtbots@10.0.0.9"),
+        ]
+        state.scan_hook = lambda: [
+            {"name": "l1", "dir": "/data/l1", "status": "running(1)", "services": [],
+             "config_files": ["/x/c.yml"], "host": "local", "host_label": "本机"},
+            {"name": "r1", "dir": "/opt/r1", "status": "running(1)", "services": [],
+             "config_files": ["/x/c.yml"], "host": "aaa-remote", "host_label": "远端 AAA"},
+        ]
+        self._drive(app, real_update(bot, text="/d_list"))
+        text = bot.last_text
+        # aaa-remote 排在 local 前（order() 按 host id 排）→ 它的段和「01.」也必须在前面
+        self.assertLess(text.index("远端 AAA"), text.index("🖥 <b>本机</b>"))
+        self.assertLess(text.index("01.</b> aaa-remote/r1"), text.index("02.</b> local/l1"))
+        assert_html_valid(self, text)
+
+
         app, _core, bot = self._make_app(hosts="single")
         self._drive(app, real_update(bot, text="/d_list"))
         text = bot.last_text
