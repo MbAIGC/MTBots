@@ -226,6 +226,18 @@ user    仅自己的 Cline Key + 被授权的 LitePan 触发
 2. Docker 升级完某个媒体服务 → 收尾那一行给 `[🎬 LitePan]` 入口，点进去重跑刷新/刮削规则。
 3. 首页总览一处看全：容器异常数 + 最近任务结果 + 额度告警。
 
+### 5.10 多主机（计划中，未实现）
+
+一个 bot 同时管理本机 + 远端主机上的 Compose 项目（列表 / 升级 / 清理 / 状态 / `--health`）：
+
+* 传输：`DOCKER_HOST` 指向远端的 `docker-socket-proxy`（明文，靠 WireGuard/内网隔离）或 dockerd 原生 TLS 2376；
+* 主机清单：`data/docker-hosts.json`（`id/label/kind/endpoint` + 只读副本挂载），无此文件时行为与今天一致；
+* 中心约束：**compose 文件是本地解析的**，所以每台远端的 compose 目录必须在容器内可读（推荐同路径只读挂载），
+  并用 `docker compose config --hash` 与远端容器的 `com.docker.compose.config-hash` 标签做**副本漂移检测**；
+* 项目身份从 `name` 变成 `(host, name)`，面板多主机时按主机分组显示 `vps/blog`。
+
+完整方案（含 socket-proxy 最小放行清单、代码改造清单、安全红线、测试点、分步落地）：[docker-multi-host-design.md](docker-multi-host-design.md)。
+
 ---
 
 ## 6. 安全红线
