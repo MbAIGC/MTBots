@@ -145,6 +145,14 @@ class DispatcherTests(unittest.TestCase):
         self.assertIn("控制台", bot.sent_texts[0])
         self.assertIn("Docker", bot.sent_texts[0])
 
+    def test_home_header_shows_the_version(self):
+        """首页顶部要能看到当前版本号（排查线上问题时第一眼看的就是它）。"""
+        from mtbots import __version__
+
+        app, _core, bot = make_recording_app(modules="docker")
+        self._drive(app, real_update(bot, text="/start"))
+        self.assertIn("MTBots v%s" % __version__, bot.sent_texts[0])
+
     def test_commands_are_not_executed_twice(self):
         """一条命令只渲染一次面板；兜底 handler 放错 group 时这里会看到 2 条消息。"""
         app, _core, bot = make_recording_app(modules="docker")

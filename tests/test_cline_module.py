@@ -621,7 +621,8 @@ class TestRender(unittest.TestCase):
         self.assertNotIn("<script>", text)
         self.assertIn("&lt;script&gt;", text)
         self.assertIn("&lt;b&gt;x&lt;/b&gt;@y.z", text)
-        self.assertRegex(text, r"更新时间</b> \d{2}:\d{2}:\d{2}")
+        # 时间戳由 PanelManager 统一加在面板底部，正文里不能再出现一次（会重复）
+        self.assertNotIn("更新时间", text)
 
     def test_email_and_name_are_not_shown_by_default(self):
         """邮箱与账号名是敏感信息：默认面板里一个字都不出现。"""

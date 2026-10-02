@@ -25,6 +25,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.error import BadRequest, TelegramError
 
+from . import __version__
 from .text import MESSAGE_LIMIT, SECTION_SEP, esc, now_stamp, split_message
 
 log = logging.getLogger("mtbots.panels")
@@ -372,7 +373,7 @@ class PanelManager:
     # ---------- 内部 ----------
     def _decorate(self, module_id: str, text: str, *, footer: bool = True) -> str:
         if module_id == "home":
-            header = "🏠 <b>控制台</b> · MTBots"
+            header = "🏠 <b>控制台</b> · MTBots v%s" % __version__
         elif module_id == "help":
             header = "🏠 › ❓ 帮助"
         else:

@@ -2,7 +2,7 @@
 
 > 依据：[three-bots-merge-design.md](three-bots-merge-design.md)（可行性 + 交互设计）、
 > [three-bots-merge-ux.md](three-bots-merge-ux.md)（单人版交互图）、[porting-contract.md](porting-contract.md)（施工契约）。
-> 结果：三个 Bot 已合并为 **一个进程、一个 Python 包 `mtbots`**（Bot 名 MTBots，方案 A：单进程模块化），可运行、可自检、**342 个测试全绿**。
+> 结果：三个 Bot 已合并为 **一个进程、一个 Python 包 `mtbots`**（Bot 名 MTBots，方案 A：单进程模块化），可运行、可自检、**343 个测试全绿**。
 
 ---
 
@@ -55,7 +55,7 @@
 
 ```bash
 cd /root/DSH/MTBots
-PYTHONPATH=./.vendor:. python3 -m unittest discover -s tests -t .   # 342 tests OK
+PYTHONPATH=./.vendor:. python3 -m unittest discover -s tests -t .   # 343 tests OK
 PYTHONPATH=./.vendor:. python3 -m mtbots --check                      # exit 0，离线
 PYTHONPATH=./.vendor:. python3 -m mtbots --health                     # 真实探测（compose / LitePan / Cline 存储）
 ```
@@ -66,8 +66,8 @@ PYTHONPATH=./.vendor:. python3 -m mtbots --health                     # 真实�
 | `tests/test_docker_module.py` | 52 | OK（含「把 `subprocess` 全换成抛异常的桩」反证 + 扫描失败诊断） |
 | `tests/test_litepan_module.py` | 59 | OK |
 | `tests/test_cline_module.py` | 140 | OK |
-| `tests/test_integration.py` | 25 | OK（5 个装配 + 12 个真 Update 端到端 + 6 个收尾流程 + 2 个 HTML 守卫用例） |
-| **合计** | **342** | **OK（约 6.5s，无网络）** |
+| `tests/test_integration.py` | 26 | OK（5 个装配 + 13 个真 Update 端到端 + 6 个收尾流程 + 2 个 HTML 守卫用例） |
+| **合计** | **343** | **OK（约 6.7s，无网络）** |
 
 端到端用例（`DispatcherTests`）用**真正的 `telegram.Update` + 记录型假 Bot** 跑 PTB 自己的
 `Application.process_update`，因此能抓到装配级事故：
@@ -159,7 +159,7 @@ DOCKER_GID=$(getent group docker | cut -d: -f3) docker compose up -d
 DOCKER_GID=$(getent group docker | cut -d: -f3) docker compose up -d --build
 ```
 
-## 10. 修复记录（线上反馈驱动，v1.0.1 → v1.0.5）
+## 10. 修复记录（线上反馈驱动，v1.0.1 → v1.0.6）
 
 上线后按线上反馈修了五轮，全部补了回归测试（342 个用例）：
 
@@ -170,3 +170,4 @@ DOCKER_GID=$(getent group docker | cut -d: -f3) docker compose up -d --build
 | Docker「⚠️ 暂未检测到任何 Docker Compose 项目」，怀疑权限不够 | `scan_projects_sync` 里 `docker compose ls` 非 0 退出、以及「项目目录没挂进容器」两种情况都是**静默**返回 `[]` | `DockerState` 记录 `last_scan_error` / `hidden_dirs`，新增 `scan_hint()`：区分 permission denied、连不上守护进程（挂 `/var/run/docker.sock`）、目录未挂载（由 `common_mount_root()` 算出公共父目录，直接给一条可照抄的 `-v 宿主机路径:容器内相同路径`），并在 `d_list` 面板与 `--health` 里显示。permission denied 时再由 `socket_group_hint()` **实测** socket 属组与进程附加组，直接给出要填的 `DOCKER_GID` 数字，并点明「`restart` 不生效、要 `--force-recreate`」以及 socket 属 `root:root`（NAS 常见）时 `group_add` 无效的两条出路 |
 | 升级一个项目后留下四条消息：面板 + `✅ 拉取新镜像 - mt 完成` + `✅ 重建与启动 - mt 完成` + `✅ 🐳 升级项目 mt · 09:50（5 秒）` 卡片；三个 Bot 合在一起后「操作逻辑很乱」 | 多步任务的每一步各占一条执行消息且不回收；收尾又走 `JobCenter.announce()` 给**交互式**任务也单发一张卡片——同一个结果两处播报 | ① 统一成「**一次操作一条消息**」：交互式任务把 `jobs.card_text(job)` 画在面板上收尾，只有真后台任务（LitePan 回执）才 `announce()`；② `run_command_with_feedback(..., delete_on_success=True)`：成功先把执行消息改成完成态再删（删不掉也不会留假进度），失败/取消/超时一律留着当排错依据；③ 收尾键盘 = 模块自己的「🔙 返回列表」+ 共享的一行跨模块入口 `next_actions_keyboard()`（其他已启用且有权限的模块 + 🧰 任务中心，超过 3 个按钮就只留 🏠 返回）；④ 镜像清理的执行消息同样删，但 `Total reclaimed space` 通过 `out=` 抄进面板；⑤ LitePan 回执卡片上原来那个「⬆️ 升级 LitePan 容器」与跨模块行里的 🐳 完全重复（callback 都是 `nav|open|docker`），去掉 |
 | 收尾规则定完后自己复盘出的七处不一致（批量末步取消报成功、`/jobs` 里运行中任务的进度预览没人读、跑的时候面板没有取消按钮、`🔙 返回列表` 永远回第 1 页、失败要上滑找原因、收尾行会挤成 4 个按钮、批量卡片行与明细重复计数） | ① 批量循环只在**每轮开头**查 `cancel_requested`，取消发生在最后一个项目的命令里时 `aborted` 仍是 False，落进「部分失败」分支 → 报 ✅；② compose 每秒把输出预览写进 `job.detail`，而 `Job.line()` 只在终态渲染 detail，运行期是死数据；③ 取消入口散在步骤消息、`/jobs`、`/cancel` 三处，唯独用户盯着的面板没有；④ `up_p_do`/`up_svc_do` 的载荷里本来就带 `page`，只是没往下传；⑤ 失败详情只在执行消息里；⑥ 收尾行 + 自动追加的 `🏠 返回` 会让三个模块全开时变成一行四个按钮；⑦ `detail` 与明细表各报一次成败数 | ① 取消判定改用实时的 `state.cancel_requested`，并把被中断的项目单独记成 `⚠️ 已中断：`（不是「失败」）；② `/jobs` 运行中显示最后一行输出（截 80 字）；③ 进度面板键盘改成 `[🛑 中断执行] [🧰 任务中心]`；④ `page` 一路传到 `_finish_keyboard()`；⑤ 复用 `out=` 把命令尾部 2–3 行（批量 6 行）抄进收尾面板；⑥ 收尾行去掉 🧰 任务中心（首页里有）；⑦ 卡片行只留结论，明细保留成功/失败列表；另外 `JobCenter.finish()` 改成**终态不再翻转**（取消后流程再 finish 也不能变回 ✅） |
+| 面板底部出现两个时间：「🔄 更新时间 21:57:17」下面紧跟「🔄 21:57:17」；另外想看当前跑的是哪个版本只能去翻日志 | ① 面板层 `PanelManager._decorate()` 会给每个面板加底部时间戳，而 Cline 的 `render_panel()` 是照搬原实现的，它自己末尾也拼了一段「🔄 更新时间」——同一个面板里就有两个时间；② 版本号只在启动日志和 `--version` 里，面板上看不到 | ① 删掉 `render_panel()` 末尾那段（时间戳由面板层统一加），并加用例锁死「模块正文不得自带时间戳」；② 首页头部改成 `🏠 控制台 · MTBots v<__version__>`（版本号直接取 `mtbots.__version__`，不会再手写走样） |

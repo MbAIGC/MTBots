@@ -1167,12 +1167,14 @@ def render_snapshot(
 def render_panel(
     snapshots: Sequence[Snapshot], now: Optional[datetime] = None, show_identity: bool = False
 ) -> str:
-    """渲染整块面板（不含分片）。"""
+    """渲染整块面板（不含分片）。
+
+    末尾**不再**自带「🔄 更新时间」：面板底部的时间戳由 `PanelManager._decorate()` 统一加，
+    模块自己再来一条就会在同一个面板里出现两个时间（线上看到的重复就是这么来的）。
+    """
     moment = now or datetime.now(timezone.utc)
-    stamp = moment.astimezone().strftime("%H:%M:%S")
     sections = [f"🤖 <b>ClinePass Status Panel</b> · v{__version__}"]
     sections.extend(render_snapshot(s, moment, show_identity=show_identity) for s in snapshots)
-    sections.append(f"🔄 <b>更新时间</b> {_esc(stamp)}")
     return f"\n\n{SECTION_SEP}\n\n".join(sections)
 
 
