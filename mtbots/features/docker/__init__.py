@@ -10,6 +10,8 @@ import logging
 from typing import Any, Optional
 
 from ...core import Core, ModuleSpec
+from pathlib import Path
+
 from ...text import esc
 from . import handlers
 from .compose import DockerState, make_state
@@ -92,6 +94,10 @@ async def id_lines(core: Core, user_id: int) -> list[str]:
         "🐳 docker：已缓存项目 %d 个｜超时 %ds｜每页 %d 个"
         % (len(state.cached_projects()), settings.command_timeout, settings.page_size),
     ]
+    hosts_file = getattr(settings, "hosts_file", None)
+    if hosts_file:
+        exists = "存在" if Path(str(hosts_file)).is_file() else "不存在（= 只管理本机）"
+        lines.append("🐳 docker：主机清单 <code>%s</code>（%s）" % (esc(str(hosts_file)), exists))
     if state.multi_host:
         per_host = "、".join(
             "%s %d" % (host.id, sum(1 for p in state.cached_projects() if p.get("host") == host.id))

@@ -698,6 +698,19 @@ with open(tmp, "w", encoding="utf-8") as fh:
 os.replace(tmp, path)
 print("  已写入 %s：%d 台主机（%s）" % (path, len(hosts), ", ".join(str(h.get("id")) for h in hosts)))
 PY
+    # 容器以 uid 10001 跑：root 写的 0600 文件它读不到，会静默退回单机（只留一行日志/提示）
+    _uid_now=$(id -u)
+    if [ "$_uid_now" = "10001" ]; then
+        chmod 644 "$HOSTS_FILE" 2>/dev/null || true
+    elif [ "$_uid_now" = "0" ]; then
+        chown 10001:10001 "$HOSTS_FILE" 2>/dev/null || true
+        chmod 644 "$HOSTS_FILE" 2>/dev/null || true
+    elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+        sudo -n chown 10001:10001 "$HOSTS_FILE" 2>/dev/null || true
+        sudo -n chmod 644 "$HOSTS_FILE" 2>/dev/null || true
+    else
+        warn "$HOSTS_FILE 需要容器用户(uid 10001)可读：sudo chown 10001:10001 '$HOSTS_FILE' && sudo chmod 644 '$HOSTS_FILE'"
+    fi
 else
     warn "这台机器没有 python3，无法安全合并 JSON。请把下面这段手工并进 $HOSTS_FILE："
     cat <<JSON

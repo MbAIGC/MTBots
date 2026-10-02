@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 import logging
 import sys
 from typing import Optional
@@ -61,6 +62,10 @@ async def _health_probes(core) -> list[str]:
                 if builder
                 else docker_compose.DockerState(DockerSettings.from_env(settings))
             )
+            hosts_file = getattr(DockerSettings.from_env(settings), "hosts_file", None)
+            if hosts_file:
+                exists = "存在" if Path(str(hosts_file)).is_file() else "不存在（= 只管理本机）"
+                lines.append("🐳 主机清单：%s（%s）" % (hosts_file, exists))
             hosts = list(getattr(state, "hosts", []) or [])
             remote = [h for h in hosts if getattr(h, "is_remote", False)]
             probe = getattr(state, "get_compose_bin", None)
