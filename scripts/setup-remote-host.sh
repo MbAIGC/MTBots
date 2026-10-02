@@ -484,9 +484,27 @@ else
     PROBE_OUT=$(ssh_run 'docker compose version' 2>&1) && PROBE_RC=0 || PROBE_RC=$?
     KEY_OK=0
     KEY_GUARDED=0
+    REMOTE_HOME=""
     if [ "$PROBE_RC" = 0 ]; then
         KEY_OK=1
         say "  密钥可用：$PROBE_OUT"
+        # compose 能跑 ≠ 这把 key 没被 command= 限制（守卫态下它照样成功）。
+        # 再探一条守卫**不会**放行的命令来区分：通得过 = 普通 key（可以改 authorized_keys/装守卫）；
+        # 被拒（command not allowed）= 守卫已生效，远端写操作一律跳过。
+        if HOME_OUT=$(ssh_run 'printf %s "$HOME"' 2>&1); then
+            REMOTE_HOME=$HOME_OUT
+        else
+            KEY_GUARDED=1
+            case "$HOME_OUT" in
+                *"command not allowed"*)
+                    warn "这把公钥已被守卫限制（command=\"…\",restrict）：跳过所有远端写操作"
+                    say "  要换账号/更新守卫：到远端 sudo bash <(curl -fsSL $RAW_BASE/docs/examples/mtbots-remote-setup.sh)" >&2
+                    ;;
+                *)
+                    warn "取远端家目录失败（$HOME_OUT）：按「守卫已生效」处理，跳过远端写操作"
+                    ;;
+            esac
+        fi
     elif printf '%s' "$PROBE_OUT" | grep -q "command not allowed"; then
         KEY_OK=1
         KEY_GUARDED=1
@@ -529,9 +547,8 @@ else
         GUARD_REMOTE=$(printf '%s' "$PROBE_OUT" | sed -n 's/.*\(\/[^ ]*mtbots-compose-guard\).*/\1/p' | head -1)
     fi
 
-    REMOTE_HOME=""
     if [ "$KEY_GUARDED" != 1 ]; then
-        REMOTE_HOME=$(ssh_run 'printf %s "$HOME"')
+        [ -n "$REMOTE_HOME" ] || REMOTE_HOME=$(ssh_run 'printf %s "$HOME"')
         [ -n "$REMOTE_HOME" ] || die "拿不到远端 HOME"
         say "  远端家目录：$REMOTE_HOME"
     fi

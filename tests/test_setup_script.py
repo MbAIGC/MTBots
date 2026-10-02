@@ -40,6 +40,13 @@ if [ -f "$FAKE_DIR/guard-active" ]; then
   echo "mtbots: command not allowed: $last" >&2
   exit 126
 fi
+# 模拟真实守卫：只放行 docker compose …，别的（printf/true/mkdir…）全拒
+if [ -f "$FAKE_DIR/guard-compose-only" ]; then
+  case "$last" in
+    *'docker compose version'*) echo 'Docker Compose version v5.3.1'; exit 0 ;;
+    *) echo "mtbots: command not allowed: $last" >&2; exit 126 ;;
+  esac
+fi
 case "$last" in
   'printf %s "$HOME"') printf '/home/mtbots'; exit 0 ;;
 esac
@@ -353,6 +360,24 @@ class WizardScriptTest(unittest.TestCase):
         self.assertNotIn("mkdir -p", ssh_log, "守卫态跑不了远端写操作，不该尝试")
         self.assertNotIn("apply-ak", ssh_log)
         self.assertFalse(self.hosts_file.exists())
+
+    def test_guard_allows_compose_but_blocks_other_commands(self):
+        """真实守卫的样子：compose 放行、printf $HOME 被拒 —— 不能因此去改远端文件。"""
+        (self.fake / "guard-compose-only").write_text("1", encoding="utf-8")
+        proc = self._wizard("--mode", "existing", "--host", "10.0.0.5", "--user", "mtbots",
+                            "--id", "vps", "--label", "V", "--roots", "", "--yes", "--no-restart")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        out = proc.stdout + proc.stderr
+        self.assertIn("密钥可用", out)
+        self.assertIn("已被守卫限制", out)
+        self.assertEqual(self._log("ssh-copy-id.log"), "", "守卫态不该跑 ssh-copy-id")
+        ssh_log = self._log("ssh.log")
+        self.assertNotIn("mkdir -p", ssh_log, "守卫会拒 mkdir，不该尝试去装守卫")
+        self.assertNotIn("apply-ak", ssh_log)
+        self.assertNotIn("mtbots-compose-guard.sh", self._log("scp.log"), "不该往远端传守卫")
+        # compose 能跑 → 验证通过 → 清单照常写入
+        hosts = json.loads(self.hosts_file.read_text(encoding="utf-8"))
+        self.assertEqual([h["id"] for h in hosts["hosts"]], ["local", "vps"])
 
     def test_local_host_can_be_omitted(self):
         proc = self._wizard("--mode", "existing", "--host", "10.0.0.5", "--user", "admin",
