@@ -31,7 +31,8 @@
 │       ├── docker/            # ← LDMG 移植
 │       │   ├── __init__.py    # MODULE = ModuleSpec(...)
 │       │   ├── config.py      # DockerSettings.from_env(settings)
-│       │   ├── compose.py     # compose 探测/扫描/执行/任务锁（LDMG 全局状态收进一个对象）
+│       │   ├── hosts.py       # 多主机：DockerHost（local / ssh 包装）+ load_hosts 校验
+│       │   ├── compose.py     # compose 探测/逐主机扫描/执行/任务锁（LDMG 全局状态收进一个对象）
 │       │   └── handlers.py    # cmd_list/cmd_status/cmd_upgrade/cmd_prune/button 分发 + open_panel/show_status/show_list
 │       ├── litepan/           # ← LitePan-TGBot 移植（同步 stdlib → asyncio.to_thread）
 │       │   ├── __init__.py    # MODULE = ModuleSpec(...)
@@ -268,6 +269,7 @@ class MenuManager:
 * 改造：全局变量收进 `DockerState`（`core.data["docker"]`）；回调前缀 `d|`；主面板/详情/确认走 `core.panels`；
   升级/清理注册 `core.jobs`；`summary()` 用缓存给出「N 个项目可升级」。
 * 权限：`core.acl.can(user_id, "docker")`。
+* 多主机（v1.1.0）：见 §8；没有 `data/docker-hosts.json` 时不得改变上面任何行为（单机契约）。
 
 ### 7.2 litepan（← LitePan-TGBot `tgbot.py`）
 * 保留（照搬逻辑，不重写）：`UserProfile` 全部字段与 `users.json` 字段名、单用户 `LITEPAN_*` env 兜底、
@@ -294,7 +296,43 @@ class MenuManager:
   快照，不主动请求；`DEMO_MODE` 保留）。
 * 兜底救援：把原 `_RESCUE_HANDLERS` 交给 `rescue` 字段（不自己注册 MessageHandler）。
 
-## 8. 兼容与迁移
+
+## 8. 多主机（`features/docker/hosts.py`，v1.1.0）
+
+远端主机走 **SSH 执行**（`ssh <目标> docker compose -f <远端路径> …`），**不挂载任何远端目录**：
+
+```python
+@dataclass(frozen=True)
+class DockerHost:
+    id: str; label: str = ""; kind: str = "local"      # local | ssh
+    target: str = ""; port: int = 22
+    identity: str = "/app/data/ssh/id_ed25519"
+    known_hosts: str = "/app/data/ssh/known_hosts"
+    strict: str = "yes"                                # yes | accept-new
+    roots: tuple[str, ...] = ()                        # 可选路径白名单
+    error: str = ""                                    # 非空 = 这条配置有问题（不探测，直接提示）
+
+    def command(self, cmd) -> list[str]: ...            # local 原样；ssh → ssh -p … -o … target -- shlex.join(cmd)
+    def cwd(self, local_dir) -> str | None: ...          # 远端返回 None（不能带本地 cwd）
+    def allows(self, path) -> bool: ...                  # roots 白名单
+
+def load_hosts(path) -> tuple[list[DockerHost], list[str]]: ...   # (主机列表, 全局提示)
+```
+
+硬规则：
+
+* **契约不变式**：没有 `data/docker-hosts.json` 时只有一台 `local` 主机，行为与单机版一致——
+  面板文案、命令编号、`/jobs` 标题都不许多出主机字样（有回归用例锁死）。
+* 项目身份从 `name` 变成 `(host, name)`：`DockerState.project_label()` 只在多主机时加 `vps/` 前缀；
+  `DockerState.order()` 同时喂给面板与 `/upgrade NN`，保证编号一致。
+* **回调只认配置里的 host id**：`handlers._reject_unknown_host()`，伪造 id → `⚠️ 未知主机` + 不执行任何命令。
+* 远端路径来自远端 `compose ls` 的 labels，**不做本地存在性检查**（本地没有远端路径，检查了会把项目全误判成「没挂载」）。
+* 失败按主机分流：`host_errors[host_id]`；本机那份同时写 `last_scan_error`（兼容旧提示路径）。
+  退出码语义：`255` ssh 连不上/认证失败、`126` 被远端守卫拒绝、`127` 远端没装 compose。
+* 远端准备与 `authorized_keys` 强制命令守卫见 `docs/examples/`；守卫必须覆盖 bot 会发的**全部**命令形态
+  （新增命令要同步改守卫，否则远端以 126 拒绝）。
+
+## 9. 兼容与迁移
 
 * 三个旧 bot 的**环境变量名全部保留**（`BOT_TOKEN`/`TELEGRAM_BOT_TOKEN`/`TG_BOT_TOKEN` 归一处理，
   `ALLOWED_USER_IDS`/`TG_ALLOWED_IDS` 取并集），旧 `.env` 和 `users.json`/`config.json` 可以直接搬过来。

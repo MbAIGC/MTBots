@@ -1,6 +1,6 @@
 # Docker 多主机（远端容器升级）设计稿 —— **SSH 执行版**
 
-> 状态：**计划中，未实现**（本文只写方案，代码未动）。
+> 状态：**已实现（v1.1.0）**。落地清单见文末 §16。
 > 传输选型：**SSH 执行**（`ssh <目标> docker compose …`）。
 > 决策依据：**不挂任何远端目录**。这条前提直接排除了 `DOCKER_HOST` 路线（原因见 §2，留档避免反复讨论）。
 
@@ -254,3 +254,21 @@ class DockerHost:
 1. 远端主机的地址与 ssh 用户（给个真实例子即可，我写进示例配置）？
 2. 远端是否已装 `docker compose`（`docker compose version`）？
 3. 守卫脚本要不要一起上（推荐上，见 §4.1）？
+
+## 16. 落地清单（v1.1.0 实际实现）
+
+| 设计条目 | 落地位置 | 备注 |
+|---|---|---|
+| 主机清单解析与校验 | `mtbots/features/docker/hosts.py`（`DockerHost` / `load_hosts`） | 非法 `id`/`kind`/`target`/`strict`/`roots`/缺私钥 → 该主机带 `error`，面板单独提示；JSON 坏 → 退回单机 + 提示 |
+| 命令包装 | `DockerHost.command()`（`shlex.join` + `BatchMode=yes` / `ConnectTimeout` / `ServerAliveInterval` / `StrictHostKeyChecking` / `UserKnownHostsFile`） | 单测覆盖引号（路径带空格）与参数齐全 |
+| 退出码 → 提示 | `hosts.explain_exit()` + `scan_hint()` | 255 连不上/认证失败、126 被守卫拒、127 远端没装 compose，都带自测命令 |
+| 逐主机扫描 | `DockerState.scan_projects_sync()` / `_scan_host_sync()` | 项目带 `host`/`host_label`；**远端路径不做本地存在性检查**；单台失败只记 `host_errors[host]`，本机那份同时写 `last_scan_error`（兼容旧提示路径） |
+| 远端 compose 探测 | `DockerState.get_remote_compose_bin()` | 按主机缓存；远端只有 `docker-compose` 也支持 |
+| 面板分组 / 编号 | `handlers._render_list`、`DockerState.order()` | 多主机按主机分组 + `vps/blog` 前缀；单主机文案与 1.0.x 一字不差（有回归用例） |
+| 回调只认配置内 host | `handlers._reject_unknown_host()` | 伪造 id → `⚠️ 未知主机`，不执行任何命令（有用例断言） |
+| 清理 / 状态按主机 | `_show_prune_menu`（先选主机）、`_do_prune`、`_show_status`（每台一段） | 清理命令同样经 `host.command()` 包装 |
+| `--health` / `/id` / 首页摘要 | `__main__._health_probes`、`docker/__init__.py` | 逐主机项目数、主机异常 |
+| 远端准备与守卫 | `docs/examples/mtbots-compose-guard.sh`、`authorized_keys.sample`、README「管理多台服务器」 | 守卫已逐条验证：放行 bot 会发的 13 种命令形态，拒绝 `bash -i` / `docker run` / `docker exec` / `curl` |
+| 测试 | `tests/test_docker_module.py::Host*`、`MultiHostStateTest`、`tests/test_integration.py::MultiHostFlowTests` | 新增 30 条（总计 377，全绿） |
+
+**未做（有意留白）**：跨主机并行执行（全局仍是一把任务锁）、远端构建 / git / 日志 / `exec`、跨主机迁移容器或卷。

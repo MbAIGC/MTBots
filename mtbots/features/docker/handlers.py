@@ -5,7 +5,9 @@
   · 回调整理成 `d|` 命名空间（`panels.cb` / `cb_simple`），主面板/详情/确认全部走
     `core.panels`（一条会话一个面板 + 面包屑 + 🏠 返回 + 两步确认）；
   · 升级 / 清理注册进 `core.jobs`；跑的过程把进度画在面板上（键盘带 🛑 中断执行），
-    跑完把 `jobs.card_text()` 也画在同一面板上——交互式任务不再另发完成卡片。
+    跑完把 `jobs.card_text()` 也画在同一面板上——交互式任务不再另发完成卡片；
+  · 多主机（v1.1.0）：项目按 `(host, name)` 定位，远端主机的命令在 `compose.DockerState`
+    里就被包成 ssh 调用；本文件只负责「面板按主机分组 + 回调只认配置内的 host id」。
 """
 
 from __future__ import annotations
@@ -38,9 +40,9 @@ from .compose import (
     run_command_with_feedback,
     scan_hint,
     scan_prune_candidates,
-    sort_projects_for_display,
 )
 from .config import DockerSettings
+from .hosts import explain_exit
 
 log = logging.getLogger("mtbots.docker")
 
@@ -181,6 +183,56 @@ def _user_id(update: Update) -> Optional[int]:
     return user.id if user is not None else None
 
 
+def _find_project(projects: Sequence[dict], name: str, host_id: Optional[str]) -> Optional[dict]:
+    """按 (主机, 项目名) 定位项目；`host_id` 为空时只比名字（单机部署的唯一形态）。"""
+    for project in projects:
+        if str(project.get("name")) != name:
+            continue
+        if host_id and str(project.get("host") or "") != host_id:
+            continue
+        return project
+    return None
+
+
+async def _reject_unknown_host(core: Core, update: Update, host_id: Optional[str]) -> bool:
+    """回调里的 host 必须在配置里（只认配置内的 id，绝不拿它拼命令）。
+
+    返回 True 表示「不认识的 host，已经回复用户，调用方直接 return」。
+    """
+    if not host_id:
+        return False
+    state = _state(core)
+    if state.host_by_id(host_id) is not None:
+        return False
+    log.warning("回调里的主机 id 不在配置中：%s", host_id)
+    await core.panels.render(
+        "docker",
+        update,
+        "⚠️ <b>未知主机</b>：<code>%s</code> 不在 <code>data/docker-hosts.json</code> 里，"
+        "请重新 /d_list 打开面板。" % esc(str(host_id)),
+        _back_keyboard(1),
+    )
+    return True
+
+
+async def _project_of(
+    core: Core, update: Update, name: str, host_id: Optional[str]
+) -> Optional[dict]:
+    """取项目；找不到就渲染提示并返回 None。"""
+    state = _state(core)
+    projects = await state.get_projects()
+    target = _find_project(projects, name, host_id)
+    if target is None:
+        await core.panels.render(
+            "docker",
+            update,
+            "❌ <b>未找到该项目</b>：<code>%s</code>（可能已被移除，请刷新）"
+            % esc((host_id + "/" + name) if host_id else name),
+            _back_keyboard(1),
+        )
+    return target
+
+
 def _done_text(job: Job, extra: str = "") -> str:
     """收尾面板的正文：统一的完成卡片行 +（可选）本流程自己的明细。
 
@@ -246,7 +298,7 @@ async def _render_list(
     projects = await state.get_projects(force_refresh=force_refresh)
     total_projects = len(projects)
     running_cnt = sum(1 for p in projects if "running" in str(p.get("status", "")).lower())
-    ordered = sort_projects_for_display(projects)
+    ordered = state.order(projects)
     page_projects, page, total_pages = paginate_projects(ordered, page, settings.page_size)
 
     text = "📊 <b>统计：</b>共 %d 个项目 | 🟢 %d 运行中 | 🟡 %d 停止\n" % (
@@ -254,6 +306,12 @@ async def _render_list(
         running_cnt,
         total_projects - running_cnt,
     )
+    if state.multi_host:
+        per_host = " / ".join(
+            "%s %d" % (host.id, sum(1 for p in ordered if p.get("host") == host.id))
+            for host in state.hosts
+        )
+        text += "🖥 <b>主机：</b>%s\n" % esc(per_host)
     text += "📖 <b>页码：</b>%d / %d\n" % (page, total_pages)
     if state.compose_bin is not None and not state.compose_bin:
         text += "⚠️ 未检测到 <code>docker compose</code> / <code>docker-compose</code> 命令\n"
@@ -264,7 +322,7 @@ async def _render_list(
 
     if not ordered:
         text += "⚠️ 暂未检测到任何 Docker Compose 项目\n"
-        # 空列表必须说清是「权限不够」「目录没挂进来」还是「compose 命令缺失」，
+        # 空列表必须说清是「权限不够」「目录没挂进来」「compose 命令缺失」还是「远端连不上」，
         # 否则用户只能猜（缺命令那行上面已经单独打印过了）。
         for hint in scan_hint(state, include_compose=False):
             text += hint + "\n"
@@ -272,30 +330,41 @@ async def _render_list(
         last_group: Optional[str] = None
         for i, p in enumerate(page_projects, start=start_idx + 1):
             is_running = "running" in str(p.get("status", "")).lower()
-            group = "running" if is_running else "stopped"
-            if group != last_group:
-                text += "🟢 <b>运行中</b>\n" if is_running else "🟡 <b>已停止</b>\n"
-                last_group = group
+            if state.multi_host:
+                # 多主机时按主机分组（运行中/已停止的图标仍然在每一行上）
+                group = str(p.get("host") or "")
+                if group != last_group:
+                    text += "🖥 <b>%s</b>\n" % esc(str(p.get("host_label") or group))
+                    last_group = group
+            else:
+                group = "running" if is_running else "stopped"
+                if group != last_group:
+                    text += "🟢 <b>运行中</b>\n" if is_running else "🟡 <b>已停止</b>\n"
+                    last_group = group
 
             num = "%02d" % i
             name = str(p.get("name", ""))
+            label = state.project_label(p)
             status = str(p.get("status", ""))
             status_icon = "🟢" if is_running else "🟡"
-            disp_name = name[:26] + ".." if len(name) > 28 else name
+            disp_name = label[:26] + ".." if len(label) > 28 else label
             services = list(p.get("services") or [])
             services_str = ", ".join(services) if services else "-"
 
             text += "<b>%s.</b> %s %s <code>[%s]</code>\n" % (
                 num,
-                esc(name),
+                esc(label),
                 status_icon,
                 esc(status),
             )
+            if state.multi_host:
+                text += "     主机：%s\n" % esc(str(p.get("host_label") or p.get("host") or ""))
             text += "     路径：<code>%s</code>\n" % esc(p.get("dir", ""))
             text += "     容器：%s\n\n" % esc(services_str)
 
+            payload = {"name": name, "page": page, "host": p.get("host")}
             if len(services) > 1:
-                data = cb("d", "p_sel", {"name": name, "page": page})
+                data = cb("d", "p_sel", payload)
                 keyboard.append(
                     [
                         InlineKeyboardButton(
@@ -304,7 +373,7 @@ async def _render_list(
                     ]
                 )
             else:
-                data = cb("d", "up_s_ask", {"name": name, "page": page})
+                data = cb("d", "up_s_ask", payload)
                 keyboard.append(
                     [InlineKeyboardButton("🚀 %s. %s" % (num, disp_name), callback_data=data)]
                 )
@@ -340,25 +409,21 @@ async def _render_list(
 
 
 async def _show_detail(
-    core: Core, update: Update, project_name: str, back_page: int = 1
+    core: Core, update: Update, project_name: str, back_page: int = 1, host: Optional[str] = None
 ) -> None:
     """项目卡片：选整项目升级还是单服务升级。"""
     await _answer(update)
     state = _state(core)
-    projects = await state.get_projects()
-    target = next((p for p in projects if p.get("name") == project_name), None)
-
+    if await _reject_unknown_host(core, update, host):
+        return
+    target = await _project_of(core, update, project_name, host)
     if target is None:
-        await core.panels.render(
-            "docker",
-            update,
-            "❌ <b>未找到该项目</b>：<code>%s</code>（可能已被移除，请刷新）" % esc(project_name),
-            _back_keyboard(back_page),
-        )
         return
 
     is_running = "running" in str(target.get("status", "")).lower()
-    text = "📦 <b>项目卡片：%s</b>\n\n" % esc(target["name"])
+    text = "📦 <b>项目卡片：%s</b>\n\n" % esc(state.project_label(target))
+    if state.multi_host:
+        text += "🖥 <b>主机：</b>%s\n" % esc(str(target.get("host_label") or target.get("host") or ""))
     text += "📂 <b>路径：</b><code>%s</code>\n" % esc(target["dir"])
     text += "%s <b>状态：</b>%s\n\n" % (
         "🟢" if is_running else "🟡",
@@ -366,11 +431,14 @@ async def _show_detail(
     )
     text += "⚙️ <b>请选择操作控制范围：</b>\n"
 
+    host_id = target.get("host")
     keyboard = [
         [
             InlineKeyboardButton(
                 "⚡ 升级全部服务容器",
-                callback_data=cb("d", "up_s_ask", {"name": project_name, "page": back_page}),
+                callback_data=cb(
+                    "d", "up_s_ask", {"name": project_name, "page": back_page, "host": host_id}
+                ),
             )
         ]
     ]
@@ -381,7 +449,9 @@ async def _show_detail(
                 InlineKeyboardButton(
                     "🔹 仅升级服务: %s" % disp_svc,
                     callback_data=cb(
-                        "d", "up_svc_ask", {"name": project_name, "svc": svc, "page": back_page}
+                        "d",
+                        "up_svc_ask",
+                        {"name": project_name, "svc": svc, "page": back_page, "host": host_id},
                     ),
                 )
             ]
@@ -399,19 +469,22 @@ async def _show_detail(
 
 # ==================== 两步确认（panels.ask_confirm） ====================
 async def _ask_project_upgrade(
-    core: Core, update: Update, project_name: str, back_page: int = 1
+    core: Core, update: Update, project_name: str, back_page: int = 1, host: Optional[str] = None
 ) -> None:
     """整项目升级确认（LDMG ask_single_upgrade）。"""
     await _answer(update)
     state = _state(core)
+    if await _reject_unknown_host(core, update, host):
+        return
     projects = await state.get_projects()
-    target = next((p for p in projects if p.get("name") == project_name), None)
+    target = _find_project(projects, project_name, host)
 
-    safe_name = esc(project_name)
+    host_id = target.get("host") if target else host
+    safe_name = esc(state.project_label(target) if target else project_name)
     safe_dir = esc(target["dir"]) if target else "未知路径"
     # 不在这里探测 compose（同步 subprocess 会卡事件循环），用已缓存结果或默认展示
-    compose = " ".join(state.compose_bin or ["docker", "compose"])
-    confirm_data = cb("d", "up_p_do", {"name": project_name, "page": back_page})
+    compose = " ".join(state.get_remote_compose_bin(state.host_by_id(host_id)) or ["docker", "compose"])
+    confirm_data = cb("d", "up_p_do", {"name": project_name, "page": back_page, "host": host_id})
 
     text = (
         "🚀 <b>升级确认 - [%s]</b>\n\n"
@@ -434,21 +507,29 @@ async def _ask_project_upgrade(
 
 
 async def _ask_service_upgrade(
-    core: Core, update: Update, project_name: str, service_name: str, back_page: int = 1
+    core: Core,
+    update: Update,
+    project_name: str,
+    service_name: str,
+    back_page: int = 1,
+    host: Optional[str] = None,
 ) -> None:
     """单服务升级确认（LDMG ask_svc_upgrade）。"""
     await _answer(update)
     state = _state(core)
+    if await _reject_unknown_host(core, update, host):
+        return
     projects = await state.get_projects()
-    target = next((p for p in projects if p.get("name") == project_name), None)
+    target = _find_project(projects, project_name, host)
 
-    safe_project = esc(project_name)
+    host_id = target.get("host") if target else host
+    safe_project = esc(state.project_label(target) if target else project_name)
     safe_service = esc(service_name)
     safe_dir = esc(target["dir"]) if target else "未知路径"
     confirm_data = cb(
-        "d", "up_svc_do", {"name": project_name, "svc": service_name, "page": back_page}
+        "d", "up_svc_do", {"name": project_name, "svc": service_name, "page": back_page, "host": host_id}
     )
-    cancel_data = cb("d", "p_sel", {"name": project_name, "page": back_page})
+    cancel_data = cb("d", "p_sel", {"name": project_name, "page": back_page, "host": host_id})
 
     text = (
         "🚀 <b>服务升级确认 - [%s]</b>\n\n"
@@ -491,7 +572,12 @@ async def _ask_upgrade_all(core: Core, update: Update) -> None:
 
 # ==================== 长任务：升级 ====================
 async def _do_upgrade_project(
-    core: Core, update: Update, context: Any, project_name: str, page: int = 1
+    core: Core,
+    update: Update,
+    context: Any,
+    project_name: str,
+    page: int = 1,
+    host: Optional[str] = None,
 ) -> None:
     """升级整个项目：pull → up -d（LDMG do_upgrade_project）。"""
     state = _state(core)
@@ -515,14 +601,16 @@ async def _do_upgrade_project(
     try:
         await _answer(update)
         projects = await state.get_projects()
-        target = next((p for p in projects if p.get("name") == project_name), None)
+        target = _find_project(projects, project_name, host)
 
         if target is None:
             status, detail = FAILED, "找不到项目 %s（可能已删除或改名，/d_list 可刷新）" % project_name
-        elif not await asyncio.to_thread(state.get_compose_bin):
+        elif not state.get_remote_compose_bin(state.host_by_id(host)):
             status, detail = FAILED, "未检测到 docker compose / docker-compose 命令"
         else:
-            safe_name = esc(target["name"])
+            upgrade_host = state.host_of(target)
+            job.title = "升级项目 %s" % state.project_label(target)
+            safe_name = esc(state.project_label(target))
             await core.panels.render(
                 "docker",
                 update,
@@ -537,13 +625,14 @@ async def _do_upgrade_project(
                 state,
                 update.effective_message,
                 state.build_compose_cmd(target, "pull"),
-                cwd=target["dir"],
-                title="拉取新镜像 - %s" % target["name"],
+                cwd=state.cwd_for(target),
+                title="拉取新镜像 - %s" % state.project_label(target),
                 progress_pct=30,
                 task_id=task_id,
                 on_progress=_progress(core, job),
                 delete_on_success=True,
                 out=pull_out,
+                host=upgrade_host,
             )
             up_ok = False
             if pull_ok and not state.cancel_requested:
@@ -557,13 +646,14 @@ async def _do_upgrade_project(
                     state,
                     update.effective_message,
                     state.build_compose_cmd(target, "up", "-d"),
-                    cwd=target["dir"],
-                    title="重建与启动 - %s" % target["name"],
+                    cwd=state.cwd_for(target),
+                    title="重建与启动 - %s" % state.project_label(target),
                     progress_pct=80,
                     task_id=task_id,
                     on_progress=_progress(core, job),
                     delete_on_success=True,
                     out=up_out,
+                    host=upgrade_host,
                 )
 
             if state.cancel_requested:
@@ -593,6 +683,7 @@ async def _do_upgrade_service(
     project_name: str,
     service_name: str,
     page: int = 1,
+    host: Optional[str] = None,
 ) -> None:
     """升级单个服务：pull <svc> → up -d <svc>（LDMG do_upgrade_service）。"""
     state = _state(core)
@@ -616,16 +707,18 @@ async def _do_upgrade_service(
     try:
         await _answer(update)
         projects = await state.get_projects()
-        target = next((p for p in projects if p.get("name") == project_name), None)
+        target = _find_project(projects, project_name, host)
 
         if target is None:
             status, detail = FAILED, "未找到项目 %s（/d_list 可刷新）" % project_name
         elif service_name not in list(target.get("services") or []):
             status, detail = FAILED, "项目 %s 中没有服务 %s" % (project_name, service_name)
-        elif not await asyncio.to_thread(state.get_compose_bin):
+        elif not state.get_remote_compose_bin(state.host_by_id(host)):
             status, detail = FAILED, "未检测到 docker compose / docker-compose 命令"
         else:
-            safe_project = esc(target["name"])
+            upgrade_host = state.host_of(target)
+            job.title = "升级服务 %s / %s" % (state.project_label(target), service_name)
+            safe_project = esc(state.project_label(target))
             safe_service = esc(service_name)
             await core.panels.render(
                 "docker",
@@ -642,13 +735,14 @@ async def _do_upgrade_service(
                 state,
                 update.effective_message,
                 state.build_compose_cmd(target, "pull", service_name),
-                cwd=target["dir"],
+                cwd=state.cwd_for(target),
                 title="拉取服务镜像 - %s" % service_name,
                 progress_pct=30,
                 task_id=task_id,
                 on_progress=_progress(core, job),
                 delete_on_success=True,
                 out=pull_out,
+                host=upgrade_host,
             )
             up_ok = False
             if pull_ok and not state.cancel_requested:
@@ -663,13 +757,14 @@ async def _do_upgrade_service(
                     state,
                     update.effective_message,
                     state.build_compose_cmd(target, "up", "-d", service_name),
-                    cwd=target["dir"],
+                    cwd=state.cwd_for(target),
                     title="重建启动服务 - %s" % service_name,
                     progress_pct=80,
                     task_id=task_id,
                     on_progress=_progress(core, job),
                     delete_on_success=True,
                     out=up_out,
+                    host=upgrade_host,
                 )
 
             if state.cancel_requested:
@@ -705,7 +800,7 @@ async def _do_upgrade_all(core: Core, update: Update, context: Any) -> None:
 
     job = core.jobs.add(
         "docker",
-        "批量升级全部项目",
+        "批量升级全部项目" if not state.multi_host else "批量升级全部项目（%d 台主机）" % len(state.hosts),
         cancel=state.request_cancel,
         chat_id=_chat_id(update),
     )
@@ -714,11 +809,11 @@ async def _do_upgrade_all(core: Core, update: Update, context: Any) -> None:
 
     try:
         await _answer(update)
-        projects = sort_projects_for_display(await state.get_projects())
+        projects = state.order(await state.get_projects())
 
         if not projects:
             status, detail = FAILED, "未检测到可升级的项目"
-        elif not await asyncio.to_thread(state.get_compose_bin):
+        elif not any(state.get_remote_compose_bin(h) for h in state.hosts):
             status, detail = FAILED, "未检测到 docker compose / docker-compose 命令"
         else:
             await core.panels.render(
@@ -727,7 +822,7 @@ async def _do_upgrade_all(core: Core, update: Update, context: Any) -> None:
                 "⏳ <b>开始批量升级全部 %d 个项目…</b>" % len(projects),
                 _progress_keyboard(task_id),
             )
-            log.info("批量升级共 %d 个项目", len(projects))
+            log.info("批量升级共 %d 个项目（%d 台主机）", len(projects), len(state.hosts))
 
             success_list: list[str] = []
             fail_list: list[str] = []
@@ -740,19 +835,22 @@ async def _do_upgrade_all(core: Core, update: Update, context: Any) -> None:
                     break
                 processed = i
                 pct = int((i / len(projects)) * 100)
+                label = state.project_label(project)
+                loop_host = state.host_of(project)
                 pull_out: list[str] = []
                 up_out: list[str] = []
                 pull_ok = await run_command_with_feedback(
                     state,
                     update.effective_message,
                     state.build_compose_cmd(project, "pull"),
-                    cwd=project["dir"],
-                    title="批量拉取 - %s" % project["name"],
+                    cwd=state.cwd_for(project),
+                    title="批量拉取 - %s" % label,
                     progress_pct=pct,
                     task_id=task_id,
                     on_progress=_progress(core, job),
                     delete_on_success=True,
                     out=pull_out,
+                    host=loop_host,
                 )
                 up_ok = False
                 if pull_ok and not state.cancel_requested:
@@ -760,21 +858,22 @@ async def _do_upgrade_all(core: Core, update: Update, context: Any) -> None:
                         state,
                         update.effective_message,
                         state.build_compose_cmd(project, "up", "-d"),
-                        cwd=project["dir"],
-                        title="批量启动 - %s" % project["name"],
+                        cwd=state.cwd_for(project),
+                        title="批量启动 - %s" % label,
                         progress_pct=pct,
                         task_id=task_id,
                         on_progress=_progress(core, job),
                         delete_on_success=True,
                         out=up_out,
+                        host=loop_host,
                     )
                 if pull_ok and up_ok:
-                    success_list.append(project["name"])
+                    success_list.append(label)
                 elif state.cancel_requested:
                     # 被中断的项目不算「失败」——它不是坏，是用户按了停
-                    interrupted = project["name"]
+                    interrupted = label
                 else:
-                    fail_list.append(project["name"])
+                    fail_list.append(label)
                     if len(fail_lines) < BATCH_FAIL_LINES:
                         fail_lines.extend(_tail_lines(up_out if pull_ok else pull_out, 2))
 
@@ -821,49 +920,92 @@ async def _do_upgrade_all(core: Core, update: Update, context: Any) -> None:
 
 
 # ==================== 镜像清理 ====================
-async def _show_prune_menu(core: Core, update: Update) -> None:
-    """镜像清理菜单（LDMG show_prune_menu）。"""
+async def _show_prune_menu(core: Core, update: Update, host: Optional[str] = None) -> None:
+    """镜像清理菜单（LDMG show_prune_menu）。
+
+    **镜像清理是按主机执行的**，所以多主机时先选主机，再选清理范围。
+    """
     await _answer(update)
+    state = _state(core)
+    if await _reject_unknown_host(core, update, host):
+        return
+
+    if state.multi_host and not host:
+        text = (
+            "🧹 <b>Docker 镜像清理中心</b>\n\n"
+            "镜像清理**按主机执行**——请先选择要清理哪台主机：\n"
+        )
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    "🧹 %s（%s）" % (item.id, item.display),
+                    callback_data=cb_simple("d", "prune_menu", item.id),
+                )
+            ]
+            for item in state.hosts
+        ]
+        keyboard.append(
+            [InlineKeyboardButton("🔙 返回主菜单", callback_data=cb_simple("d", "page_turn", 1))]
+        )
+        await core.panels.render("docker", update, text, InlineKeyboardMarkup(keyboard))
+        return
+
+    target = state.host_by_id(host)
+    where = ""
+    if state.multi_host and target is not None:
+        where = "\n🖥 <b>目标主机：</b>%s" % esc(target.display)
     text = (
-        "🧹 <b>Docker 镜像清理中心</b>\n\n"
+        "🧹 <b>Docker 镜像清理中心</b>%s\n\n"
         "请选择清理类型：\n"
         "• <b>悬空镜像 (Dangling)</b>：无标签且未被使用的临时镜像层（安全推荐）\n"
         "• <b>所有未使用镜像 (All Unused)</b>：没有任何容器正在使用的全部旧镜像（深度清理）"
+        % where
     )
+    host_arg = target.id if (state.multi_host and target is not None) else None
+    args = [host_arg] if host_arg else []
     keyboard = [
         [
             InlineKeyboardButton(
                 "🍂 仅清理悬空镜像 (Dangling)",
-                callback_data=cb_simple("d", "prune_req", "dangling"),
+                callback_data=cb_simple("d", "prune_req", "dangling", *args),
             )
         ],
         [
             InlineKeyboardButton(
                 "🗑 清理所有未使用镜像 (All Unused)",
-                callback_data=cb_simple("d", "prune_req", "all"),
+                callback_data=cb_simple("d", "prune_req", "all", *args),
             )
         ],
         [
             InlineKeyboardButton(
-                "🔙 返回主菜单", callback_data=cb_simple("d", "page_turn", 1)
+                "🔙 返回主菜单",
+                callback_data=cb_simple("d", "prune_menu", *args)
+                if host_arg
+                else cb_simple("d", "page_turn", 1),
             )
         ],
     ]
     await core.panels.render("docker", update, text, InlineKeyboardMarkup(keyboard))
 
 
-async def _ask_prune_confirm(core: Core, update: Update, prune_all: bool) -> None:
+async def _ask_prune_confirm(
+    core: Core, update: Update, prune_all: bool, host: Optional[str] = None
+) -> None:
     """扫描候选镜像 → 两步确认（LDMG ask_prune_confirm）。"""
     state = _state(core)
     await _answer(update)
+    if await _reject_unknown_host(core, update, host):
+        return
+    target = state.host_by_id(host)
     label = "所有未使用" if prune_all else "悬空 (dangling)"
+    where = "（%s）" % target.display if (state.multi_host and target is not None) else ""
 
     await core.panels.render(
-        "docker", update, "🔍 正在扫描系统中的 <b>%s</b> 镜像..." % label
+        "docker", update, "🔍 正在扫描 %s 上的 <b>%s</b> 镜像..." % (esc(where or "系统"), label)
     )
 
     try:
-        ok, dry_output, error_output = await scan_prune_candidates(state, prune_all)
+        ok, dry_output, error_output = await scan_prune_candidates(state, prune_all, target)
         if not ok:
             await core.panels.render(
                 "docker",
@@ -890,30 +1032,39 @@ async def _ask_prune_confirm(core: Core, update: Update, prune_all: bool) -> Non
         )
         return
 
-    confirm_data = cb_simple("d", "prune_do", "all" if prune_all else "dangling")
+    host_arg = target.id if (state.multi_host and target is not None) else None
+    extra = [host_arg] if host_arg else []
+    confirm_data = cb_simple("d", "prune_do", "all" if prune_all else "dangling", *extra)
     text = (
-        "🧹 <b>当前可清理镜像快照 (范围: %s)：</b>\n"
+        "🧹 <b>当前可清理镜像快照 (范围: %s%s)：</b>\n"
         "<code>%s</code>\n\n"
         "确认时 Docker 会重新判断实际可清理范围。\n确认执行清理吗？"
-        % (label, format_prune_snapshot(dry_output))
+        % (label, where, format_prune_snapshot(dry_output))
     )
     await core.panels.ask_confirm(
         "docker",
         update,
         text,
         confirm_data,
-        cancel_data=cb_simple("d", "prune_menu"),
+        cancel_data=cb_simple("d", "prune_menu", *extra)
+        if extra
+        else cb_simple("d", "prune_menu"),
         confirm_label="✅ 确认清理",
         cancel_label="❌ 取消",
     )
 
 
-async def _do_prune(core: Core, update: Update, context: Any, prune_all: bool) -> None:
-    """执行镜像清理（LDMG do_prune）。"""
+async def _do_prune(
+    core: Core, update: Update, context: Any, prune_all: bool, host: Optional[str] = None
+) -> None:
+    """执行镜像清理（LDMG do_prune）。镜像清理按主机执行。"""
     state = _state(core)
     if update.effective_message is None:
         await _answer(update, "⚠️ 当前会话不可用，请重新用 /d_list 打开面板")
         return
+    if await _reject_unknown_host(core, update, host):
+        return
+    target = state.host_by_id(host)
     task_id = uuid.uuid4().hex
     if not await state.begin_task(task_id):
         await _busy(core, update)
@@ -922,7 +1073,7 @@ async def _do_prune(core: Core, update: Update, context: Any, prune_all: bool) -
     label = "所有未使用" if prune_all else "悬空"
     job = core.jobs.add(
         "docker",
-        "清理%s镜像" % label,
+        "清理%s镜像%s" % (label, "（%s）" % target.display if state.multi_host else ""),
         cancel=state.request_cancel,
         chat_id=_chat_id(update),
     )
@@ -940,6 +1091,7 @@ async def _do_prune(core: Core, update: Update, context: Any, prune_all: bool) -
         cmd = ["docker", "image", "prune", "-f"]
         if prune_all:
             cmd.append("-a")
+        cmd = target.command(cmd)
 
         captured: list[str] = []
         success = await run_command_with_feedback(
@@ -952,6 +1104,7 @@ async def _do_prune(core: Core, update: Update, context: Any, prune_all: bool) -
             on_progress=_progress(core, job),
             delete_on_success=True,
             out=captured,
+            host=target,
         )
         if success:
             state.invalidate_cache()
@@ -986,38 +1139,63 @@ async def _do_prune(core: Core, update: Update, context: Any, prune_all: bool) -
 
 # ==================== 容器状态速览 ====================
 async def _show_status(core: Core, update: Update) -> None:
-    """`docker ps -a` 状态速览（LDMG cmd_status）：截断 + HTML 转义。"""
+    """`docker ps -a` 状态速览（LDMG cmd_status）：截断 + HTML 转义。
+
+    多主机时**每台主机一段**；单主机时文案与以前完全一致。
+    """
     await _answer(update)
     state = _state(core)
     await core.panels.render("docker", update, "🔍 正在拉取 Docker 容器状态速览...")
 
-    try:
-        ok, output = await dump_container_status(state)
-    except Exception as exc:
-        log.exception("获取容器状态异常")
-        await core.panels.render(
-            "docker", update, "❌ 获取状态失败: <code>%s</code>" % esc(str(exc)), _back_keyboard()
-        )
-        return
+    sections: list[str] = []
+    for host in state.hosts:
+        if host.error:
+            sections.append("🖥 <b>%s</b>\n⚠️ %s" % (esc(host.display), esc(host.error)))
+            continue
+        try:
+            ok, output = await dump_container_status(state, host)
+        except Exception as exc:
+            log.exception("获取容器状态异常：host=%s", host.id)
+            sections.append("🖥 <b>%s</b>\n❌ 获取状态失败: <code>%s</code>" % (esc(host.display), esc(str(exc))))
+            continue
+        if not ok:
+            sections.append(
+                "🖥 <b>%s</b>\n❌ %s"
+                % (esc(host.display), esc(explain_exit(1, output[-600:], host)))
+            )
+            continue
+        if not output:
+            sections.append("🖥 <b>%s</b>\n⚠️ 未找到正在运行或已停止的容器。" % esc(host.display))
+            continue
+        sections.append("🖥 <b>%s</b>\n<code>%s</code>" % (esc(host.display), esc(output[-3000:])))
 
-    if not ok:
+    if not state.multi_host:
+        # 单主机：保持老文案（每台主机的标题/失败细节都省略）
+        section = sections[0] if sections else ""
+        body = section.split("\n", 1)[1] if "\n" in section else ""
+        if body.startswith("❌"):
+            await core.panels.render(
+                "docker",
+                update,
+                "❌ 获取 Docker 状态失败: <code>%s</code>" % esc(body[1:].strip()[:1500]),
+                _back_keyboard(),
+            )
+            return
+        if body.startswith("⚠️"):
+            await core.panels.render("docker", update, body, _back_keyboard())
+            return
         await core.panels.render(
             "docker",
             update,
-            "❌ 获取 Docker 状态失败: <code>%s</code>" % esc(output[-1500:]),
+            "📊 <b>Docker 容器实时状态速览</b>\n\n%s" % body,
             _back_keyboard(),
-        )
-        return
-    if not output:
-        await core.panels.render(
-            "docker", update, "⚠️ 未找到正在运行或已停止的 Docker 容器。", _back_keyboard()
         )
         return
 
     await core.panels.render(
         "docker",
         update,
-        "📊 <b>Docker 容器实时状态速览</b>\n\n<code>%s</code>" % esc(output[-3800:]),
+        "📊 <b>Docker 容器实时状态速览</b>\n\n" + "\n\n".join(sections),
         _back_keyboard(),
     )
 
@@ -1072,11 +1250,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
     elif action == "p_sel":
         await _show_detail(
-            core, update, payload["name"], _to_int(payload.get("page"), 1)
+            core, update, payload["name"], _to_int(payload.get("page"), 1), payload.get("host")
         )
     elif action == "up_s_ask":
         await _ask_project_upgrade(
-            core, update, payload["name"], _to_int(payload.get("page"), 1)
+            core, update, payload["name"], _to_int(payload.get("page"), 1), payload.get("host")
         )
     elif action == "up_svc_ask":
         await _ask_service_upgrade(
@@ -1085,6 +1263,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             payload["name"],
             payload["svc"],
             _to_int(payload.get("page"), 1),
+            payload.get("host"),
         )
     elif action == "up_p_do":
         ok, why = core.panels.validate_confirm(query, data)
@@ -1092,7 +1271,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await _answer(update, why, alert=True)
             return
         await _do_upgrade_project(
-            core, update, context, payload["name"], _to_int(payload.get("page"), 1)
+            core,
+            update,
+            context,
+            payload["name"],
+            _to_int(payload.get("page"), 1),
+            payload.get("host"),
         )
     elif action == "up_svc_do":
         ok, why = core.panels.validate_confirm(query, data)
@@ -1106,6 +1290,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             payload["name"],
             payload["svc"],
             _to_int(payload.get("page"), 1),
+            payload.get("host"),
         )
     elif action == "upgrade_all":
         await _ask_upgrade_all(core, update)
@@ -1116,17 +1301,26 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             return
         await _do_upgrade_all(core, update, context)
     elif action == "prune_menu":
-        await _show_prune_menu(core, update)
+        await _show_prune_menu(core, update, parts[2] if len(parts) > 2 else None)
     elif action == "prune_req":
         await _ask_prune_confirm(
-            core, update, prune_all=(parts[2] if len(parts) > 2 else "dangling") == "all"
+            core,
+            update,
+            prune_all=(parts[2] if len(parts) > 2 else "dangling") == "all",
+            host=parts[3] if len(parts) > 3 else None,
         )
     elif action == "prune_do":
         ok, why = core.panels.validate_confirm(query, data)
         if not ok:
             await _answer(update, why, alert=True)
             return
-        await _do_prune(core, update, context, prune_all=(parts[2] if len(parts) > 2 else "dangling") == "all")
+        await _do_prune(
+            core,
+            update,
+            context,
+            prune_all=(parts[2] if len(parts) > 2 else "dangling") == "all",
+            host=parts[3] if len(parts) > 3 else None,
+        )
     else:
         await _answer(update, "⚠️ 未知操作（菜单可能已过期），请重新 /d_list 打开", alert=True)
 
@@ -1159,7 +1353,8 @@ async def _upgrade_command(core: Core, update: Update, context: Any) -> None:
         )
         return
 
-    projects = sort_projects_for_display(await _state(core).get_projects())
+    state = _state(core)
+    projects = state.order(await state.get_projects())
     if not 1 <= num <= len(projects):
         await core.panels.render(
             "docker", update, "❌ 无效的项目序号（当前共 %d 个）" % len(projects), _back_keyboard()
@@ -1167,19 +1362,22 @@ async def _upgrade_command(core: Core, update: Update, context: Any) -> None:
         return
 
     target = projects[num - 1]
+    target_host = target.get("host")
     if service_name:
         if service_name not in list(target.get("services") or []):
             await core.panels.render(
                 "docker",
                 update,
                 "❌ 项目 <b>%s</b> 中不存在服务 <code>%s</code>"
-                % (esc(target["name"]), esc(service_name)),
+                % (esc(state.project_label(target)), esc(service_name)),
                 _back_keyboard(),
             )
             return
-        await _ask_service_upgrade(core, update, target["name"], service_name, 1)
+        await _ask_service_upgrade(
+            core, update, target["name"], service_name, 1, target_host
+        )
     else:
-        await _ask_project_upgrade(core, update, target["name"], 1)
+        await _ask_project_upgrade(core, update, target["name"], 1, target_host)
 
 
 async def cmd_upgrade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

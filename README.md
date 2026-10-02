@@ -145,7 +145,8 @@ mtbots/
 ├── .github/workflows/docker.yml                      # CI：跑测试 + 构建 amd64/arm64 镜像推 GHCR
 ├── Makefile                                          # make check / health / test / run / list
 ├── docs/                                             # 设计稿、施工契约（porting-contract）、合并报告
-└── tests/                                            # 347 个 stdlib unittest 用例
+│   └── examples/                                     # 多主机：主机清单样例、远端守卫脚本、authorized_keys 样例
+└── tests/                                            # 377 个 stdlib unittest 用例
 ```
 
 ## 配置
@@ -191,6 +192,9 @@ python3 -m mtbots --list      # 列出已启用模块
 4. **密钥渲染带 user_id**：Cline 面板只渲染调用者自己的 Key；LitePan 按 `chat_id` 绑定实例，不串台。
 5. **破坏性操作两步确认**：确认按钮绑定发起人 + 60 秒过期（`PanelManager.ask_confirm/validate_confirm`）。
 6. **非 root + 只读根文件系统**（compose 已配置 `read_only` / `no-new-privileges`），只有 `data/` 与挂载的 compose 目录可写。
+7. **远端主机不给 bot 任何端口或 socket**：只放一把被 `authorized_keys` 强制命令收窄的 ssh key——
+   守卫把这条 key 限定在「MTBots 会用到的那几条 docker 命令」上，即使 bot 主机被拿下也拿不到远端 shell（见「管理多台服务器」）。
+8. **多主机回调只认配置里的 host id**：面板里的主机名来自 `data/docker-hosts.json`，伪造的 id 会被拒并记日志，绝不会拿去拼命令。
 
 ## 测试
 
@@ -205,15 +209,124 @@ make check
 ```
 
 测试全部是 stdlib `unittest`、不联网也不碰真实 Telegram/Docker（Docker 用例还会把
-`subprocess` / `create_subprocess_exec` 换成抛异常的桩做反证）。当前 **347 个用例全绿**：
+`subprocess` / `create_subprocess_exec` 换成抛异常的桩做反证）。当前 **377 个用例全绿**：
 
 | 文件 | 用例 | 覆盖 |
 |---|---|---|
 | `tests/test_core.py` | 70 | 文本分片（HTML 标签闭合）、`safe_html` 出口转义、`SafeBot` 解析失败降级、ACL 默认拒绝、存储原子写/0600/损坏分类、任务中心（运行中显示最后一行输出、终态不再翻转）与收尾卡片文案、跨模块入口按钮的取舍（启用/权限/排不下）、**命令菜单的作用域规则（私聊按权限裁剪 / 群取全量 / 空片段不下发）**、面板唯一与两步确认、菜单去重与作用域、配置兼容、日志脱敏（含 exc_info 的 traceback）、路由消歧与兜底救援 |
-| `tests/test_docker_module.py` | 52 | 项目排序/分页、pull 噪音过滤、清理候选、回调载荷、模块装配、**扫描失败诊断（实测 socket GID、未挂载目录的公共挂载点、缺命令）**、执行消息收尾（成功即删、失败必留、结果回传）、失败尾部输出与进度键盘的中断入口 |
+| `tests/test_docker_module.py` | 76 | 项目排序/分页、pull 噪音过滤、清理候选、回调载荷、模块装配、**扫描失败诊断（实测 socket GID、未挂载目录的公共挂载点、缺命令）**、执行消息收尾（成功即删、失败必留、结果回传）、失败尾部输出与进度键盘的中断入口、**多主机（主机清单校验 / ssh 包装与引号 / 逐主机扫描与提示 / 退出码映射 / 只认配置内的 host id）** |
 | `tests/test_litepan_module.py` | 59 | slug 构建（拼音/限长/去重）、users.json 校验、发现解析与缓存、菜单预算、触发与回执 |
 | `tests/test_cline_module.py` | 140 | 额度解析/渲染、Key 掩码与指纹、别名校验、存储读写与自愈、默认拒绝 |
-| `tests/test_integration.py` | 26 | 三个真实模块一起装配、命令不重复、菜单合并、`--check` 离线可跑，**真 `telegram.Update` 走 PTB dispatcher 的端到端用例**（不重复执行、全角命令可救援、下线模块的按钮有反馈、点按钮原地改同一条面板、**所有面板文案都过一遍 Telegram HTML 合法性校验**），以及**收尾只留一条消息**（批量升级不再推卡片、执行消息带 `delete_on_success`、收尾面板带跨模块入口、`🔙 返回列表` 回原页、失败抄尾部输出、进度面板可中断、最后一步取消判为取消） |
+| `tests/test_integration.py` | 32 | 三个真实模块一起装配、命令不重复、菜单合并、`--check` 离线可跑，**真 `telegram.Update` 走 PTB dispatcher 的端到端用例**（不重复执行、全角命令可救援、下线模块的按钮有反馈、点按钮原地改同一条面板、**所有面板文案都过一遍 Telegram HTML 合法性校验**），多主机装配用例（按主机分组、单主机无主机标题、伪造 host id 被拒且不执行、`/upgrade` 编号与面板一致、状态与清理按主机），以及**收尾只留一条消息**（批量升级不再推卡片、执行消息带 `delete_on_success`、收尾面板带跨模块入口、`🔙 返回列表` 回原页、失败抄尾部输出、进度面板可中断、最后一步取消判为取消） |
+
+## 管理多台服务器（多主机，v1.1.0+）
+
+一个 bot 可以同时管理**本机 + 若干远端主机**上的 Compose 项目：列表、详情、升级（项目 / 单服务 / 批量）、镜像清理、`/d_status`、`--health` 全部覆盖。
+
+**传输方式：SSH 执行**——`ssh <目标> docker compose -f <远端路径> …`。yml 留在远端、由**远端的 CLI** 解析，所以：
+
+* **不需要挂载任何远端目录**，也不用同步副本；
+* 没有「副本过期 / 漂移」问题；
+* 远端只有老版 `docker-compose` 也能用（探测自动回退）；
+* 代价：镜像里多了 `openssh-client`，需要一把只读私钥。
+
+### 1. 远端准备（每台主机一次）
+
+```bash
+# 远端：专用用户（不要用你的登录账号，更不要 root）+ docker 组
+sudo useradd -m -s /bin/bash mtbots
+sudo usermod -aG docker mtbots
+sudo install -d -m 700 -o mtbots -g mtbots /home/mtbots/.ssh
+sudo -u mtbots docker compose version          # 确认 docker / compose 可用
+```
+
+bot 主机上生成密钥（放 `data/`，已被 gitignore；容器内即 `/app/data/ssh`）：
+
+```bash
+ssh-keygen -t ed25519 -N '' -C mtbots@bot -f ./data/ssh/id_ed25519
+chmod 600 ./data/ssh/id_ed25519
+ssh-keyscan -p 22 10.0.0.5 >> ./data/ssh/known_hosts     # 可选：预置 known_hosts
+```
+
+把 `./data/ssh/id_ed25519.pub` 贴进远端 `/home/mtbots/.ssh/authorized_keys`，**并加上强制命令守卫**（强烈建议）：
+
+```text
+command="/usr/local/bin/mtbots-compose-guard",restrict ssh-ed25519 AAAA… mtbots@bot
+```
+
+守卫脚本在 [`docs/examples/mtbots-compose-guard.sh`](docs/examples/mtbots-compose-guard.sh)：它把这条 key 能跑的命令限定成「MTBots 会用到的那 13 种形态」（探测 / 扫描 / `pull` / `up -d` / `config --services` / `docker ps` / `docker image ls|prune` / `docker inspect`），其余一律 `exit 126`。
+**这样即使 bot 主机被拿下，也拿不到远端 shell**——这是 SSH 路线相对「暴露 docker 端口」最大的优势。
+
+### 2. 配置主机清单
+
+复制 [`docs/examples/docker-hosts.json`](docs/examples/docker-hosts.json) 到 `data/docker-hosts.json`：
+
+```json
+{
+  "hosts": [
+    { "id": "nas", "label": "本机 NAS", "kind": "local" },
+    { "id": "vps", "label": "Oracle 东京", "kind": "ssh",
+      "target": "mtbots@10.0.0.5", "port": 22,
+      "identity": "/app/data/ssh/id_ed25519",
+      "known_hosts": "/app/data/ssh/known_hosts",
+      "strict": "accept-new",
+      "roots": ["/opt"] }
+  ]
+}
+```
+
+| 字段 | 说明 |
+|---|---|
+| `id` | 唯一，`[a-z0-9_-]{1,16}`；**回调里只认这个 id**（不接受任意字符串拼命令） |
+| `label` | 面板显示名 |
+| `kind` | `local`（本机）/ `ssh`（远端） |
+| `target` | `user@host`；格式非法（空格、分号、`-o` 之类）直接判为配置错误 |
+| `identity` / `known_hosts` | 私钥与 known_hosts 路径（都在 `data/` 里） |
+| `strict` | `accept-new`（首次自动记录，需要 known_hosts 可写）或 `yes`（配预置 known_hosts） |
+| `roots` | 可选的路径白名单：只管理这些前缀下的项目（纵深防御） |
+| `enabled` | 默认 true，临时下线一台主机 |
+
+**没有这个文件 = 只管理本机**，行为与 1.0.x 完全一致（升级到 1.1.0 不会改变你现在的使用方式）。
+改完清单重启容器生效：`docker compose up -d --force-recreate`。
+
+### 3. 面板上的变化
+
+```
+📊 统计：共 5 个项目 | 🟢 3 运行中 | 🟡 2 停止
+🖥 主机：nas 2 / vps 3
+📖 页码：1 / 1
+
+🖥 本机 NAS
+01. nas/media 🟢 [running(1)]
+     主机：本机 NAS
+     路径：/mnt/data2/docker/media
+     容器：emby
+
+🖥 Oracle 东京
+02. vps/blog 🟡 [exited(2)]
+     主机：Oracle 东京
+     路径：/opt/blog
+     容器：web, db
+[🚀 02. vps/blog]
+```
+
+* 多主机时项目标签带主机前缀（`vps/blog`），`/upgrade 02` 的编号与面板一致（跨主机连续编号）；
+* 单主机时**不显示**任何主机标题（文案与 1.0.x 一字不差）；
+* **镜像清理按主机执行**：多主机时先选主机，再选清理范围；
+* `--health` 会逐主机报告连通性与项目数。
+
+### 4. 排错
+
+| 现象 | 处理 |
+|---|---|
+| 面板提示「主机 vps：SSH 连不上或认证失败」 | 按面板给的自测命令在容器里跑一遍：`docker exec -it mtbots ssh -p 22 -i /app/data/ssh/id_ed25519 mtbots@10.0.0.5 docker compose version`（失败信息很具体：网络 / 端口 / 私钥权限 / known_hosts） |
+| 「远端未安装 docker compose / docker」 | 远端没装 CLI 或不在 PATH；在远端 `sudo -u mtbots docker compose version` 确认 |
+| 「远端授权只允许 compose 操作」 | 守卫脚本拦下了这条命令。要么命令不在白名单（`docs/examples/mtbots-compose-guard.sh` 里补齐），要么根本没走守卫 |
+| 「私钥不存在：…」 | 私钥没放/没挂到容器里的那个路径，或 `chmod 600` 不对（ssh 会拒绝组/他人可读的私钥） |
+| 远端项目一个都看不到 | 检查 `roots` 白名单；再在容器里手跑一次 `ssh … docker compose ls -a --format json` |
+| 中断了但远端还在跑 | 取消 = 断开 ssh（远端通常收到 SIGHUP 退出，但不保证）；`pull`/`up -d` 幂等，重跑即可 |
+
+安全提醒：私钥只放 `data/`（已 gitignore）；远端用**专用用户 + docker 组**；生产建议 `strict=yes` 配预置 `known_hosts`。
 
 ## 与原三个 Bot 的差异（有意为之）
 
@@ -277,6 +390,7 @@ make check
 * 群里「回复某条面板消息定位上下文」仍未实现；面板按会话唯一（跨模块共用），命令触发时新发到最底部、旧面板删除。
 * Docker 模块是**进程内**模块（不是 sidecar + `docker-socket-proxy`）。单人自用可接受；多人场景建议按设计稿 §4 方案 B 拆出去。
 * Docker 模块只能看到「挂进容器的那些 compose 目录」，且容器内路径必须与宿主机一致（探针靠 `docker compose ls` 的宿主机路径定位工作目录）。
-* **只能管理本机 Docker**。远端主机（**SSH 执行**：`ssh <目标> docker compose …`，不挂载任何远端目录）的方案已写完但**尚未实现**：见 [docs/docker-multi-host-design.md](docs/docker-multi-host-design.md)。
+* 远端主机只支持 **SSH 执行**（见「管理多台服务器」）；不做远端构建 / git 操作 / 日志查看 / `exec`，也不做跨主机迁移。
+* 多主机**不并行**执行：全局仍是一把任务锁，一次只跑一个升级（面板只有一个进度面）。
 * LitePan 命令菜单按会话差异化下发受 `MenuManager` 限制：目前是所有已授权会话共用一份片段（含 `refresh_<slug>`）。
 * LitePan 的「自动发现」与「回执」还没拆成两个开关（旧版就是耦合的，行为未退化）。

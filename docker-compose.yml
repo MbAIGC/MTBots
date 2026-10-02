@@ -21,6 +21,9 @@ services:
       # ② 你的 compose 文件根目录（docker 模块要靠它读项目；按实际路径改）
       - /docker:/docker
       # ③ 三份配置合成一份 data/：Cline Key + LitePan 用户 + 日志
+      #    远端主机（data/docker-hosts.json，kind=ssh）的私钥与 known_hosts 也放这里：
+      #      ./data/ssh/id_ed25519（chmod 600）、./data/ssh/known_hosts
+      #    远端不需要挂载任何目录——yml 留在远端、由远端的 CLI 解析（README「管理多台服务器」）
       - ./data:/app/data
     # 让容器里的 mtbots 用户能读写 docker.sock：填宿主机 socket 的属组 GID
     #   查：stat -c '%g' /var/run/docker.sock   （NAS 上常常没有 docker 组条目，别用 getent 猜）

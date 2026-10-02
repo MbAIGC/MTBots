@@ -25,6 +25,7 @@ from ...panels import cb_simple
 from ...text import esc, progress_bar
 
 from .config import DockerSettings
+from .hosts import LOCAL_HOST, DockerHost, explain_exit, load_hosts
 
 log = logging.getLogger("mtbots.docker")
 
@@ -80,6 +81,17 @@ def sort_projects_for_display(projects: Iterable[dict]) -> list[dict]:
             str(p.get("name", "")).lower(),
         ),
     )
+
+
+def ordered_projects(projects: Iterable[dict], *, by_host: bool = False) -> list[dict]:
+    """面板与编号命令共用的顺序：多主机时先按主机分组，组内保持「运行中优先」。
+
+    `/upgrade 01` 与面板里的「01」必须永远指向同一个项目，所以两处都调这个函数。
+    """
+    ordered = sort_projects_for_display(projects)
+    if by_host:
+        ordered.sort(key=lambda p: str(p.get("host") or ""))
+    return ordered
 
 
 def paginate_projects(
@@ -174,7 +186,12 @@ async def delete_message_quietly(message: Any) -> bool:
 class DockerState:
     """LDMG 全部可变全局状态的宿主（每个 register() 建一个）。"""
 
-    def __init__(self, settings: DockerSettings):
+    def __init__(
+        self,
+        settings: DockerSettings,
+        hosts: Optional[Sequence[DockerHost]] = None,
+        host_notes: Optional[Sequence[str]] = None,
+    ):
         self.settings = settings
         self.exec_lock: Optional[asyncio.Lock] = None
         self.current_process: Optional[asyncio.subprocess.Process] = None
@@ -188,9 +205,61 @@ class DockerState:
         self.scan_hook: Optional[Callable[[], list[dict]]] = None
         #: 最近一次扫描的失败原因（空 = 成功）。以前这里失败是静默的，
         #: 结果「权限不足 / 目录没挂载」都表现成一句「暂未检测到任何项目」，没法排查。
+        #: 多主机时这里是**本机**的错误（`host_errors` 才是全部主机）。
         self.last_scan_error: str = ""
-        #: 扫到了、但 compose 目录在容器里不存在的项目目录（宿主机路径没挂进来）
+        #: 扫到了、但 compose 目录在容器里不存在的项目目录（宿主机路径没挂进来；只对本机有意义）
         self.hidden_dirs: list[str] = []
+        #: 主机清单（默认单机）；`host_errors` / `host_notes` 分别是逐主机探测失败原因与配置级提示
+        self.hosts: list[DockerHost] = list(hosts) if hosts else [LOCAL_HOST]
+        self.host_errors: dict[str, str] = {}
+        self.host_notes: list[str] = list(host_notes or [])
+        #: 远端 compose 命令探测结果（`docker compose` / `docker-compose`），按主机缓存
+        self.remote_compose: dict[str, list[str]] = {}
+
+    # ---------- 主机 ----------
+    @property
+    def multi_host(self) -> bool:
+        return len(self.hosts) > 1
+
+    @property
+    def local_host(self) -> DockerHost:
+        for host in self.hosts:
+            if not host.is_remote:
+                return host
+        return self.hosts[0]
+
+    def host_by_id(self, host_id: Optional[str]) -> Optional[DockerHost]:
+        """按 id 找主机；id 为空时返回第一台（单机部署的调用方不用关心主机）。"""
+        if not host_id:
+            return self.hosts[0] if self.hosts else LOCAL_HOST
+        for host in self.hosts:
+            if host.id == host_id:
+                return host
+        return None
+
+    def host_of(self, project: Any) -> DockerHost:
+        """项目所属主机（项目里没有 host 字段时=第一台，保持单机行为不变）。"""
+        host_id = project.get("host") if isinstance(project, dict) else None
+        return self.host_by_id(host_id) or self.local_host
+
+    def project_label(self, project: Any) -> str:
+        """多主机时项目标签带主机前缀（`vps/blog`），单机时与以前一字不差。"""
+        name = str(project.get("name", "")) if isinstance(project, dict) else str(project)
+        if not self.multi_host:
+            return name
+        return "%s/%s" % (self.host_of(project).id, name)
+
+    def order(self, projects: Iterable[dict]) -> list[dict]:
+        """面板与 `/upgrade NN` 共用的排序：多主机时先按主机分组，组内仍是「运行中优先」。"""
+        ordered = sort_projects_for_display(projects)
+        if self.multi_host:
+            ordered.sort(key=lambda p: str(p.get("host") or ""))
+        return ordered
+
+    def cwd_for(self, project: Any) -> Optional[str]:
+        """远端项目不能传本地 cwd（本地路径不存在，ssh 会起不来）。"""
+        work_dir = project.get("dir", "") if isinstance(project, dict) else ""
+        return self.host_of(project).cwd(str(work_dir or ""))
 
     # ---------- 任务锁 ----------
     def get_lock(self) -> asyncio.Lock:
@@ -263,20 +332,57 @@ class DockerState:
         log.warning("未检测到 docker compose / docker-compose 命令")
         return []
 
+    def get_remote_compose_bin(self, host: DockerHost) -> list[str]:
+        """这台主机用哪条 compose 命令（远端探测一次并缓存；探测不到返回空列表）。
+
+        远端用**它自己的** CLI：所以远端只有 `docker-compose`（老 NAS）也能用，
+        不存在「bot 镜像里的版本和远端 daemon 不匹配」的问题。
+        """
+        if not host.is_remote:
+            return self.get_compose_bin()
+        cached = self.remote_compose.get(host.id)
+        if cached is not None:
+            return cached
+
+        for cand in (["docker", "compose"], ["docker-compose"]):
+            try:
+                probe = subprocess.run(
+                    host.command([*cand, "version"]),
+                    capture_output=True,
+                    text=True,
+                    timeout=PROBE_TIMEOUT,
+                )
+                if probe.returncode == 0:
+                    self.remote_compose[host.id] = list(cand)
+                    log.info("远端主机 %s 使用 compose 命令: %s", host.id, " ".join(cand))
+                    return self.remote_compose[host.id]
+            except Exception:
+                continue
+
+        self.remote_compose[host.id] = []
+        log.warning("远端主机 %s 未检测到 docker compose / docker-compose", host.id)
+        return []
+
     def build_compose_cmd(self, project: dict, *args: str) -> list[str]:
-        """按项目生成 compose 命令（携带完整 -f 文件列表，兼容多 compose 文件项目）。"""
-        compose_bin = self.get_compose_bin()
+        """按项目生成 compose 命令（携带完整 -f 文件列表；远端项目自动包成 ssh 调用）。"""
+        host = self.host_of(project)
+        compose_bin = self.get_remote_compose_bin(host)
         if not compose_bin:
+            if host.is_remote:
+                raise RuntimeError("远端主机 %s 未检测到 docker compose / docker-compose" % host.id)
             raise RuntimeError("未检测到 docker compose / docker-compose 命令")
         cmd = list(compose_bin)
         for config_file in project.get("config_files") or []:
             cmd += ["-f", config_file]
         cmd += list(args)
-        return cmd
+        return host.command(cmd)
 
-    def get_project_services(self, work_dir: str, config_files: Sequence[str]) -> list[str]:
-        """获取项目的服务定义。"""
-        compose_bin = self.get_compose_bin()
+    def get_project_services(
+        self, work_dir: str, config_files: Sequence[str], host: Optional[DockerHost] = None
+    ) -> list[str]:
+        """获取项目的服务定义（远端项目在远端跑 `config --services`）。"""
+        host = host or self.local_host
+        compose_bin = self.get_remote_compose_bin(host)
         if not compose_bin:
             return []
         try:
@@ -285,8 +391,8 @@ class DockerState:
                 cmd += ["-f", config_file]
             cmd += ["config", "--services"]
             result = subprocess.run(
-                cmd,
-                cwd=work_dir,
+                host.command(cmd),
+                cwd=host.cwd(work_dir),
                 capture_output=True,
                 text=True,
                 timeout=SERVICES_TIMEOUT,
@@ -299,83 +405,112 @@ class DockerState:
 
     # ---------- 项目扫描 ----------
     def scan_projects_sync(self) -> list[dict]:
-        """`docker compose ls -a --format json` 扫描（同步，交给 to_thread 跑）。
+        """逐主机扫描 `docker compose ls -a --format json`（同步，交给 to_thread 跑）。
 
-        失败不再静默：`last_scan_error` 记下原因，`hidden_dirs` 记下「扫到了、但 compose
-        目录在容器里不存在」的项目，面板和 `--health` 据此给出可操作提示。
+        失败不再静默：每台主机的原因写进 `host_errors[host_id]`（本机那份同时写进
+        `last_scan_error`，兼容旧的提示路径）；本机「扫到了、但 compose 目录在容器里不存在」
+        的项目目录写进 `hidden_dirs`。**远端主机不做本地目录检查**——远端路径本来就不在本机，
+        检查了会把它自己的项目全部误判成「没挂载」。
         """
         projects: list[dict] = []
-        seen_keys: set[str] = set()
+        self.host_errors = {}
         self.last_scan_error = ""
         self.hidden_dirs = []
-        compose_bin = self.get_compose_bin()
+        for host in self.hosts:
+            try:
+                projects.extend(self._scan_host_sync(host))
+            except Exception as exc:  # 单台主机炸了不能拖垮其它主机
+                self.host_errors[host.id] = str(exc)
+                log.warning("主机 %s 扫描异常：%s", host.id, exc)
+        self.last_scan_error = self.host_errors.get(self.local_host.id, "")
+        projects.sort(key=lambda x: (str(x.get("host") or ""), x["name"]))
+        return projects
+
+    def _scan_host_sync(self, host: DockerHost) -> list[dict]:
+        """扫一台主机；失败原因写进 `host_errors`，不抛异常。"""
+        if host.error:
+            self.host_errors[host.id] = host.error
+            return []
+
+        compose_bin = self.get_remote_compose_bin(host)
         if not compose_bin:
-            self.last_scan_error = "未找到 docker compose / docker-compose 命令"
-            return projects
+            self.host_errors[host.id] = (
+                "远端未安装 docker compose / docker"
+                if host.is_remote
+                else "未找到 docker compose / docker-compose 命令"
+            )
+            return []
 
         try:
             result = subprocess.run(
-                [*compose_bin, "ls", "-a", "--format", "json"],
+                host.command([*compose_bin, "ls", "-a", "--format", "json"]),
                 capture_output=True,
                 text=True,
                 timeout=SCAN_TIMEOUT,
             )
-            if result.returncode != 0:
-                detail = (result.stderr or result.stdout or "").strip()
-                self.last_scan_error = detail.splitlines()[0] if detail else "退出码 %d" % result.returncode
-                log.warning("docker compose ls 失败：%s", self.last_scan_error)
-                return projects
-
-            if result.stdout.strip():
-                try:
-                    data = json.loads(result.stdout)
-                    if isinstance(data, dict):
-                        data = [data]
-                except json.JSONDecodeError:
-                    data = []
-                    for line in result.stdout.strip().splitlines():
-                        if line.strip():
-                            try:
-                                data.append(json.loads(line))
-                            except json.JSONDecodeError:
-                                pass
-
-                for item in data:
-                    name = item.get("Name", "")
-                    status = item.get("Status", "")
-                    config_files = [
-                        c.strip()
-                        for c in (item.get("ConfigFiles", "") or "").split(",")
-                        if c.strip()
-                    ]
-                    if not name:
-                        continue
-                    first_file = config_files[0] if config_files else ""
-                    work_dir = os.path.dirname(first_file) if first_file else ""
-                    if work_dir and not os.path.isdir(work_dir):
-                        # compose 文件在宿主机有、容器里没有 => 没挂载，单独提示
-                        if work_dir not in self.hidden_dirs:
-                            self.hidden_dirs.append(work_dir)
-                        continue
-
-                    unique_key = "%s:%s" % (name, work_dir)
-                    if work_dir and unique_key not in seen_keys:
-                        seen_keys.add(unique_key)
-                        services = self.get_project_services(work_dir, config_files)
-                        projects.append(
-                            {
-                                "name": name,
-                                "dir": work_dir,
-                                "status": status,
-                                "services": services,
-                                "config_files": config_files,
-                            }
-                        )
         except Exception as exc:
-            self.last_scan_error = str(exc)
-            log.warning("docker compose ls 扫描失败: %s", exc)
+            self.host_errors[host.id] = str(exc)
+            log.warning("主机 %s 的 docker compose ls 起不来：%s", host.id, exc)
+            return []
 
-        projects.sort(key=lambda x: x["name"])
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "").strip()
+            self.host_errors[host.id] = explain_exit(result.returncode, detail, host)
+            log.warning("主机 %s 的 docker compose ls 失败：%s", host.id, self.host_errors[host.id])
+            return []
+
+        projects: list[dict] = []
+        seen_keys: set[str] = set()
+        data: list[Any] = []
+        if result.stdout.strip():
+            try:
+                parsed = json.loads(result.stdout)
+                data = parsed if isinstance(parsed, list) else [parsed]
+            except json.JSONDecodeError:
+                for line in result.stdout.strip().splitlines():
+                    if line.strip():
+                        try:
+                            data.append(json.loads(line))
+                        except json.JSONDecodeError:
+                            pass
+
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            name = item.get("Name", "")
+            status = item.get("Status", "")
+            config_files = [
+                c.strip() for c in (item.get("ConfigFiles", "") or "").split(",") if c.strip()
+            ]
+            if not name:
+                continue
+            first_file = config_files[0] if config_files else ""
+            work_dir = os.path.dirname(first_file) if first_file else ""
+            if host.is_remote:
+                # 远端返回的是它自己的路径：不做本地存在性检查，只按可选白名单过滤
+                if work_dir and not host.allows(work_dir):
+                    log.info("主机 %s 的项目 %s 不在 roots 白名单内，跳过", host.id, name)
+                    continue
+            elif work_dir and not os.path.isdir(work_dir):
+                # compose 文件在宿主机有、容器里没有 => 没挂载，单独提示
+                if work_dir not in self.hidden_dirs:
+                    self.hidden_dirs.append(work_dir)
+                continue
+
+            unique_key = "%s:%s:%s" % (host.id, name, work_dir)
+            if work_dir and unique_key not in seen_keys:
+                seen_keys.add(unique_key)
+                projects.append(
+                    {
+                        "name": name,
+                        "dir": work_dir,
+                        "status": status,
+                        "services": self.get_project_services(work_dir, config_files, host),
+                        "config_files": config_files,
+                        "host": host.id,
+                        "host_label": host.display,
+                    }
+                )
         return projects
 
     async def get_projects(self, force_refresh: bool = False) -> list[dict]:
@@ -470,38 +605,78 @@ def common_mount_root(dirs: Sequence[str]) -> Optional[str]:
     return root
 
 
-def scan_hint(state: DockerState, *, include_compose: bool = True) -> list[str]:
-    """扫描不到项目时的可操作提示（把权限 / 挂载 / 缺命令三种原因分开说）。
+def _local_error_hints(error: str) -> list[str]:
+    """本机扫描失败的原因 → 人话（权限 / 连不上 / 其它）。"""
+    error = (error or "").strip()
+    low = error.lower()
+    hints: list[str] = []
+    if not error:
+        return hints
+    if "permission denied" in low:
+        hints.append(
+            "⚠️ 读不到 Docker：<code>permission denied</code> —— "
+            "容器里的 mtbots 用户没有 <code>/var/run/docker.sock</code> 的权限。"
+        )
+        hints.extend(socket_group_hint())
+        hints.append(
+            "   兜底：宿主机上 <code>stat -c '%%g' %s</code> 看 socket 属组 GID。" % DOCKER_SOCKET
+        )
+    elif any(
+        mark in low
+        for mark in ("cannot connect", "no such file", "connection refused", "is the docker daemon running")
+    ):
+        hints.append(
+            "⚠️ 连不上 Docker 守护进程：确认挂载了 "
+            "<code>-v /var/run/docker.sock:/var/run/docker.sock</code>。"
+        )
+    else:
+        hints.append("⚠️ <code>docker compose ls</code> 失败：<code>%s</code>" % esc(error))
+    return hints
 
-    以前这三种情况都只表现成一句「暂未检测到任何 Docker Compose 项目」，只能靠猜。
-    这里把 :attr:`DockerState.last_scan_error` 和 :attr:`DockerState.hidden_dirs` 翻成人话。
+
+def _remote_error_hints(host: DockerHost, error: str) -> list[str]:
+    """远端主机的失败原因 → 人话（含一条能直接抄的自测命令）。"""
+    hints = [
+        "⚠️ 主机 <b>%s</b>（%s）：%s" % (esc(host.id), esc(host.display), esc(error or "未知原因"))
+    ]
+    if host.error and "私钥" in host.error:
+        hints.append(
+            "   把 bot 主机上的私钥放到 <code>%s</code>（与 <code>data/</code> 同目录，"
+            "<code>chmod 600</code>）。" % esc(host.identity)
+        )
+    elif host.error:
+        hints.append("   修好 <code>data/docker-hosts.json</code> 里这台主机的配置后重启。")
+    else:
+        hints.append(
+            "   自测：<code>ssh -p %d -i %s %s docker compose version</code>"
+            % (host.port, esc(host.identity), esc(host.target))
+        )
+    return hints
+
+
+def scan_hint(state: DockerState, *, include_compose: bool = True) -> list[str]:
+    """扫描不到项目时的可操作提示（把权限 / 挂载 / 缺命令 / 远端连不上分开说）。
+
+    以前这几种情况都只表现成一句「暂未检测到任何 Docker Compose 项目」，只能靠猜。
+    这里把 :attr:`DockerState.host_errors`（逐主机）、:attr:`DockerState.last_scan_error` 与
+    :attr:`DockerState.hidden_dirs` 翻成人话。
     """
     hints: list[str] = []
     if include_compose and state.compose_bin is not None and not state.compose_bin:
         hints.append("⚠️ 容器里没有 <code>docker compose</code> / <code>docker-compose</code> 命令。")
 
-    error = (state.last_scan_error or "").strip()
-    low = error.lower()
-    if error:
-        if "permission denied" in low:
-            hints.append(
-                "⚠️ 读不到 Docker：<code>permission denied</code> —— "
-                "容器里的 mtbots 用户没有 <code>/var/run/docker.sock</code> 的权限。"
-            )
-            hints.extend(socket_group_hint())
-            hints.append(
-                "   兜底：宿主机上 <code>stat -c '%%g' %s</code> 看 socket 属组 GID。" % DOCKER_SOCKET
-            )
-        elif any(
-            mark in low
-            for mark in ("cannot connect", "no such file", "connection refused", "is the docker daemon running")
-        ):
-            hints.append(
-                "⚠️ 连不上 Docker 守护进程：确认挂载了 "
-                "<code>-v /var/run/docker.sock:/var/run/docker.sock</code>。"
-            )
-        else:
-            hints.append("⚠️ <code>docker compose ls</code> 失败：<code>%s</code>" % esc(error))
+    hints.extend(state.host_notes)
+
+    errors = dict(getattr(state, "host_errors", {}) or {})
+    if errors:
+        for host_id, error in errors.items():
+            host = state.host_by_id(host_id)
+            if host is not None and host.is_remote:
+                hints.extend(_remote_error_hints(host, error))
+            else:
+                hints.extend(_local_error_hints(error))
+    else:
+        hints.extend(_local_error_hints(state.last_scan_error))
 
     if state.hidden_dirs:
         dirs = state.hidden_dirs
@@ -526,15 +701,22 @@ def scan_hint(state: DockerState, *, include_compose: bool = True) -> list[str]:
 
 # ==================== 只读 docker 查询 ====================
 async def run_docker_capture(
-    state: DockerState, *args: str, timeout: Optional[float] = None
+    state: DockerState,
+    *args: str,
+    timeout: Optional[float] = None,
+    host: Optional[DockerHost] = None,
 ) -> tuple[int, str]:
-    """执行只读 Docker 查询，返回退出码和合并后的输出（在线程里跑，不阻塞事件循环）。"""
+    """执行只读 Docker 查询，返回退出码和合并后的输出（在线程里跑，不阻塞事件循环）。
+
+    `host` 指定在哪台机器上跑（远端会被包成 ssh 调用）；不传 = 第一台（单机行为不变）。
+    """
     budget = float(timeout if timeout is not None else state.settings.command_timeout)
+    target = host or state.hosts[0]
 
     def _run() -> tuple[int, str]:
         try:
             proc = subprocess.run(
-                ["docker", *args],
+                target.command(["docker", *args]),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
@@ -547,7 +729,9 @@ async def run_docker_capture(
     return await asyncio.to_thread(_run)
 
 
-async def scan_prune_candidates(state: DockerState, prune_all: bool) -> tuple[bool, str, str]:
+async def scan_prune_candidates(
+    state: DockerState, prune_all: bool, host: Optional[DockerHost] = None
+) -> tuple[bool, str, str]:
     """扫描与 prune 命令语义一致的候选镜像，禁止把全部镜像误报为待删除。
 
     返回 (是否成功, 候选快照, 错误输出)。
@@ -562,18 +746,19 @@ async def scan_prune_candidates(state: DockerState, prune_all: bool) -> tuple[bo
             "--no-trunc",
             "--format",
             IMAGE_FORMAT,
+            host=host,
         )
         if rc != 0:
             return False, "", output
         return True, output.strip(), ""
 
     rc, image_output = await run_docker_capture(
-        state, "image", "ls", "-a", "--no-trunc", "--format", IMAGE_FORMAT
+        state, "image", "ls", "-a", "--no-trunc", "--format", IMAGE_FORMAT, host=host
     )
     if rc != 0:
         return False, "", image_output
 
-    rc, container_output = await run_docker_capture(state, "ps", "-aq")
+    rc, container_output = await run_docker_capture(state, "ps", "-aq", host=host)
     if rc != 0:
         return False, "", container_output
 
@@ -581,7 +766,7 @@ async def scan_prune_candidates(state: DockerState, prune_all: bool) -> tuple[bo
     referenced_ids: set[str] = set()
     if container_ids:
         rc, inspect_output = await run_docker_capture(
-            state, "inspect", "--format", "{{.Image}}", *container_ids
+            state, "inspect", "--format", "{{.Image}}", *container_ids, host=host
         )
         if rc != 0:
             return False, "", inspect_output
@@ -591,12 +776,27 @@ async def scan_prune_candidates(state: DockerState, prune_all: bool) -> tuple[bo
     return True, "\n".join(candidates), ""
 
 
-async def dump_container_status(state: DockerState) -> tuple[bool, str]:
+async def dump_container_status(
+    state: DockerState, host: Optional[DockerHost] = None
+) -> tuple[bool, str]:
     """`docker ps -a` 容器状态速览（/d_status）。"""
     rc, output = await run_docker_capture(
-        state, "ps", "-a", "--format", "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+        state,
+        "ps",
+        "-a",
+        "--format",
+        "table {{.Names}}\t{{.Status}}\t{{.Ports}}",
+        host=host,
     )
     return rc == 0, output.strip()
+
+
+def make_state(settings: DockerSettings) -> DockerState:
+    """按配置建 DockerState（`register()` 与 `--health` 共用，保证两处看到同样的主机清单）。"""
+    hosts, notes = load_hosts(getattr(settings, "hosts_file", None))
+    for note in notes:
+        log.warning("主机清单提示：%s", note)
+    return DockerState(settings, hosts=hosts, host_notes=notes)
 
 
 # ==================== 流式执行 ====================
@@ -641,6 +841,7 @@ async def run_command_with_feedback(
     on_progress: Optional[ProgressCallback] = None,
     delete_on_success: bool = False,
     out: Optional[list[str]] = None,
+    host: Optional[DockerHost] = None,
 ) -> bool:
     """执行一条 compose / docker 命令，并把逐层进度原地刷新到同一条状态消息上。
 
@@ -652,11 +853,16 @@ async def run_command_with_feedback(
 
     `out` 是可选的结果回传（列表尾插一条过滤后的输出），给「删掉执行消息但结论还得留着」
     的场景用，例如镜像清理要把 `Total reclaimed space` 抄进收尾面板。
+
+    `host` 指定在哪台机器上跑：远端主机的命令**不能带本地 cwd**（本地没那个目录），
+    失败时再按 ssh 的退出码补一句人话提示。
     """
     start_time = time.time()
     safe_title = esc(title)
     safe_cmd = esc(" ".join(cmd))
     timeout = state.settings.command_timeout
+    if host is not None:
+        cwd = host.cwd(cwd or "")
 
     cancel_markup = InlineKeyboardMarkup(
         [
@@ -773,10 +979,13 @@ async def run_command_with_feedback(
                 await delete_message_quietly(status_msg)
             return True
 
+        hint = ""
+        if host is not None and host.is_remote:
+            hint = "\n💡 %s" % esc(explain_exit(int(returncode), full_output, host))
         await edit_html_safe(
             status_msg,
-            "❌ <b>%s 失败 (Code %s)</b>\n⏱ <b>耗时：</b>%ss\n<code>%s</code>"
-            % (safe_title, returncode, elapsed, safe_full_output),
+            "❌ <b>%s 失败 (Code %s)</b>%s\n⏱ <b>耗时：</b>%ss\n<code>%s</code>"
+            % (safe_title, returncode, hint, elapsed, safe_full_output),
         )
         return False
 
@@ -813,7 +1022,9 @@ __all__ = [
     "filter_pull_noise",
     "format_prune_snapshot",
     "is_pull_noise",
+    "make_state",
     "normalize_image_id",
+    "ordered_projects",
     "paginate_projects",
     "run_command_with_feedback",
     "run_docker_capture",

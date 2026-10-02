@@ -55,15 +55,29 @@ async def _health_probes(core) -> list[str]:
             from .features.docker import compose as docker_compose  # type: ignore
             from .features.docker.config import DockerSettings  # type: ignore
 
-            state = docker_compose.DockerState(DockerSettings.from_env(settings))
+            builder = getattr(docker_compose, "make_state", None)
+            state = (
+                builder(DockerSettings.from_env(settings))
+                if builder
+                else docker_compose.DockerState(DockerSettings.from_env(settings))
+            )
+            hosts = list(getattr(state, "hosts", []) or [])
+            remote = [h for h in hosts if getattr(h, "is_remote", False)]
             probe = getattr(state, "get_compose_bin", None)
             binary = await asyncio.to_thread(probe) if probe else []
-            lines.append("🐳 docker compose：%s" % (" ".join(binary) if binary else "❌ 未找到"))
+            lines.append("🐳 docker compose（本机）：%s" % (" ".join(binary) if binary else "❌ 未找到"))
+            lines.append(
+                "🐳 主机：%d 台%s"
+                % (len(hosts), "（含远端 %s）" % "、".join(h.id for h in remote) if remote else "（单机）")
+            )
             projects = await state.get_projects() if hasattr(state, "get_projects") else None
             if projects is not None:
                 lines.append("🐳 可扫描到的 compose 项目：%d 个" % len(projects))
+                for host in hosts:
+                    count = sum(1 for p in projects if p.get("host") == host.id)
+                    lines.append("   · %s：%d 个" % (host.id, count))
                 if not projects:
-                    # 空列表最需要原因：权限不足 / 目录没挂载 / 命令缺失
+                    # 空列表最需要原因：权限不足 / 目录没挂载 / 命令缺失 / 远端连不上
                     hint_fn = getattr(docker_compose, "scan_hint", None)
                     for hint in hint_fn(state) if hint_fn else []:
                         lines.append("   " + redact(strip_tags(hint)))

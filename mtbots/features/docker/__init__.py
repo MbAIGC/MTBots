@@ -12,7 +12,7 @@ from typing import Any, Optional
 from ...core import Core, ModuleSpec
 from ...text import esc
 from . import handlers
-from .compose import DockerState
+from .compose import DockerState, make_state
 from .config import DockerSettings
 
 log = logging.getLogger("mtbots.docker")
@@ -48,8 +48,16 @@ async def summary(core: Core, user_id: int) -> str:
         return "🐳 Docker · 点击进入"
     projects = state.cached_projects()
     if not projects:
+        if state.multi_host:
+            return "🐳 Docker · %d 台主机，暂无项目" % len(state.hosts)
         return "🐳 Docker · 暂无项目"
     running = sum(1 for p in projects if "running" in str(p.get("status", "")).lower())
+    if state.multi_host:
+        return "🐳 Docker · %d 台主机 %d 个项目（%d 个运行中）" % (
+            len(state.hosts),
+            len(projects),
+            running,
+        )
     return "🐳 Docker · %d 个项目（%d 个运行中）" % (len(projects), running)
 
 
@@ -79,17 +87,26 @@ async def id_lines(core: Core, user_id: int) -> list[str]:
         return ["🐳 docker：未初始化"]
     settings = state.settings
     compose = " ".join(state.compose_bin) if state.compose_bin else "未探测"
-    return [
+    lines = [
         "🐳 docker：compose=<code>%s</code>" % esc(compose),
         "🐳 docker：已缓存项目 %d 个｜超时 %ds｜每页 %d 个"
         % (len(state.cached_projects()), settings.command_timeout, settings.page_size),
-        "🐳 docker：日志目录 <code>%s</code>" % esc(settings.log_dir),
     ]
+    if state.multi_host:
+        per_host = "、".join(
+            "%s %d" % (host.id, sum(1 for p in state.cached_projects() if p.get("host") == host.id))
+            for host in state.hosts
+        )
+        lines.append("🐳 docker：主机 %d 台（%s）" % (len(state.hosts), esc(per_host)))
+        for host_id, error in (state.host_errors or {}).items():
+            lines.append("🐳 docker：主机 %s 异常 <code>%s</code>" % (esc(host_id), esc(error)))
+    lines.append("🐳 docker：日志目录 <code>%s</code>" % esc(settings.log_dir))
+    return lines
 
 
 def register(app: Any, core: Core) -> None:
     """创建本模块的 DockerState 并注册 handler。"""
-    state = DockerState(DockerSettings.from_env(core.settings))
+    state = make_state(DockerSettings.from_env(core.settings))
     core.data[_ID] = state
 
     # 命令菜单只贡献片段：MenuManager 合成后统一下发（模块自己不调 set_my_commands）
@@ -102,10 +119,11 @@ def register(app: Any, core: Core) -> None:
 
     handlers.register(app, core)
     log.info(
-        "docker 模块已注册：page_size=%d timeout=%ds cache_ttl=%ss",
+        "docker 模块已注册：page_size=%d timeout=%ds cache_ttl=%ss 主机=%s",
         state.settings.page_size,
         state.settings.command_timeout,
         state.settings.projects_cache_ttl,
+        ",".join(host.id for host in state.hosts),
     )
 
 

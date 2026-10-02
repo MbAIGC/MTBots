@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import datetime
+import os
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -331,6 +332,8 @@ def make_recording_app(
             "MTBOTS_BOT_TOKEN": FAKE_TOKEN,
             "ALLOWED_USER_IDS": "123456789",
             "DATA_DIR": tempfile.mkdtemp(prefix="mtbots-dispatch-"),
+            # 主机清单固定指向不存在的文件：测试永远是单机模式（不受仓库里的 data/ 影响）
+            "DOCKER_HOSTS_FILE": os.path.join(tempfile.mkdtemp(prefix="mtbots-hosts-"), "none.json"),
             "MTBOTS_MODULES": modules,
         }
     )

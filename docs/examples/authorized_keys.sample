@@ -1,0 +1,11 @@
+# 远端主机 /home/mtbots/.ssh/authorized_keys
+# 把 bot 主机生成的公钥贴进来（./data/ssh/id_ed25519.pub），并加**强制命令**：
+#   1) command=... 只允许跑 compose 相关命令（docs/examples/mtbots-compose-guard.sh）
+#   2) restrict   关掉端口转发 / pty / agent 转发
+#   3) from=...   （可选）只允许 bot 主机这个 IP 连过来
+#
+# 举例（未加 from=，内网自用够）：
+command="/usr/local/bin/mtbots-compose-guard",restrict ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI... mtbots@bot
+
+# 更严一点（推荐）：再限定来源 IP
+# from="10.0.0.9",command="/usr/local/bin/mtbots-compose-guard",restrict ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI... mtbots@bot

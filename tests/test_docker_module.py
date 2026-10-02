@@ -23,6 +23,7 @@ from mtbots.features.docker import MODULE, commands, help_text, id_lines, regist
 from mtbots.features.docker import handlers as docker_handlers
 from mtbots.features.docker.compose import (
     DockerState,
+    dump_container_status,
     common_mount_root,
     delete_message_quietly,
     filter_pull_noise,
@@ -37,6 +38,11 @@ from mtbots.features.docker.compose import (
     sort_projects_for_display,
 )
 from mtbots.features.docker.config import DockerSettings
+from mtbots.features.docker.hosts import (
+    DockerHost,
+    explain_exit,
+    load_hosts,
+)
 from mtbots.panels import _CB_PAYLOAD, cb, cb_args, cb_parse, cb_parts, cb_simple
 
 # 测试里不需要 docker 模块的 warning（例如「未检测到 compose」）
@@ -481,7 +487,7 @@ class PruneScanTest(unittest.TestCase):
         state = DockerState(DockerSettings())
         calls: list[tuple] = []
 
-        async def fake_capture(_state, *args, timeout=None):
+        async def fake_capture(_state, *args, timeout=None, host=None):
             calls.append(args)
             return 0, "abc123\t<none>:<none>\t10MB\n"
 
@@ -500,7 +506,7 @@ class PruneScanTest(unittest.TestCase):
 
         state = DockerState(DockerSettings())
 
-        async def fake_capture(_state, *args, timeout=None):
+        async def fake_capture(_state, *args, timeout=None, host=None):
             if args[0] == "image":
                 return (
                     0,
@@ -788,6 +794,417 @@ class FailureTailTest(unittest.TestCase):
         callbacks = [b.callback_data for row in markup.inline_keyboard for b in row]
         self.assertIn("d|task_cancel|abc123", callbacks)
         self.assertIn("nav|jobs", callbacks)
+
+
+# ==================== 多主机：配置与命令包装 ====================
+class HostConfigTest(unittest.TestCase):
+    """主机清单必须「非法就明说」，绝不静默退化；没有文件时是单机（与老版本一致）。"""
+
+    def _write(self, payload) -> str:
+        path = Path(tempfile.mkdtemp(prefix="mtbots-hosts-")) / "docker-hosts.json"
+        path.write_text(
+            payload if isinstance(payload, str) else json.dumps(payload), encoding="utf-8"
+        )
+        return str(path)
+
+    def _ssh_key(self) -> str:
+        key = Path(tempfile.mkdtemp(prefix="mtbots-key-")) / "id_ed25519"
+        key.write_text("PRIVATE", encoding="utf-8")
+        return str(key)
+
+    def test_missing_file_is_single_local_host(self):
+        hosts, notes = load_hosts("/nonexistent/docker-hosts.json")
+        self.assertEqual([h.id for h in hosts], ["local"])
+        self.assertFalse(hosts[0].is_remote)
+        self.assertEqual(notes, [])
+
+    def test_no_path_is_single_local_host(self):
+        hosts, notes = load_hosts(None)
+        self.assertEqual([h.id for h in hosts], ["local"])
+        self.assertEqual(notes, [])
+
+    def test_local_and_ssh_hosts_are_parsed(self):
+        key = self._ssh_key()
+        path = self._write(
+            {
+                "hosts": [
+                    {"id": "nas", "label": "本机 NAS", "kind": "local"},
+                    {
+                        "id": "vps",
+                        "label": "Oracle",
+                        "kind": "ssh",
+                        "target": "mtbots@10.0.0.5",
+                        "identity": key,
+                        "roots": ["/opt"],
+                    },
+                ]
+            }
+        )
+        hosts, notes = load_hosts(path)
+        self.assertEqual([h.id for h in hosts], ["nas", "vps"])
+        self.assertEqual(notes, [])
+        self.assertFalse(hosts[0].is_remote)
+        self.assertTrue(hosts[1].is_remote)
+        self.assertEqual(hosts[1].display, "Oracle")
+        self.assertEqual(hosts[1].roots, ("/opt",))
+
+    def test_bad_json_falls_back_to_single_host_with_note(self):
+        path = self._write("{ this is not json")
+        hosts, notes = load_hosts(path)
+        self.assertEqual([h.id for h in hosts], ["local"])
+        self.assertTrue(notes and "读取失败" in notes[0])
+
+    def test_empty_hosts_list_falls_back(self):
+        hosts, notes = load_hosts(self._write({"hosts": []}))
+        self.assertEqual([h.id for h in hosts], ["local"])
+        self.assertTrue(notes)
+
+    def test_invalid_targets_are_rejected(self):
+        key = self._ssh_key()
+        for bad in ("10.0.0.5", "mtbots@10.0.0.5; rm -rf /", "mtbots@host -o ProxyCommand=x", ""):
+            path = self._write(
+                {"hosts": [{"id": "vps", "kind": "ssh", "target": bad, "identity": key}]}
+            )
+            hosts, _notes = load_hosts(path)
+            self.assertTrue(hosts[0].error, "target=%r 必须被拒" % bad)
+            self.assertIn("user@host", hosts[0].error)
+
+    def test_invalid_id_kind_and_strict(self):
+        key = self._ssh_key()
+        cases = [
+            ({"id": "Bad ID", "kind": "local"}, "id"),
+            ({"id": "vps", "kind": "telnet"}, "kind"),
+            ({"id": "vps", "kind": "ssh", "target": "u@h", "strict": "no", "identity": key}, "strict"),
+            (
+                {"id": "vps", "kind": "ssh", "target": "u@h", "identity": key, "roots": ["opt"]},
+                "roots",
+            ),
+        ]
+        for entry, needle in cases:
+            hosts, _notes = load_hosts(self._write({"hosts": [entry]}))
+            self.assertIn(needle, hosts[0].error)
+
+    def test_missing_identity_marks_host_error(self):
+        path = self._write(
+            {
+                "hosts": [
+                    {
+                        "id": "vps",
+                        "kind": "ssh",
+                        "target": "mtbots@10.0.0.5",
+                        "identity": "/nonexistent/id_ed25519",
+                    }
+                ]
+            }
+        )
+        hosts, _notes = load_hosts(path)
+        self.assertIn("私钥不存在", hosts[0].error)
+
+    def test_duplicate_ids_keep_first_and_note(self):
+        path = self._write(
+            {"hosts": [{"id": "nas", "kind": "local"}, {"id": "nas", "kind": "local"}]}
+        )
+        hosts, notes = load_hosts(path)
+        self.assertEqual(len(hosts), 1)
+        self.assertTrue(any("重复" in note for note in notes))
+
+
+class HostCommandTest(unittest.TestCase):
+    """远端命令的拼装：引号、选项、cwd 一个都不能错（错了就是静默挂空目录级别的坑）。"""
+
+    def _remote(self, **kwargs) -> DockerHost:
+        base = dict(
+            id="vps",
+            label="Oracle",
+            kind="ssh",
+            target="mtbots@10.0.0.5",
+            port=2222,
+            identity="/app/data/ssh/id_ed25519",
+            known_hosts="/app/data/ssh/known_hosts",
+            strict="accept-new",
+        )
+        base.update(kwargs)
+        return DockerHost(**base)
+
+    def test_local_command_is_untouched(self):
+        host = DockerHost(id="local", kind="local")
+        cmd = ["docker", "compose", "-f", "/opt/a/docker-compose.yml", "pull"]
+        self.assertEqual(host.command(cmd), cmd)
+        self.assertEqual(host.cwd("/opt/a"), "/opt/a")
+
+    def test_remote_command_is_wrapped_with_options(self):
+        host = self._remote()
+        cmd = ["docker", "compose", "-f", "/opt/blog/docker-compose.yml", "pull"]
+        wrapped = host.command(cmd)
+        self.assertEqual(wrapped[0], "ssh")
+        self.assertIn("-p", wrapped)
+        self.assertIn("2222", wrapped)
+        self.assertIn("BatchMode=yes", wrapped)
+        self.assertIn("StrictHostKeyChecking=accept-new", wrapped)
+        self.assertIn("UserKnownHostsFile=/app/data/ssh/known_hosts", wrapped)
+        self.assertEqual(wrapped[-3], "mtbots@10.0.0.5")
+        self.assertEqual(wrapped[-2], "--")
+        self.assertEqual(
+            wrapped[-1], "docker compose -f /opt/blog/docker-compose.yml pull"
+        )
+
+    def test_remote_command_quotes_paths_with_spaces(self):
+        host = self._remote()
+        wrapped = host.command(["docker", "compose", "-f", "/opt/my blog/docker-compose.yml", "up", "-d"])
+        self.assertIn("'/opt/my blog/docker-compose.yml'", wrapped[-1])
+
+    def test_remote_never_uses_a_local_cwd(self):
+        self.assertIsNone(self._remote().cwd("/opt/blog"))
+        self.assertIsNone(self._remote().cwd(""))
+
+    def test_roots_filter(self):
+        host = self._remote(roots=("/opt",))
+        self.assertTrue(host.allows("/opt/blog"))
+        self.assertTrue(host.allows("/opt"))
+        self.assertFalse(host.allows("/opt2/blog"))
+        self.assertFalse(host.allows("/srv/blog"))
+
+    def test_explain_exit_maps_ssh_codes(self):
+        host = self._remote()
+        self.assertIn("SSH 连不上", explain_exit(255, "", host))
+        self.assertIn("守卫脚本", explain_exit(126, "", host))
+        self.assertIn("未安装 docker compose", explain_exit(127, "", host))
+        self.assertEqual(explain_exit(1, "boom\nsecond", host), "boom")
+        # 本机（local）不套 ssh 的退出码语义
+        local = DockerHost(id="local", kind="local")
+        self.assertEqual(explain_exit(255, "permission denied", local), "permission denied")
+
+
+class MultiHostStateTest(unittest.TestCase):
+    """多主机状态：逐主机扫描、项目带主机、命令包成 ssh、失败按主机提示。"""
+
+    @staticmethod
+    def _result(returncode: int = 0, stdout: str = "", stderr: str = ""):
+        return mock.Mock(returncode=returncode, stdout=stdout, stderr=stderr)
+
+    def _state(self):
+        base = Path(tempfile.mkdtemp(prefix="mtbots-mh-"))
+        key = base / "id_ed25519"
+        key.write_text("PRIVATE", encoding="utf-8")
+        local_dir = base / "media"
+        local_dir.mkdir()
+        (local_dir / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
+        self.local_dir = str(local_dir)
+        hosts = [
+            DockerHost(id="nas", label="本机 NAS", kind="local"),
+            DockerHost(
+                id="vps",
+                label="Oracle",
+                kind="ssh",
+                target="mtbots@10.0.0.5",
+                identity=str(key),
+            ),
+        ]
+        state = DockerState(DockerSettings(), hosts=hosts)
+        state.compose_bin = ["docker", "compose"]
+        # 预置远端探测结果：测试里不能真的跑 ssh（会等 ConnectTimeout）
+        state.remote_compose["vps"] = ["docker", "compose"]
+        return state
+
+    def _local_payload(self) -> str:
+        return json.dumps(
+            [
+                {
+                    "Name": "media",
+                    "Status": "running(1)",
+                    "ConfigFiles": os.path.join(self.local_dir, "docker-compose.yml"),
+                }
+            ]
+        )
+
+    def _remote_payload(self) -> str:
+        return json.dumps(
+            [
+                {
+                    "Name": "blog",
+                    "Status": "exited(2)",
+                    "ConfigFiles": "/opt/blog/docker-compose.yml",
+                }
+            ]
+        )
+
+    def _fake_run(self, remote_rc: int = 0, remote_err: str = ""):
+        """本地/远端两套假 docker：按 argv 区分（远端一律是 ssh 开头）。"""
+
+        def fake(cmd, **kwargs):
+            if cmd[0] == "ssh":
+                joined = cmd[-1]
+                if "version" in joined:
+                    return self._result(0, "Docker Compose version v2.35.1")
+                if "ls" in joined:
+                    if remote_rc:
+                        return self._result(remote_rc, "", remote_err)
+                    return self._result(0, self._remote_payload())
+                return self._result(0, "web\napi\n")
+
+            if "version" in cmd:
+                return self._result(0, "Docker Compose version v2.35.1")
+            if "ls" in cmd:
+                return self._result(0, self._local_payload())
+            return self._result(0, "emby\n")
+
+        return fake
+
+    def test_scan_merges_hosts_and_does_not_check_remote_paths(self):
+        state = self._state()
+        with mock.patch("mtbots.features.docker.compose.subprocess.run", side_effect=self._fake_run()):
+            projects = state.scan_projects_sync()
+
+        by_host = {p["name"]: p for p in projects}
+        self.assertEqual(sorted(by_host), ["blog", "media"])
+        self.assertEqual(by_host["media"]["host"], "nas")
+        self.assertEqual(by_host["blog"]["host"], "vps")
+        self.assertEqual(by_host["blog"]["host_label"], "Oracle")
+        # 远端路径在本地当然不存在，但**不能**因此被丢掉或塞进 hidden_dirs
+        self.assertEqual(state.hidden_dirs, [])
+        self.assertEqual(state.host_errors, {})
+        self.assertEqual(by_host["blog"]["services"], ["web", "api"])
+        self.assertEqual(by_host["media"]["services"], ["emby"])
+        self.assertTrue(state.multi_host)
+        self.assertEqual(state.project_label(by_host["blog"]), "vps/blog")
+        self.assertEqual(state.project_label(by_host["media"]), "nas/media")
+        self.assertEqual([p["host"] for p in state.order(projects)], ["nas", "vps"])
+
+    def test_single_host_labels_stay_plain(self):
+        state = DockerState(DockerSettings())
+        state.compose_bin = ["docker", "compose"]
+        self.assertFalse(state.multi_host)
+        self.assertEqual(state.project_label({"name": "media", "host": "local"}), "media")
+
+    def test_remote_scan_failure_is_per_host(self):
+        state = self._state()
+        with mock.patch(
+            "mtbots.features.docker.compose.subprocess.run",
+            side_effect=self._fake_run(remote_rc=255, remote_err="ssh: connect to host 10.0.0.5 port 22: refused"),
+        ):
+            projects = state.scan_projects_sync()
+
+        self.assertEqual([p["name"] for p in projects], ["media"], "本机项目照常列出")
+        self.assertIn("SSH 连不上", state.host_errors["vps"])
+        self.assertEqual(state.last_scan_error, "", "本机没出错，last_scan_error 保持空")
+        hints = " ".join(scan_hint(state))
+        self.assertIn("Oracle", hints)
+        self.assertIn("自测", hints)
+
+    def test_remote_error_hint_for_guard_and_missing_key(self):
+        state = self._state()
+        state.host_errors = {"vps": "远端授权只允许 compose 操作（守卫脚本拒绝了这条命令）"}
+        self.assertIn("守卫脚本", " ".join(scan_hint(state)))
+
+        state = self._state()
+        state.hosts[1] = DockerHost(
+            id="vps", kind="ssh", target="mtbots@10.0.0.5", error="私钥不存在：/app/data/ssh/id_ed25519"
+        )
+        state.host_errors = {"vps": "私钥不存在：/app/data/ssh/id_ed25519"}
+        hints = " ".join(scan_hint(state))
+        self.assertIn("chmod 600", hints)
+        self.assertIn("id_ed25519", hints)
+
+    def test_build_compose_cmd_wraps_remote_projects(self):
+        state = self._state()
+        remote = {"name": "blog", "dir": "/opt/blog", "host": "vps",
+                  "config_files": ["/opt/blog/docker-compose.yml"]}
+        cmd = state.build_compose_cmd(remote, "pull")
+        self.assertEqual(cmd[0], "ssh")
+        self.assertEqual(cmd[-1], "docker compose -f /opt/blog/docker-compose.yml pull")
+        self.assertIsNone(state.cwd_for(remote))
+        self.assertEqual(state.cwd_for({"name": "m", "dir": "/srv/m", "host": "nas"}), "/srv/m")
+
+    def test_run_command_with_feedback_uses_ssh_and_no_cwd(self):
+        state = self._state()
+        msg = _FakeStatusMessage()
+        proc = _FakeProcess(b"Total reclaimed space: 1.2GB\n", 0)
+        remote = {"name": "blog", "dir": "/opt/blog", "host": "vps"}
+        seen: dict = {}
+
+        async def fake_exec(*cmd, **kwargs):
+            seen["cmd"] = list(cmd)
+            seen["kwargs"] = kwargs
+            return proc
+
+        with mock.patch(
+            "mtbots.features.docker.compose.asyncio.create_subprocess_exec", new=fake_exec
+        ):
+            ok = asyncio.run(
+                run_command_with_feedback(
+                    state,
+                    msg,
+                    state.build_compose_cmd(remote, "pull"),
+                    cwd=state.cwd_for(remote),
+                    title="拉取新镜像 - vps/blog",
+                    host=state.host_of(remote),
+                )
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(seen["cmd"][0], "ssh")
+        self.assertIsNone(seen["kwargs"].get("cwd"), "远端不能带本地 cwd")
+
+    def test_readonly_capture_wraps_host(self):
+        state = self._state()
+        seen: list = []
+
+        def fake_run(cmd, **kwargs):
+            seen.append(cmd)
+            return self._result(0, "blog-web-1\tUp 2 hours\t80/tcp\n")
+
+        remote = state.host_by_id("vps")
+        with mock.patch("mtbots.features.docker.compose.subprocess.run", side_effect=fake_run):
+            ok, output = asyncio.run(dump_container_status(state, remote))
+
+        self.assertTrue(ok)
+        self.assertEqual(seen[0][0], "ssh")
+        self.assertIn("docker ps -a", seen[0][-1])
+        self.assertIn("blog-web-1", output)
+
+    def test_remote_compose_probe_is_cached(self):
+        """远端只有 docker-compose（老 NAS）也要能用：探测按主机缓存。"""
+        state = self._state()
+        state.remote_compose.pop("vps", None)
+        seen: list = []
+
+        def fake_run(cmd, **kwargs):
+            seen.append(cmd)
+            if cmd[-1].endswith("docker compose version"):
+                return self._result(1, "", "docker: 'compose' is not a docker command")
+            return self._result(0, "docker-compose version 1.29.2")
+
+        remote = state.host_by_id("vps")
+        with mock.patch("mtbots.features.docker.compose.subprocess.run", side_effect=fake_run):
+            binary = state.get_remote_compose_bin(remote)
+
+        self.assertEqual(binary, ["docker-compose"])
+        self.assertEqual(state.get_remote_compose_bin(remote), ["docker-compose"])
+        self.assertEqual(len(seen), 2, "第二次必须走缓存，不再探测")
+        self.assertEqual(seen[0][0], "ssh")
+
+    def test_make_state_loads_hosts_from_settings(self):
+        from mtbots.features.docker.compose import make_state
+
+        base = Path(tempfile.mkdtemp(prefix="mtbots-ms-"))
+        key = base / "id_ed25519"
+        key.write_text("PRIVATE", encoding="utf-8")
+        hosts_file = base / "docker-hosts.json"
+        hosts_file.write_text(
+            json.dumps(
+                {
+                    "hosts": [
+                        {"id": "nas", "kind": "local"},
+                        {"id": "vps", "kind": "ssh", "target": "u@h", "identity": str(key)},
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        settings = DockerSettings(hosts_file=hosts_file)
+        state = make_state(settings)
+        self.assertEqual([h.id for h in state.hosts], ["nas", "vps"])
+        self.assertTrue(state.multi_host)
 
 
 if __name__ == "__main__":

@@ -433,6 +433,171 @@ class FinishFlowTests(unittest.TestCase):
         assert_html_valid(self, final)
 
 
+class MultiHostFlowTests(unittest.TestCase):
+    """多主机装配级流程：面板按主机分组、回调只认配置里的 host、命令走 ssh。"""
+
+    @staticmethod
+    def _make_app(hosts=None):
+        import json
+        import tempfile
+        from pathlib import Path
+
+        from mtbots.features.docker.hosts import load_hosts
+
+        base = Path(tempfile.mkdtemp(prefix="mtbots-mh-it-"))
+        key = base / "id_ed25519"
+        key.write_text("PRIVATE", encoding="utf-8")
+        hosts_file = base / "docker-hosts.json"
+        hosts_file.write_text(
+            json.dumps(
+                {
+                    "hosts": [
+                        {"id": "nas", "label": "本机 NAS", "kind": "local"},
+                        {
+                            "id": "vps",
+                            "label": "Oracle",
+                            "kind": "ssh",
+                            "target": "mtbots@10.0.0.5",
+                            "identity": str(key),
+                        },
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        app, core, bot = make_recording_app(modules="docker")
+        state = core.data["docker"]
+        state.compose_bin = ["docker", "compose"]
+        if hosts != "single":
+            state.hosts, state.host_notes = load_hosts(hosts_file)
+            state.remote_compose["vps"] = ["docker", "compose"]
+        state.scan_hook = lambda: [
+            {
+                "name": "media",
+                "dir": "/data/media",
+                "status": "running(1)",
+                "services": ["emby"],
+                "config_files": ["/data/media/docker-compose.yml"],
+                "host": "nas",
+                "host_label": "本机 NAS",
+            },
+            {
+                "name": "blog",
+                "dir": "/opt/blog",
+                "status": "exited(2)",
+                "services": ["web"],
+                "config_files": ["/opt/blog/docker-compose.yml"],
+                "host": "vps",
+                "host_label": "Oracle",
+            },
+        ]
+        return app, core, bot
+
+    def _drive(self, app, update):
+        import asyncio
+        import warnings
+
+        async def run():
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                await app.process_update(update)
+            await asyncio.sleep(0)
+
+        asyncio.run(run())
+
+    def test_list_groups_projects_by_host(self):
+        app, _core, bot = self._make_app()
+        self._drive(app, real_update(bot, text="/d_list"))
+        text = bot.last_text
+
+        self.assertIn("主机：", text)
+        self.assertIn("🖥 <b>本机 NAS</b>", text)
+        self.assertIn("🖥 <b>Oracle</b>", text)
+        self.assertIn("nas/media", text)
+        self.assertIn("vps/blog", text)
+        self.assertIn("主机：Oracle", text)
+        assert_html_valid(self, text)
+
+    def test_single_host_list_has_no_host_chrome(self):
+        app, _core, bot = self._make_app(hosts="single")
+        self._drive(app, real_update(bot, text="/d_list"))
+        text = bot.last_text
+        self.assertNotIn("🖥", text)
+        self.assertNotIn("主机：", text)
+        self.assertIn("media", text)
+
+    def test_unknown_host_is_rejected_without_running_anything(self):
+        from mtbots.panels import cb
+
+        app, core, bot = self._make_app()
+        payload = cb("d", "p_sel", {"name": "blog", "page": 1, "host": "evil"})
+        self._drive(app, real_update(bot, data=payload))
+
+        self.assertIn("未知主机", bot.last_text)
+        self.assertEqual(core.jobs.all_jobs(), [], "不该创建任何任务")
+
+    def test_upgrade_command_uses_host_grouped_numbering(self):
+        """`/upgrade 02` 与面板里的「02」必须是同一个项目（这里是 vps/blog）。"""
+        app, core, bot = self._make_app()
+        self._drive(app, real_update(bot, text="/upgrade 02"))
+        self.assertIn("升级确认 - [vps/blog]", bot.last_text)
+        assert_html_valid(self, bot.last_text)
+
+    def test_status_renders_one_section_per_host(self):
+        import asyncio
+
+        from mtbots.features.docker import handlers as docker_handlers
+
+        app, core, bot = self._make_app()
+        state = core.data["docker"]
+
+        async def fake_status(_state, host=None):
+            return True, "container-%s\tUp 1 hour\t80/tcp" % (host.id if host else "?")
+
+        update = real_update(bot, text="/d_status")
+        with mock.patch.object(docker_handlers, "dump_container_status", new=fake_status):
+            asyncio.run(docker_handlers._show_status(core, update))
+
+        text = bot.last_text
+        self.assertIn("本机 NAS", text)
+        self.assertIn("Oracle", text)
+        self.assertIn("container-nas", text)
+        self.assertIn("container-vps", text)
+        assert_html_valid(self, text)
+        self.assertTrue(state.hosts)
+
+    def test_prune_menu_asks_which_host(self):
+        import asyncio
+
+        from mtbots.features.docker import handlers as docker_handlers
+
+        app, core, bot = self._make_app()
+        update = real_update(bot, data="d|prune_menu")
+
+        asyncio.run(docker_handlers._show_prune_menu(core, update))
+        menu = bot.last_text
+        self.assertIn("按主机执行", menu)
+        callbacks = [
+            b.callback_data
+            for row in bot.rec["sent"][-1][2]["reply_markup"].inline_keyboard
+            for b in row
+        ]
+        self.assertIn("d|prune_menu|nas", callbacks)
+        self.assertIn("d|prune_menu|vps", callbacks)
+
+        asyncio.run(docker_handlers._show_prune_menu(core, update, "vps"))
+        self.assertIn("目标主机", bot.last_text)
+        # 第二次是「点按钮」触发的渲染 -> 原地编辑，键盘从 edit_kwargs 里取
+        callbacks = [
+            b.callback_data
+            for row in bot.rec["edit_kwargs"][-1]["reply_markup"].inline_keyboard
+            for b in row
+        ]
+        self.assertIn("d|prune_req|dangling|vps", callbacks)
+        self.assertIn("d|prune_req|all|vps", callbacks)
+
+
 class HtmlGuardTests(unittest.TestCase):
     """守卫本身也要有守卫：确认它能抓到线上那次 `<盘名>` 事故。"""
 

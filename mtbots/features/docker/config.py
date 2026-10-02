@@ -18,6 +18,8 @@ DEFAULT_COMMAND_TIMEOUT = 300
 DEFAULT_PROJECTS_CACHE_TTL = 15.0
 #: 主面板每页项目数（LDMG 的 PAGE_SIZE，默认 6）
 DEFAULT_PAGE_SIZE = 6
+#: 多主机清单文件（不存在 = 单机模式；可用 DOCKER_HOSTS_FILE 覆盖）
+DEFAULT_HOSTS_FILE = Path("data/docker-hosts.json")
 
 
 def _env(env: Mapping[str, str], name: str) -> str:
@@ -55,6 +57,8 @@ class DockerSettings:
     command_timeout: int = DEFAULT_COMMAND_TIMEOUT
     projects_cache_ttl: float = DEFAULT_PROJECTS_CACHE_TTL
     log_dir: Path = Path("data/logs")
+    #: 多主机清单（不存在 = 单机模式，行为与以前完全一致）
+    hosts_file: Path = DEFAULT_HOSTS_FILE
 
     @classmethod
     def from_env(cls, settings: Any, env: Optional[Mapping[str, str]] = None) -> "DockerSettings":
@@ -70,6 +74,7 @@ class DockerSettings:
             page_size = DEFAULT_PAGE_SIZE
 
         log_dir: Any = getattr(settings, "log_dir", None) or Path("data/logs")
+        hosts_raw = _env(env, "DOCKER_HOSTS_FILE")
 
         return cls(
             page_size=page_size,
@@ -78,6 +83,7 @@ class DockerSettings:
                 env, "PROJECTS_CACHE_TTL", DEFAULT_PROJECTS_CACHE_TTL, low=0.0
             ),
             log_dir=Path(log_dir),
+            hosts_file=Path(hosts_raw) if hosts_raw else DEFAULT_HOSTS_FILE,
         )
 
 
@@ -86,4 +92,5 @@ __all__ = [
     "DEFAULT_PAGE_SIZE",
     "DEFAULT_COMMAND_TIMEOUT",
     "DEFAULT_PROJECTS_CACHE_TTL",
+    "DEFAULT_HOSTS_FILE",
 ]

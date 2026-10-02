@@ -1,0 +1,20 @@
+{
+  "hosts": [
+    {
+      "id": "nas",
+      "label": "本机 NAS",
+      "kind": "local"
+    },
+    {
+      "id": "vps",
+      "label": "Oracle 东京",
+      "kind": "ssh",
+      "target": "mtbots@10.0.0.5",
+      "port": 22,
+      "identity": "/app/data/ssh/id_ed25519",
+      "known_hosts": "/app/data/ssh/known_hosts",
+      "strict": "accept-new",
+      "roots": ["/opt"]
+    }
+  ]
+}
