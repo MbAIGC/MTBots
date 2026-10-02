@@ -415,6 +415,16 @@ class RemoteSetupScriptTest(unittest.TestCase):
         self.assertIn("raw.githubusercontent.com/MbAIGC/MTBots/", proc.stdout)
         self.assertIn('command="/srv/bin/mtbots-compose-guard",restrict', proc.stdout)
 
+    def test_truncated_pubkey_is_rejected_early(self):
+        """手粘公钥被截断时，要在写文件之前就报出来（不要等 ssh 连不上再猜）。"""
+        proc = _run(REMOTE_SETUP, "--user", "root", "--home", str(self.home),
+                    "--pubkey-line", "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKG6lncl0UM4cTKs8Hw",
+                    "--guard", str(GUARD), "--guard-dest", str(self.bin), "--no-useradd",
+                    "--dry-run", cwd=self.base, env=dict(os.environ))
+        self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("公钥解析失败", proc.stderr)
+        self.assertFalse((self.home / ".ssh").exists())
+
     def test_missing_pubkey_source_is_rejected(self):
         proc = _run(REMOTE_SETUP, "--user", "root", "--home", str(self.home), "--dry-run",
                     cwd=self.base, env=dict(os.environ))
@@ -467,6 +477,25 @@ class RemoteSetupScriptTest(unittest.TestCase):
         self.assertEqual(len(self._ak().strip().splitlines()), 1)
         backups = list((self.home / ".ssh").glob("authorized_keys.bak.*"))
         self.assertEqual(len(backups), 1, "只在真正改动时备份一次")
+
+    @unittest.skipUnless(os.geteuid() == 0, "写 authorized_keys/chown 需要 root")
+    def test_old_sshd_falls_back_to_long_options(self):
+        """远端 sshd < 7.2 不认 restrict：自动改成 no-port-forwarding,… 长格式。"""
+        fake = self.base / "bin-sshd"
+        fake.mkdir()
+        sshd = fake / "sshd"
+        sshd.write_text("#!/bin/sh\necho 'OpenSSH_6.6.1p1, OpenSSL 1.0.1f'\n", encoding="utf-8")
+        sshd.chmod(0o755)
+        env = dict(os.environ, PATH="%s:%s" % (fake, os.environ.get("PATH", "")))
+
+        proc = _run(REMOTE_SETUP, *self.args, cwd=self.base, env=env)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("不支持 restrict", proc.stderr)
+
+        line = self._ak().strip()
+        self.assertNotIn("restrict", line)
+        self.assertIn('command="%s/mtbots-compose-guard",no-port-forwarding,no-agent-forwarding,'
+                      'no-X11-forwarding,no-pty,no-user-rc ssh-ed25519' % self.bin, line)
 
     @unittest.skipUnless(os.geteuid() == 0, "写 authorized_keys/chown 需要 root")
     def test_without_guard_writes_plain_line(self):

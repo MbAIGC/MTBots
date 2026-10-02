@@ -24,7 +24,7 @@
 # docs/examples/mtbots-remote-setup.sh 也可以单独在远端 sudo 跑。
 
 # 也能直接 curl 下来跑（stdin 是脚本时，项目根 = 当前目录）：
-#   cd /mbots && bash <(curl -fsSL https://raw.githubusercontent.com/MbAIGC/MTBots/v1.3.3/scripts/setup-remote-host.sh)
+#   cd /mbots && bash <(curl -fsSL https://raw.githubusercontent.com/MbAIGC/MTBots/v1.3.4/scripts/setup-remote-host.sh)
 #   （`curl … | sh -s -- …` 也行：脚本读 /dev/tty，管道不会把提问吃掉）
 # 这种情况下守卫/远端脚本不在本地，脚本会按 --ref（默认取当前 MTBots 版本）从 GitHub 拉。
 
@@ -32,7 +32,7 @@ set -eu
 
 CONTAINER_DATA=${MTBOTS_CONTAINER_DATA:-/app/data}
 REPO=${MTBOTS_REPO:-MbAIGC/MTBots}
-MTBOTS_VERSION_HINT=${MTBOTS_VERSION_HINT:-1.3.3}
+MTBOTS_VERSION_HINT=${MTBOTS_VERSION_HINT:-1.3.4}
 REF=""
 PROJECT_ROOT_OPT=""
 
