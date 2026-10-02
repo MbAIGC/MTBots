@@ -61,12 +61,15 @@ sudo install -d -m 700 -o mtbots -g mtbots /home/mtbots/.ssh
 # 把 bot 主机生成的公钥放进去（见下）
 ```
 
-bot 主机侧生成密钥（一次性），密钥放 `data/`（已 gitignore，容器内 `/app/data/ssh`）：
+bot 主机侧生成密钥（一次性），放在**项目根的 `data/` 里**（例如 `/mbots/data/ssh/`，已 gitignore；容器内就是 `/app/data/ssh`）：
 
 ```bash
+cd /mbots
+mkdir -p ./data/ssh && chmod 700 ./data/ssh
 ssh-keygen -t ed25519 -N '' -C mtbots@bot -f ./data/ssh/id_ed25519
 chmod 600 ./data/ssh/id_ed25519
-ssh-keyscan -p 22 10.0.0.5 >> ./data/ssh/known_hosts    # 可选：预置 known_hosts
+sudo chown -R 10001:10001 ./data/ssh                  # 容器用户是 uid 10001，不 chown 私钥读不到
+ssh-keyscan -p 22 10.0.0.5 >> ./data/ssh/known_hosts  # 可选：预置 known_hosts（之后同样 chown）
 ```
 
 ### 4.1 强烈建议：给这把 key 加「只能跑 compose」的守卫

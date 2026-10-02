@@ -221,52 +221,137 @@ make check
 
 ## 管理多台服务器（多主机，v1.1.0+）
 
-一个 bot 可以同时管理**本机 + 若干远端主机**上的 Compose 项目：列表、详情、升级（项目 / 单服务 / 批量）、镜像清理、`/d_status`、`--health` 全部覆盖。
+一个 MTBots 同时管理**本机 + 若干远端服务器**上的 Compose 项目：列表、详情、升级（整项目 / 单服务 / 批量）、镜像清理、`/d_status`、`--health` 全部覆盖。
 
-**传输方式：SSH 执行**——`ssh <目标> docker compose -f <远端路径> …`。yml 留在远端、由**远端的 CLI** 解析，所以：
+> **不配这一节的文件时，行为与以前完全一致**：只有一台「本机」，面板上没有主机字样，也不会执行任何 ssh。
+> 远端是**可选能力**，随时可以加、也可以删（删掉配置文件就回到单机）。
 
-* **不需要挂载任何远端目录**，也不用同步副本；
-* 没有「副本过期 / 漂移」问题；
-* 远端只有老版 `docker-compose` 也能用（探测自动回退）；
-* 代价：镜像里多了 `openssh-client`，需要一把只读私钥。
+### 0. 先讲清楚它到底怎么跑（为什么是 SSH）
 
-### 1. 远端准备（每台主机一次）
+Compose 的命令行工具是「**在本地读 yml，再把 API 请求发给目标 daemon**」。所以如果把远端 daemon 的端口暴露给容器（`DOCKER_HOST` 那套），容器里就必须**能读到远端那份 yml**；而且 yml 里的相对路径（`./data:/data`）会被本地 CLI 解析成**绝对路径**再发给远端 daemon——路径对不上时 dockerd 会**自动建一个空目录顶上**，容器静默挂到空目录，数据看着「没了」还不报错。
+
+所以这里选了另一条路：**ssh 到远端，让远端的 CLI 去解析**。一次「升级项目」实际执行的就是这一条命令（你在面板上看到的进度就是它的输出）：
 
 ```bash
-# 远端：专用用户（不要用你的登录账号，更不要 root）+ docker 组
+ssh -p 22 -i /app/data/ssh/id_ed25519 \
+    -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 \
+    -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/app/data/ssh/known_hosts \
+    mtbots@10.0.0.5 -- 'docker compose -f /opt/blog/docker-compose.yml pull'
+```
+
+由此得到三个好处，和一个代价：
+
+| | |
+|---|---|
+| ✅ **零挂载** | 远端目录一个都不用挂进容器，也不用 rsync 副本 |
+| ✅ **零漂移** | 用的永远是远端那份 yml 本身，不存在「拿旧定义升级」 |
+| ✅ **版本天然匹配** | 用的是远端自己的 `docker compose`（远端只有老版 `docker-compose` 也能用，会自动探测回退） |
+| ⚠️ 代价 | 镜像里多了 `openssh-client`（约 10MB）+ 一把只读私钥；要在远端建一个 `docker` 组用户 |
+
+### 1. 目录与权限约定（先看这个，最容易踩）
+
+假设你的 MTBots 项目根目录是 **`/mbots`**（里面有 `docker-compose.yml`、`.env`、`data/`）。多主机用到的东西**全部生成在项目根的 `data/` 里**，不需要新增任何 volume（`docker-compose.yml` 已经有 `./data:/app/data`）：
+
+| 宿主机（项目根下） | 容器内 | 作用 | 权限要求 |
+|---|---|---|---|
+| `/mbots/data/docker-hosts.json` | `/app/data/docker-hosts.json` | 主机清单 | 容器用户（uid **10001**）**可读** |
+| `/mbots/data/ssh/id_ed25519` | `/app/data/ssh/id_ed25519` | 远端私钥 | **0600，且属主必须是 10001** |
+| `/mbots/data/ssh/id_ed25519.pub` | 同路径 | 公钥（贴到远端） | 无所谓 |
+| `/mbots/data/ssh/known_hosts` | `/app/data/ssh/known_hosts` | 远端主机指纹 | 0600；`strict=accept-new` 时还要**可写** |
+| `/mbots/data/config.json`、`logs/` | `/app/data/…` | 原有内容（不受影响） | 已有约定 |
+
+`data/` 本来就在 `.gitignore` 里，**密钥不会被提交**。
+
+> ⚠️ **最容易踩的一条**：容器不是 root，而是 **uid 10001**（`Dockerfile` 里 `useradd --uid 10001`）。
+> 已实测：宿主机上 root 生成的 `root:root 600` 密钥，在容器里 `head -c1` 都读不到（`NOT_READABLE`）；`chown -R 10001:10001` 之后才 `READABLE`。
+> 读不到私钥时 ssh 只会含糊地回一句 `Permission denied (publickey)`（前面可能带一句 `Identity file ... not accessible`），很容易误以为「远端公钥没装对」。
+> 所以下面第 3 步的 `chown -R 10001:10001 ./data/ssh` 不能省。
+
+### 2. 远端准备（每台远端做一次）
+
+```bash
+# 远端执行：建一个专用用户（别用你的登录账号，更别用 root），并加入 docker 组
 sudo useradd -m -s /bin/bash mtbots
 sudo usermod -aG docker mtbots
 sudo install -d -m 700 -o mtbots -g mtbots /home/mtbots/.ssh
-sudo -u mtbots docker compose version          # 确认 docker / compose 可用
+
+# 远端执行：确认这个用户真的能用 docker / compose（很多「连不上」其实是这一步没过）
+sudo -u mtbots docker compose version
 ```
 
-bot 主机上生成密钥（放 `data/`，已被 gitignore；容器内即 `/app/data/ssh`）：
+`docker compose version` 报 `permission denied while trying to connect to the Docker daemon socket` 就是组没生效——重新登录（或 `newgrp docker`）后再试。
+
+### 3. 在 MTBots 这边生成密钥
 
 ```bash
+cd /mbots
+mkdir -p ./data/ssh && chmod 700 ./data/ssh
+
+# 生成一对 ed25519 密钥（-N '' = 不要口令，容器里没法交互输入）
 ssh-keygen -t ed25519 -N '' -C mtbots@bot -f ./data/ssh/id_ed25519
 chmod 600 ./data/ssh/id_ed25519
-ssh-keyscan -p 22 10.0.0.5 >> ./data/ssh/known_hosts     # 可选：预置 known_hosts
+
+# 关键：把属主交给容器用户（uid 10001），否则容器里的 ssh 读不到私钥
+sudo chown -R 10001:10001 ./data/ssh
+ls -l ./data/ssh        # 期望：-rw------- 1 10001 10001 id_ed25519
+
+cat ./data/ssh/id_ed25519.pub      # 下一步要贴到远端
 ```
 
-把 `./data/ssh/id_ed25519.pub` 贴进远端 `/home/mtbots/.ssh/authorized_keys`，**并加上强制命令守卫**（强烈建议）：
+### 4. 装公钥 + **强制命令守卫**（强烈建议）
 
-```text
-command="/usr/local/bin/mtbots-compose-guard",restrict ssh-ed25519 AAAA… mtbots@bot
+把守卫脚本放到远端（它把这条 key 能跑的命令限定成「MTBots 会用到的那 13 种形态」）：
+
+```bash
+# 把 docs/examples/mtbots-compose-guard.sh 传上去（或直接粘贴创建）
+sudo install -m 755 mtbots-compose-guard.sh /usr/local/bin/mtbots-compose-guard
 ```
 
-守卫脚本在 [`docs/examples/mtbots-compose-guard.sh`](docs/examples/mtbots-compose-guard.sh)：它把这条 key 能跑的命令限定成「MTBots 会用到的那 13 种形态」（探测 / 扫描 / `pull` / `up -d` / `config --services` / `docker ps` / `docker image ls|prune` / `docker inspect`），其余一律 `exit 126`。
-**这样即使 bot 主机被拿下，也拿不到远端 shell**——这是 SSH 路线相对「暴露 docker 端口」最大的优势。
+然后把公钥写进远端的 `authorized_keys`，**并加上 `command=` 与 `restrict`**：
 
-### 2. 配置主机清单
+```bash
+sudo -u mtbots tee -a /home/mtbots/.ssh/authorized_keys <<'EOF'
+command="/usr/local/bin/mtbots-compose-guard",restrict ssh-ed25519 AAAAC3Nza... mtbots@bot
+EOF
+sudo chmod 600 /home/mtbots/.ssh/authorized_keys
+```
 
-复制 [`docs/examples/docker-hosts.json`](docs/examples/docker-hosts.json) 到 `data/docker-hosts.json`：
+（更严一点可以再加来源限制：`from="10.0.0.9",command="…",restrict ssh-ed25519 …`，样例见 [`docs/examples/authorized_keys.sample`](docs/examples/authorized_keys.sample)。）
+
+**为什么值得加**：万一 MTBots 主机被拿下，攻击者拿到的也只是「能对这几个 compose 项目做 pull / up / 只读查询」，**拿不到远端 shell**（`bash -i`、`docker run`、`docker exec`、`curl` 都会被 `exit 126` 顶回去）。守卫脚本内容与逐条验证结果见 [`docs/examples/mtbots-compose-guard.sh`](docs/examples/mtbots-compose-guard.sh)。
+
+在容器里验证这条链路（**这一步过了，多主机基本就成了**）：
+
+```bash
+docker compose exec mtbots \
+  ssh -p 22 -i /app/data/ssh/id_ed25519 -o BatchMode=yes \
+      -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/app/data/ssh/known_hosts \
+      mtbots@10.0.0.5 docker compose version
+```
+
+### 5. known_hosts：两种模式，选一个
+
+| 模式 | 清单里写 | 做法 | 适用 |
+|---|---|---|---|
+| **accept-new**（示例默认，省事） | `"strict": "accept-new"` | 首次连接自动把指纹写进 `/app/data/ssh/known_hosts`；**该目录必须可写**（`chmod 700` + 属主 10001） | 内网、图省事 |
+| **yes**（更严） | `"strict": "yes"` | 先在**宿主机**预置指纹：`ssh-keyscan -p 22 10.0.0.5 >> /mbots/data/ssh/known_hosts && sudo chown 10001:10001 /mbots/data/ssh/known_hosts`；文件之后可以只读 | 生产、想防中间人 |
+
+远端换过主机密钥时，`yes` 会**直接拒连**并提示 host key 变化——这是你想要的行为；确认没问题后删掉 `known_hosts` 里那一行重新 `ssh-keyscan` 即可。
+
+### 6. 写主机清单 `/mbots/data/docker-hosts.json`
+
+```bash
+cp docs/examples/docker-hosts.json /mbots/data/docker-hosts.json   # 然后按下面改
+```
 
 ```json
 {
   "hosts": [
     { "id": "nas", "label": "本机 NAS", "kind": "local" },
+
     { "id": "vps", "label": "Oracle 东京", "kind": "ssh",
-      "target": "mtbots@10.0.0.5", "port": 22,
+      "target": "mtbots@10.0.0.5",
+      "port": 22,
       "identity": "/app/data/ssh/id_ed25519",
       "known_hosts": "/app/data/ssh/known_hosts",
       "strict": "accept-new",
@@ -275,25 +360,48 @@ command="/usr/local/bin/mtbots-compose-guard",restrict ssh-ed25519 AAAA… mtbot
 }
 ```
 
-| 字段 | 说明 |
-|---|---|
-| `id` | 唯一，`[a-z0-9_-]{1,16}`；**回调里只认这个 id**（不接受任意字符串拼命令） |
-| `label` | 面板显示名 |
-| `kind` | `local`（本机）/ `ssh`（远端） |
-| `target` | `user@host`；格式非法（空格、分号、`-o` 之类）直接判为配置错误 |
-| `identity` / `known_hosts` | 私钥与 known_hosts 路径（都在 `data/` 里） |
-| `strict` | `accept-new`（首次自动记录，需要 known_hosts 可写）或 `yes`（配预置 known_hosts） |
-| `roots` | 可选的路径白名单：只管理这些前缀下的项目（纵深防御） |
-| `enabled` | 默认 true，临时下线一台主机 |
+| 字段 | 必填 | 说明 |
+|---|---|---|
+| `id` | ✅ | 主机标识，`[a-z0-9_-]{1,16}`。面板/回调里**只认这个 id**（伪造的会被拒并记日志，绝不会拿去拼命令） |
+| `label` | | 面板显示名（缺省=用 `id`） |
+| `kind` | ✅ | `local`（本机，走挂进容器的 docker.sock）或 `ssh`（远端） |
+| `target` | ssh ✅ | `user@host`。格式非法（带空格、分号、`-o` 之类）直接判为配置错误 |
+| `port` | | 默认 22 |
+| `identity` | | 私钥路径，默认 `/app/data/ssh/id_ed25519` |
+| `known_hosts` | | 指纹文件，默认 `/app/data/ssh/known_hosts` |
+| `strict` | | `accept-new`（默认）或 `yes`，见上一节 |
+| `roots` | | **可选**的路径白名单：只管理这些前缀下的项目（例如只让 bot 管 `/opt` 下的东西），纵深防御 |
+| `enabled` | | 默认 true；置 false 可临时下线一台主机而不删配置 |
 
-**没有这个文件 = 只管理本机**，行为与 1.0.x 完全一致（升级到 1.1.0 不会改变你现在的使用方式）。
-改完清单重启容器生效：`docker compose up -d --force-recreate`。
+清单**怎么坏都能看出原因**，不会静默：
 
-### 3. 面板上的变化
+* 没有这个文件（或路径指向不存在的文件）→ 单机模式，什么都不提示（这是默认形态）；
+* 整份 JSON 解析失败 / 没有 `hosts` 列表 → 面板提示「⚠️ 读取失败，已按单机模式运行：<原因>」；
+* 只有某一条主机非法（`target` 写错、`kind` 拼错、私钥不存在、`roots` 不是绝对路径…）→ **那台**带错误说明，其余主机照常工作；
+* `id` 重复 → 保留第一条 + 面板提示。
+
+改路径：清单默认读 `data/docker-hosts.json`（容器内 = `/app/data/docker-hosts.json`），要换位置就设 `DOCKER_HOSTS_FILE=/app/data/xxx.json`。
+
+### 7. 生效与验证
+
+```bash
+cd /mbots
+docker compose up -d --force-recreate        # 清单是启动时读的，改完要重建容器
+
+# 日志里确认主机清单被读进去了
+docker compose logs --tail=50 mtbots | grep -E "主机|docker 模块已注册"
+
+# 逐主机自检（私钥、连通性、项目数；不连 Telegram）
+docker compose exec mtbots python -m mtbots --health | grep 🐳
+```
+
+然后回到 Telegram 发 `/d_list`。
+
+### 8. 生效后的面板长这样（真代码渲染）
 
 ```
-📊 统计：共 5 个项目 | 🟢 3 运行中 | 🟡 2 停止
-🖥 主机：nas 2 / vps 3
+📊 统计：共 2 个项目 | 🟢 1 运行中 | 🟡 1 停止
+🖥 主机：nas 1 / vps 1
 📖 页码：1 / 1
 
 🖥 本机 NAS
@@ -307,27 +415,38 @@ command="/usr/local/bin/mtbots-compose-guard",restrict ssh-ed25519 AAAA… mtbot
      主机：Oracle 东京
      路径：/opt/blog
      容器：web, db
-[🚀 02. vps/blog]
+   [🚀 01. nas/media]  [⚙️ 02. vps/blog (多服务)]
 ```
 
-* 多主机时项目标签带主机前缀（`vps/blog`），`/upgrade 02` 的编号与面板一致（跨主机连续编号）；
-* 单主机时**不显示**任何主机标题（文案与 1.0.x 一字不差）；
-* **镜像清理按主机执行**：多主机时先选主机，再选清理范围；
-* `--health` 会逐主机报告连通性与项目数。
+行为上的变化（与单机对比）：
 
-### 4. 排错
+* 项目标签带主机前缀 `vps/blog`；`/upgrade 02` 的编号与面板**同序**（跨主机连续编号，面板与命令行共用同一套排序）；
+* **镜像清理按主机执行**：多主机时先选主机，再选清理范围；
+* `/d_status` 每台主机一段；`--health` 逐主机报项目数；
+* **单主机时以上全都不出现**——面板文案、编号、`/jobs` 标题与 1.0.x 一字不差（有回归用例锁死）；
+* 失败不静默：某台主机连不上、或远端没装 compose、或被守卫拒绝，面板会在列表下方给出原因**和一条能直接抄的自测命令**（v1.1.1 起列表非空时也会提示）。
+
+### 9. 排错
 
 | 现象 | 处理 |
 |---|---|
-| 面板提示「主机 vps：SSH 连不上或认证失败」 | 按面板给的自测命令在容器里跑一遍：`docker exec -it mtbots ssh -p 22 -i /app/data/ssh/id_ed25519 mtbots@10.0.0.5 docker compose version`（失败信息很具体：网络 / 端口 / 私钥权限 / known_hosts） |
-| 「远端未安装 docker compose / docker」 | 远端没装 CLI 或不在 PATH；在远端 `sudo -u mtbots docker compose version` 确认 |
-| 「远端授权只允许 compose 操作」 | 守卫脚本拦下了这条命令。要么命令不在白名单（`docs/examples/mtbots-compose-guard.sh` 里补齐），要么根本没走守卫 |
-| 「私钥不存在：…」 | 私钥没放/没挂到容器里的那个路径，或 `chmod 600` 不对（ssh 会拒绝组/他人可读的私钥） |
-| 远端项目一个都看不到 | 检查 `roots` 白名单；再在容器里手跑一次 `ssh … docker compose ls -a --format json` |
-| 本机项目正常、某个远端静默少了项目 | 面板列表下方会给出该主机的故障原因与自测命令（v1.1.1 起**不再只在「一个项目都没有」时提示**）；`/d_status` 与 `--health` 也会逐主机显示 |
-| 中断了但远端还在跑 | 取消 = 断开 ssh（远端通常收到 SIGHUP 退出，但不保证）；`pull`/`up -d` 幂等，重跑即可 |
+| 面板：「主机 vps：SSH 连不上或认证失败」 | 按面板给的自测命令在容器里跑（见第 4 节最后一段）。它其实已经把原因写在输出里：`Connection refused`=端口/网络、`Permission denied (publickey)`=公钥没装对、`not accessible: Permission denied`=私钥权限/属主不对（见第 1 节 ⚠️） |
+| 「私钥不存在：/app/data/ssh/id_ed25519」 | 密钥没生成或没放进 `/mbots/data/ssh/`；确认 `ls -l /mbots/data/ssh` 里属主是 `10001`。若报的是 `Permission denied (publickey)`，先查权限再看远端公钥——容器读不到私钥时也是这个表现 |
+| 「远端未安装 docker compose / docker」 | 远端 `sudo -u mtbots docker compose version` 不过；装 CLI 或修 PATH |
+| 「远端授权只允许 compose 操作」 | 守卫脚本拦下了这条命令：要么命令不在白名单（`docs/examples/mtbots-compose-guard.sh` 里补齐），要么远端没走守卫但命令拼错了 |
+| 远端项目一个都看不到 | 检查 `roots` 白名单；在容器里手跑 `ssh … docker compose ls -a --format json` 看远端到底返回什么 |
+| 中断了但远端还在跑 | 取消 = 断开 ssh（远端通常被 SIGHUP 带走，但**不保证**）；`pull`/`up -d` 幂等，重跑一次即可 |
+| 想临时关掉某台 | 清单里给它加 `"enabled": false`，重建容器 |
 
-安全提醒：私钥只放 `data/`（已 gitignore）；远端用**专用用户 + docker 组**；生产建议 `strict=yes` 配预置 `known_hosts`。
+### 10. 安全建议与回滚
+
+* 远端用**专用用户 + `docker` 组**，不要 root、不要复用登录账号；
+* **一定要加 `command=` 守卫**（第 4 节），这是 SSH 路线相对「暴露 docker 端口」最大的优势；
+* 私钥只放 `data/`（已 gitignore）、`0600` + 属主 `10001`；生产建议 `strict=yes` 配预置 `known_hosts`；
+* 权限仍然归 ACL：`docker` 模块默认只给 owner/admin，`upgrade`/`prune` 走两步确认；
+* **回滚**：删掉 `/mbots/data/docker-hosts.json` → `docker compose up -d --force-recreate`，立刻回到单机；密钥留着不影响（以后想再加不用重新生成）。
+
+相关文件：[`docs/examples/docker-hosts.json`](docs/examples/docker-hosts.json)（清单样例）、[`docs/examples/mtbots-compose-guard.sh`](docs/examples/mtbots-compose-guard.sh)（守卫脚本）、[`docs/examples/authorized_keys.sample`](docs/examples/authorized_keys.sample)（authorized_keys 样例）、[`docs/docker-multi-host-design.md`](docs/docker-multi-host-design.md)（设计与落地清单）。
 
 ## 与原三个 Bot 的差异（有意为之）
 
