@@ -160,7 +160,7 @@ DOCKER_GID=$(getent group docker | cut -d: -f3) docker compose up -d
 DOCKER_GID=$(getent group docker | cut -d: -f3) docker compose up -d --build
 ```
 
-## 10. 修复记录（线上反馈驱动，v1.0.1 → v1.3.4）
+## 10. 修复记录（线上反馈驱动，v1.0.1 → v1.3.5）
 
 上线后按线上反馈修了七轮，又加了一轮功能（多主机），全部带回归测试（377 个用例）：
 
