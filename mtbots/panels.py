@@ -141,13 +141,15 @@ def next_actions_keyboard(
     *,
     limit: int = NEXT_ACTIONS_LIMIT,
 ) -> Optional[InlineKeyboardMarkup]:
-    """长任务收尾时的一行「下一步」：其他模块 + 🧰 任务中心。
+    """长任务收尾时的一行「下一步」：其他模块的入口。
 
     合并后三个 Bot 共用一个面板，任务跑完顺手跳到另一条线是最常走的路，所以收尾面上
     直接给按钮，而不是让用户先 🏠 返回 再找。规则：
 
     * 只列**已启用**且**本人有权限**的模块，当前模块除外（面板就在眼前，再给一个按钮没意义）；
-    * 一行塞不下（> `limit` 个）就返回 ``None``，调用方退回只有 🏠 返回 的键盘——
+    * 不放 🧰 任务中心：收尾行紧跟着 `🏠 返回` 被追加到同一行，再加一个就是 4 个按钮的按钮墙，
+      而 首页 本来就有 任务中心，一步可达；
+    * 模块入口超过 `limit` 个就返回 ``None``，调用方退回只有 🏠 返回 的键盘——
       宁可少给按钮，也不让键盘挤成两行乱糟糟的。
     """
     if core is None:
@@ -167,8 +169,7 @@ def next_actions_keyboard(
                 callback_data=nav_open(module_id),
             )
         )
-    buttons.append(InlineKeyboardButton("🧰 任务中心", callback_data=nav_jobs()))
-    if len(buttons) > limit:
+    if not buttons or len(buttons) > limit:
         return None
     return InlineKeyboardMarkup([buttons])
 

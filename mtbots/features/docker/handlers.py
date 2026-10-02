@@ -4,7 +4,8 @@
   · 鉴权从 `check_permission` 换成 `core.acl.can(user_id, "docker")`（默认拒绝）；
   · 回调整理成 `d|` 命名空间（`panels.cb` / `cb_simple`），主面板/详情/确认全部走
     `core.panels`（一条会话一个面板 + 面包屑 + 🏠 返回 + 两步确认）；
-  · 升级 / 清理注册进 `core.jobs`，跑完 `announce()` 推一张带跨模块下一步的卡片。
+  · 升级 / 清理注册进 `core.jobs`；跑的过程把进度画在面板上（键盘带 🛑 中断执行），
+    跑完把 `jobs.card_text()` 也画在同一面板上——交互式任务不再另发完成卡片。
 """
 
 from __future__ import annotations
@@ -12,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
@@ -142,9 +143,21 @@ async def _expired(core: Core, update: Update) -> None:
     )
 
 
-def _jobs_keyboard() -> InlineKeyboardMarkup:
+def _progress_keyboard(task_id: Optional[str]) -> InlineKeyboardMarkup:
+    """执行中的面板键盘：中断 + 任务中心。
+
+    进度面板是用户唯一会一直盯着的那条消息，取消按钮必须在这儿——每一步的执行消息
+    会随阶段/项目不断新建删除，想取消还得先把当前那条翻出来。
+    """
     return InlineKeyboardMarkup(
-        [[InlineKeyboardButton("🧰 任务中心", callback_data=nav_jobs())]]
+        [
+            [
+                InlineKeyboardButton(
+                    "🛑 中断执行", callback_data=cb_simple("d", "task_cancel", task_id or "-")
+                ),
+                InlineKeyboardButton("🧰 任务中心", callback_data=nav_jobs()),
+            ]
+        ]
     )
 
 
@@ -181,12 +194,41 @@ def _done_text(job: Job, extra: str = "") -> str:
 
 
 def _finish_keyboard(core: Core, user_id: Optional[int], page: int = 1) -> InlineKeyboardMarkup:
-    """收尾键盘：「🔙 返回列表」+ 一行跨模块入口；排不下就只剩面板补的 🏠 返回。"""
+    """收尾键盘：「🔙 返回列表」（回到刚才那页）+ 一行跨模块入口。
+
+    排不下（或只有一个模块）时只剩「🔙 返回列表」，面板自己会补 🏠 返回。
+    """
     rows = [[InlineKeyboardButton("🔙 返回列表", callback_data=cb_simple("d", "page_turn", page))]]
     extra = next_actions_keyboard(core, user_id, "docker")
     if extra is not None:
         rows.extend(extra.inline_keyboard)
     return InlineKeyboardMarkup(rows)
+
+
+#: 失败时抄进收尾面板的输出行数与单行长度上限
+FAIL_TAIL_LINES = 3
+FAIL_TAIL_CHARS = 120
+#: 批量升级里最多抄几行失败输出（再多面板就成日志了）
+BATCH_FAIL_LINES = 6
+
+
+def _tail_lines(captured: Sequence[str], limit: int = FAIL_TAIL_LINES) -> list[str]:
+    """取命令输出最后几行非空内容（每行截断），给失败面板用。"""
+    lines: list[str] = []
+    for chunk in captured:
+        for raw in str(chunk).splitlines():
+            text = raw.strip()
+            if text:
+                lines.append(text[:FAIL_TAIL_CHARS])
+    return lines[-limit:]
+
+
+def _failure_block(captured: Sequence[str], limit: int = FAIL_TAIL_LINES) -> str:
+    """失败时把命令尾部输出抄进面板——批量跑起来失败的那条消息可能在上面好几条之外。"""
+    lines = _tail_lines(captured, limit)
+    if not lines:
+        return ""
+    return "🔻 <b>最后输出：</b>\n<code>%s</code>" % esc("\n".join(lines))
 
 
 async def _busy(core: Core, update: Update) -> None:
@@ -449,7 +491,7 @@ async def _ask_upgrade_all(core: Core, update: Update) -> None:
 
 # ==================== 长任务：升级 ====================
 async def _do_upgrade_project(
-    core: Core, update: Update, context: Any, project_name: str
+    core: Core, update: Update, context: Any, project_name: str, page: int = 1
 ) -> None:
     """升级整个项目：pull → up -d（LDMG do_upgrade_project）。"""
     state = _state(core)
@@ -468,6 +510,7 @@ async def _do_upgrade_project(
         chat_id=_chat_id(update),
     )
     status, detail = FAILED, "未执行"
+    extra = ""
 
     try:
         await _answer(update)
@@ -484,10 +527,12 @@ async def _do_upgrade_project(
                 "docker",
                 update,
                 "⏳ <b>开始升级项目 [%s]</b>\n阶段 1/2：拉取新镜像" % safe_name,
-                _jobs_keyboard(),
+                _progress_keyboard(task_id),
             )
             log.info("升级项目 [%s]", project_name)
 
+            pull_out: list[str] = []
+            up_out: list[str] = []
             pull_ok = await run_command_with_feedback(
                 state,
                 update.effective_message,
@@ -498,6 +543,7 @@ async def _do_upgrade_project(
                 task_id=task_id,
                 on_progress=_progress(core, job),
                 delete_on_success=True,
+                out=pull_out,
             )
             up_ok = False
             if pull_ok and not state.cancel_requested:
@@ -505,7 +551,7 @@ async def _do_upgrade_project(
                     "docker",
                     update,
                     "⏳ <b>升级项目 [%s]</b>\n阶段 2/2：重建与启动" % safe_name,
-                    _jobs_keyboard(),
+                    _progress_keyboard(task_id),
                 )
                 up_ok = await run_command_with_feedback(
                     state,
@@ -517,6 +563,7 @@ async def _do_upgrade_project(
                     task_id=task_id,
                     on_progress=_progress(core, job),
                     delete_on_success=True,
+                    out=up_out,
                 )
 
             if state.cancel_requested:
@@ -524,7 +571,8 @@ async def _do_upgrade_project(
             elif pull_ok and up_ok:
                 status, detail = DONE, "项目整体升级完成"
             else:
-                status, detail = FAILED, "拉取镜像或重建启动失败（详情见上面的执行消息）"
+                status, detail = FAILED, "拉取镜像或重建启动失败"
+                extra = _failure_block(up_out if pull_ok else pull_out)
     except Exception as exc:
         log.exception("升级项目 %s 异常", project_name)
         status, detail = FAILED, "执行异常：%s" % exc
@@ -534,12 +582,17 @@ async def _do_upgrade_project(
         core.jobs.finish(job, status, detail)
 
     await core.panels.render(
-        "docker", update, _done_text(job), _finish_keyboard(core, _user_id(update))
+        "docker", update, _done_text(job, extra), _finish_keyboard(core, _user_id(update), page)
     )
 
 
 async def _do_upgrade_service(
-    core: Core, update: Update, context: Any, project_name: str, service_name: str
+    core: Core,
+    update: Update,
+    context: Any,
+    project_name: str,
+    service_name: str,
+    page: int = 1,
 ) -> None:
     """升级单个服务：pull <svc> → up -d <svc>（LDMG do_upgrade_service）。"""
     state = _state(core)
@@ -558,6 +611,7 @@ async def _do_upgrade_service(
         chat_id=_chat_id(update),
     )
     status, detail = FAILED, "未执行"
+    extra = ""
 
     try:
         await _answer(update)
@@ -578,10 +632,12 @@ async def _do_upgrade_service(
                 update,
                 "⏳ <b>升级服务 [%s]（%s）</b>\n阶段 1/2：拉取服务镜像"
                 % (safe_service, safe_project),
-                _jobs_keyboard(),
+                _progress_keyboard(task_id),
             )
             log.info("升级服务 [%s -> %s]", project_name, service_name)
 
+            pull_out: list[str] = []
+            up_out: list[str] = []
             pull_ok = await run_command_with_feedback(
                 state,
                 update.effective_message,
@@ -592,6 +648,7 @@ async def _do_upgrade_service(
                 task_id=task_id,
                 on_progress=_progress(core, job),
                 delete_on_success=True,
+                out=pull_out,
             )
             up_ok = False
             if pull_ok and not state.cancel_requested:
@@ -600,7 +657,7 @@ async def _do_upgrade_service(
                     update,
                     "⏳ <b>升级服务 [%s]（%s）</b>\n阶段 2/2：重建启动服务"
                     % (safe_service, safe_project),
-                    _jobs_keyboard(),
+                    _progress_keyboard(task_id),
                 )
                 up_ok = await run_command_with_feedback(
                     state,
@@ -612,6 +669,7 @@ async def _do_upgrade_service(
                     task_id=task_id,
                     on_progress=_progress(core, job),
                     delete_on_success=True,
+                    out=up_out,
                 )
 
             if state.cancel_requested:
@@ -619,7 +677,8 @@ async def _do_upgrade_service(
             elif pull_ok and up_ok:
                 status, detail = DONE, "服务升级完成"
             else:
-                status, detail = FAILED, "拉取镜像或重建启动失败（详情见上面的执行消息）"
+                status, detail = FAILED, "拉取镜像或重建启动失败"
+                extra = _failure_block(up_out if pull_ok else pull_out)
     except Exception as exc:
         log.exception("升级服务 %s/%s 异常", project_name, service_name)
         status, detail = FAILED, "执行异常：%s" % exc
@@ -629,7 +688,7 @@ async def _do_upgrade_service(
         core.jobs.finish(job, status, detail)
 
     await core.panels.render(
-        "docker", update, _done_text(job), _finish_keyboard(core, _user_id(update))
+        "docker", update, _done_text(job, extra), _finish_keyboard(core, _user_id(update), page)
     )
 
 
@@ -666,21 +725,23 @@ async def _do_upgrade_all(core: Core, update: Update, context: Any) -> None:
                 "docker",
                 update,
                 "⏳ <b>开始批量升级全部 %d 个项目…</b>" % len(projects),
-                _jobs_keyboard(),
+                _progress_keyboard(task_id),
             )
             log.info("批量升级共 %d 个项目", len(projects))
 
             success_list: list[str] = []
             fail_list: list[str] = []
-            aborted = False
+            fail_lines: list[str] = []
+            interrupted = ""
             processed = 0
 
             for i, project in enumerate(projects, 1):
                 if state.cancel_requested:
-                    aborted = True
                     break
                 processed = i
                 pct = int((i / len(projects)) * 100)
+                pull_out: list[str] = []
+                up_out: list[str] = []
                 pull_ok = await run_command_with_feedback(
                     state,
                     update.effective_message,
@@ -691,6 +752,7 @@ async def _do_upgrade_all(core: Core, update: Update, context: Any) -> None:
                     task_id=task_id,
                     on_progress=_progress(core, job),
                     delete_on_success=True,
+                    out=pull_out,
                 )
                 up_ok = False
                 if pull_ok and not state.cancel_requested:
@@ -704,28 +766,45 @@ async def _do_upgrade_all(core: Core, update: Update, context: Any) -> None:
                         task_id=task_id,
                         on_progress=_progress(core, job),
                         delete_on_success=True,
+                        out=up_out,
                     )
                 if pull_ok and up_ok:
                     success_list.append(project["name"])
+                elif state.cancel_requested:
+                    # 被中断的项目不算「失败」——它不是坏，是用户按了停
+                    interrupted = project["name"]
                 else:
                     fail_list.append(project["name"])
+                    if len(fail_lines) < BATCH_FAIL_LINES:
+                        fail_lines.extend(_tail_lines(up_out if pull_ok else pull_out, 2))
 
             # 批量升级的结论写在卡片行里，这里只补「谁成谁败」的明细
-            extra = "✅ <b>成功 (%d)：</b> %s\n❌ <b>失败 (%d)：</b> %s" % (
-                len(success_list),
-                esc(", ".join(success_list)) if success_list else "无",
-                len(fail_list),
-                esc(", ".join(fail_list)) if fail_list else "无",
-            )
-            if aborted:
+            lines = [
+                "✅ <b>成功 (%d)：</b> %s"
+                % (len(success_list), esc(", ".join(success_list)) if success_list else "无"),
+                "❌ <b>失败 (%d)：</b> %s"
+                % (len(fail_list), esc(", ".join(fail_list)) if fail_list else "无"),
+            ]
+            if interrupted:
+                lines.append("⚠️ <b>已中断：</b> %s" % esc(interrupted))
+            extra = "\n".join(lines)
+            if fail_lines:
+                extra += "\n🔻 <b>最后输出：</b>\n<code>%s</code>" % esc(
+                    "\n".join(fail_lines[:BATCH_FAIL_LINES])
+                )
+            if state.cancel_requested:
+                # 取消可能发生在最后一个项目的命令里（循环顶部那次检查看不到），
+                # 所以这里用实时的 cancel_requested 判定，而不是循环里那个 aborted 标记
                 status = CANCELLED
-                detail = "已中止（剩余 %d 个项目）" % (len(projects) - processed)
-                extra = "剩余 %d 个项目未处理\n%s" % (len(projects) - processed, extra)
+                remaining = max(0, len(projects) - processed)
+                if remaining:
+                    detail = "已中止（剩余 %d 个项目）" % remaining
+                else:
+                    detail = "已按用户请求取消（最后一步被中断）"
             elif not success_list:
                 status, detail = FAILED, "全部项目升级失败"
             elif fail_list:
-                status = DONE
-                detail = "成功 %d / 失败 %d" % (len(success_list), len(fail_list))
+                status, detail = DONE, "部分项目升级失败"
             else:
                 status, detail = DONE, "全部 %d 个项目升级完成" % len(success_list)
     except Exception as exc:
@@ -853,7 +932,10 @@ async def _do_prune(core: Core, update: Update, context: Any, prune_all: bool) -
     try:
         await _answer(update)
         await core.panels.render(
-            "docker", update, "🗑 <b>正在执行%s镜像清理，请稍候...</b>" % label, _jobs_keyboard()
+            "docker",
+            update,
+            "🗑 <b>正在执行%s镜像清理，请稍候...</b>" % label,
+            _progress_keyboard(task_id),
         )
         cmd = ["docker", "image", "prune", "-f"]
         if prune_all:
@@ -888,7 +970,8 @@ async def _do_prune(core: Core, update: Update, context: Any, prune_all: bool) -
         elif state.cancel_requested:
             status, detail = CANCELLED, "已按用户请求取消"
         else:
-            status, detail = FAILED, "%s镜像清理失败（详情见上面的执行消息）" % label
+            status, detail = FAILED, "%s镜像清理失败" % label
+            extra = _failure_block(captured)
     except Exception as exc:
         log.exception("镜像清理异常")
         status, detail = FAILED, "执行异常：%s" % exc
@@ -1008,13 +1091,22 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         if not ok:
             await _answer(update, why, alert=True)
             return
-        await _do_upgrade_project(core, update, context, payload["name"])
+        await _do_upgrade_project(
+            core, update, context, payload["name"], _to_int(payload.get("page"), 1)
+        )
     elif action == "up_svc_do":
         ok, why = core.panels.validate_confirm(query, data)
         if not ok:
             await _answer(update, why, alert=True)
             return
-        await _do_upgrade_service(core, update, context, payload["name"], payload["svc"])
+        await _do_upgrade_service(
+            core,
+            update,
+            context,
+            payload["name"],
+            payload["svc"],
+            _to_int(payload.get("page"), 1),
+        )
     elif action == "upgrade_all":
         await _ask_upgrade_all(core, update)
     elif action == "upgrade_all_confirm":

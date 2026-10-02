@@ -20,6 +20,7 @@ from telegram.ext import Application, CallbackQueryHandler, CommandHandler
 
 from mtbots.config import Settings
 from mtbots.features.docker import MODULE, commands, help_text, id_lines, register, summary
+from mtbots.features.docker import handlers as docker_handlers
 from mtbots.features.docker.compose import (
     DockerState,
     common_mount_root,
@@ -759,6 +760,34 @@ class CommandFeedbackTest(unittest.TestCase):
 
         self.assertFalse(asyncio.run(delete_message_quietly(_Boom())))
         self.assertTrue(asyncio.run(delete_message_quietly(_FakeStatusMessage())))
+
+
+class FailureTailTest(unittest.TestCase):
+    """失败时抄进收尾面板的输出尾巴：多了成日志，少了等于没说。"""
+
+    def test_takes_last_non_empty_lines(self):
+        captured = ["line1\nline2\n\nline3\nline4\n"]
+        self.assertEqual(docker_handlers._tail_lines(captured, 2), ["line3", "line4"])
+        self.assertEqual(
+            docker_handlers._tail_lines([], 2), [], "没有输出（比如命令没起来）就返回空"
+        )
+
+    def test_truncates_long_lines(self):
+        lines = docker_handlers._tail_lines(["x" * 400], 1)
+        self.assertEqual(len(lines[0]), docker_handlers.FAIL_TAIL_CHARS)
+
+    def test_failure_block_escapes_html(self):
+        self.assertEqual(docker_handlers._failure_block([]), "")
+        block = docker_handlers._failure_block(["boom <b>tag</b>"])
+        self.assertTrue(block.startswith("🔻"))
+        self.assertIn("&lt;b&gt;tag&lt;/b&gt;", block)
+        self.assertNotIn("<b>tag</b>", block)
+
+    def test_progress_keyboard_offers_interrupt_and_jobs(self):
+        markup = docker_handlers._progress_keyboard("abc123")
+        callbacks = [b.callback_data for row in markup.inline_keyboard for b in row]
+        self.assertIn("d|task_cancel|abc123", callbacks)
+        self.assertIn("nav|jobs", callbacks)
 
 
 if __name__ == "__main__":

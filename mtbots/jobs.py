@@ -94,6 +94,12 @@ class Job:
             head += " · %s" % when
         if self.detail and self.status != RUNNING:
             head += "\n    %s" % esc(self.detail)
+        elif self.detail:
+            # 运行中就显示最后一行输出（compose 的流式预览每秒写进来），
+            # 否则这份数据永远没人读——/jobs 只认终态 detail。
+            tail = " ".join(str(self.detail).split())[-80:]
+            if tail:
+                head += "\n    %s" % esc(tail)
         return head
 
 
@@ -137,12 +143,19 @@ class JobCenter:
             job.progress = max(0, min(100, int(progress)))
 
     def finish(self, job: Job, status: str = DONE, detail: str = "") -> Job:
-        if job.status in TERMINAL and status == DONE:
+        """落终态。已经是终态的任务**不再翻转状态**（同状态允许补 detail/耗时）。
+
+        取消是两条路进来的：`/jobs` 的取消按钮先落 CANCELLED，流程自己在 finally 里再
+        finish 一次。如果允许后一次把 CANCELLED 改成 DONE/FAILED，用户按了取消却看到
+        「✅ 升级成功」——所以这里一律以先到的终态为准。
+        """
+        if job.status in TERMINAL and status != job.status:
+            log.info("任务已终态（%s），忽略后续 finish（%s）job=%s", job.status, status, job.id)
             return job
         job.status = status
         if detail:
             job.detail = detail
-        job.finished_at = time.time()
+        job.finished_at = job.finished_at or time.time()
         job.progress = 100 if status == DONE else job.progress
         log.info(
             "任务结束 [%s] %s -> %s（耗时 %.1fs）", job.module, job.title, status, job.elapsed()

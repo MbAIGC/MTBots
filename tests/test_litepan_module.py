@@ -728,8 +728,30 @@ class PanelIntegrationTests(unittest.TestCase):
         markup = self.bot.sent[-1].kwargs["reply_markup"]
         callbacks = [b.callback_data for row in markup.inline_keyboard for b in row]
         self.assertIn("nav|open|docker", callbacks)
-        self.assertIn("nav|jobs", callbacks)
+        self.assertNotIn("nav|jobs", callbacks, "任务中心不占这一行")
         self.assertNotIn("p|run_rule|1", callbacks, "失败时不给「再跑一次」")
+
+    def test_success_receipt_offers_rerun_and_other_modules(self):
+        """成功回执：本模块「再跑一次」+ 一行跨模块入口。"""
+        add_fake_module(self.core, "docker")
+        runs = [{"id": 9, "status": "success", "message": "ok", "result": {}}]
+        discovery, client_cls = make_fake_discovery(runs=runs)
+        patch_a, patch_b = self._patches(discovery, client_cls)
+
+        async def scenario():
+            with patch_a, patch_b:
+                query = FakeQuery("p|run_rule|1", user=FakeUser(123456789))
+                update = FakeUpdate(
+                    user=FakeUser(123456789), chat=FakeChat(123456789), bot=self.bot, query=query
+                )
+                await lp_handlers.on_callback(self.core, update, self.context)
+                await self._drain(self.core)
+
+        asyncio.run(scenario())
+        markup = self.bot.sent[-1].kwargs["reply_markup"]
+        rows = [[b.callback_data for b in row] for row in markup.inline_keyboard]
+        self.assertEqual(rows[0], ["p|run_rule|1"], "本模块动作在第一行")
+        self.assertEqual(rows[1], ["nav|open|docker"], "跨模块入口在第二行")
 
     def test_unbound_chat_gets_explicit_message(self):
         discovery, client_cls = make_fake_discovery()

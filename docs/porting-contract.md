@@ -157,8 +157,9 @@ class PanelManager:
 
 def next_actions_keyboard(core: Core, user_id: int | None, current: str | None = None, *,
                           limit: int = NEXT_ACTIONS_LIMIT) -> InlineKeyboardMarkup | None:
-    """收尾面上的「下一步」一行：其他**已启用且有权限**的模块 + 🧰 任务中心；
-    当前模块不重复给按钮，超过 limit（默认 3）个按钮整体返回 None（调用方退回 🏠 返回）。"""
+    """收尾面上的「下一步」一行：其他**已启用且有权限**的模块入口。
+    当前模块不重复给按钮；不放 🧰 任务中心（首页里有，且收尾行后面还会被追加 🏠 返回）；
+    模块入口为空或超过 limit（默认 3）个时返回 None（调用方退回只有 🏠 返回 的键盘）。"""
 
 def merge_keyboards(*markups: InlineKeyboardMarkup | None) -> InlineKeyboardMarkup | None:
     """按顺序拼键盘（None 跳过），全空返回 None；「本模块动作 + 跨模块入口」用它拼。"""
@@ -203,7 +204,9 @@ class JobCenter:
     def add(self, module: str, title: str, *, detail: str = "", progress: int | None = None,
             cancel: Callable[[], None] | None = None) -> Job: ...
     def update(self, job: Job, *, detail: str | None = None, progress: int | None = None) -> None: ...
-    def finish(self, job: Job, status: str = "done", detail: str = "") -> None: ...
+    def finish(self, job: Job, status: str = "done", detail: str = "") -> None:
+        """落终态。**终态不再翻转**（同状态允许补 detail）——取消先落 CANCELLED，
+        流程在 finally 里再 finish 一次也不能把它改成 DONE/FAILED。"""
     def running(self, module: str | None = None) -> list[Job]: ...
     def recent(self, limit: int = 5) -> list[Job]: ...
     def render(self, icons: dict[str, str]) -> str: ...           # /jobs 面板正文
@@ -221,8 +224,11 @@ def card_text(job: Job) -> str:
 `panels.render(module_id, update, _done_text(job), …)` 把 `card_text(job)` 画在面板上——
 否则同一个结果会播报两遍（线上 v1.0.4 修的就是这个）。只有拿不到面板上下文的**后台**任务
 （如 LitePan 回执轮询）才 `announce()`。收尾键盘用 `panels.next_actions_keyboard(core, user_id, current)`
-给一行跨模块入口（超过 3 个按钮返回 `None`，退回只有 `🏠 返回`）。执行类步骤消息用
-`run_command_with_feedback(..., delete_on_success=True)`：成功先改成完成态再删，失败/取消/超时保留。
+给一行跨模块入口（最多 3 个模块入口，超出返回 `None`，退回只有 `🏠 返回`），`🔙 返回列表`
+要带上用户原来那一页。执行类步骤消息用 `run_command_with_feedback(..., delete_on_success=True)`：
+成功先改成完成态再删，失败/取消/超时保留；同时用 `out=` 把结果尾部带回来——失败时把最后
+2–3 行抄进收尾面板，用户不用上滑找。跑的过程中面板键盘要给 `🛑 中断执行`（回调
+`d|task_cancel|<task_id>`），别把取消只挂在随时会消失的执行消息上。
 
 ## 6. 命令菜单（`mtbots/menu.py`）
 

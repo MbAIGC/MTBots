@@ -288,13 +288,24 @@ class DispatcherTests(unittest.TestCase):
 
 
 class FinishFlowTests(unittest.TestCase):
-    """收尾只留一条消息：交互式长任务的结论画在面板上，不再另发「✅ 🐳」卡片。
+    """收尾只留一条消息，而且收尾面要真的能接着用。
 
     升级一个项目以前会留下四条消息：面板、`✅ 拉取新镜像 - mt 完成`、
-    `✅ 重建与启动 - mt 完成`、完成卡片。现在两步执行消息成功即删，结论合并进面板。
+    `✅ 重建与启动 - mt 完成`、完成卡片。现在两步执行消息成功即删，结论合并进面板；
+    面板还得带着「回原来那页 / 失败原因 / 中断入口」。
     """
 
-    def _run_bulk_upgrade(self, extra_modules=()):
+    def _run_flow(
+        self,
+        flow_name,
+        *,
+        extra_modules=(),
+        data="d|upgrade_all_confirm|tok",
+        run_ok=True,
+        captured=None,
+        cancel_on_call=None,
+        **flow_kwargs,
+    ):
         import asyncio
 
         from mtbots.features.docker import handlers as docker_handlers
@@ -305,24 +316,45 @@ class FinishFlowTests(unittest.TestCase):
             add_fake_module(core, module_id)
         state = core.data["docker"]
         state.compose_bin = ["docker", "compose"]  # 不依赖宿主真的装了 docker
-        update = real_update(bot, data="d|upgrade_all_confirm|tok")
+        update = real_update(bot, data=data)
 
         calls: list[dict] = []
 
-        async def fake_run(_state, _message, _cmd, **kwargs):
-            calls.append(kwargs)
-            return True
+        async def fake_run(_state, _message, _cmd, **run_kwargs):
+            calls.append(run_kwargs)
+            if captured is not None and run_kwargs.get("out") is not None:
+                run_kwargs["out"].append(captured)
+            if cancel_on_call is not None and len(calls) == cancel_on_call:
+                state.cancel_requested = True  # 模拟用户在最后一步按了中断
+                return False
+            return run_ok
 
+        flow = getattr(docker_handlers, flow_name)
         with mock.patch.object(docker_handlers, "run_command_with_feedback", new=fake_run):
-            asyncio.run(docker_handlers._do_upgrade_all(core, update, None))
+            asyncio.run(flow(core, update, None, **flow_kwargs))
         return core, bot, calls
 
+    @staticmethod
+    def _sent_kwargs(bot):
+        return [item[2] for item in bot.rec["sent"]]
+
+    @staticmethod
+    def _callbacks(markup):
+        return [b.callback_data for row in markup.inline_keyboard for b in row]
+
+    def _final(self, bot):
+        return bot.rec["edits"][-1]
+
+    def _final_markup(self, bot):
+        return bot.rec["edit_kwargs"][-1]["reply_markup"]
+
+    # ---------- 收尾只有一条消息 ----------
     def test_bulk_upgrade_finishes_on_the_panel_only(self):
-        _core, bot, calls = self._run_bulk_upgrade()
+        _core, bot, calls = self._run_flow("_do_upgrade_all")
 
         self.assertEqual(len(bot.rec["sent"]), 1, "只发面板这一条，不再推完成卡片")
         self.assertEqual(len(bot.rec["edits"]), 1, "收尾就是把面板改成完成态")
-        final = bot.rec["edits"][-1]
+        final = self._final(bot)
         self.assertIn("✅ 🐳 <b>批量升级全部项目</b>", final, "完成卡片那行画在面板上")
         self.assertIn("全部 2 个项目升级完成", final)
         self.assertIn("成功 (2)", final)
@@ -331,20 +363,66 @@ class FinishFlowTests(unittest.TestCase):
         self.assertTrue(calls, "两条命令都跑过")
         self.assertTrue(all(c.get("delete_on_success") for c in calls), "执行消息成功即删")
 
-        markup = bot.rec["edit_kwargs"][-1]["reply_markup"]
-        labels = [b.text for row in markup.inline_keyboard for b in row]
+        labels = [b.text for row in self._final_markup(bot).inline_keyboard for b in row]
         self.assertIn("🔙 返回列表", labels)
-        self.assertIn("🧰 任务中心", labels)
         self.assertIn("🏠 返回", labels)
+        self.assertNotIn("🧰 任务中心", labels, "任务中心不占收尾行（首页里有）")
 
     def test_next_actions_row_lists_other_modules(self):
-        _core, bot, _calls = self._run_bulk_upgrade(extra_modules=("litepan", "cline"))
-        markup = bot.rec["edit_kwargs"][-1]["reply_markup"]
-        callbacks = [b.callback_data for row in markup.inline_keyboard for b in row]
+        _core, bot, _calls = self._run_flow(
+            "_do_upgrade_all", extra_modules=("litepan", "cline")
+        )
+        callbacks = self._callbacks(self._final_markup(bot))
         self.assertIn("nav|open|litepan", callbacks)
         self.assertIn("nav|open|cline", callbacks)
-        self.assertIn("nav|jobs", callbacks)
         self.assertNotIn("nav|open|docker", callbacks, "当前模块不再重复给按钮")
+        self.assertNotIn("nav|jobs", callbacks, "任务中心不占收尾行")
+
+    # ---------- 收尾面板的「接着用」 ----------
+    def test_return_list_keeps_the_page(self):
+        """在第 3 页升级完一个项目，🔙 返回列表 要回第 3 页。"""
+        _core, bot, _calls = self._run_flow(
+            "_do_upgrade_project", project_name="media", page=3
+        )
+        self.assertIn("d|page_turn|3", self._callbacks(self._final_markup(bot)))
+
+    def test_failure_copies_tail_output_into_the_panel(self):
+        _core, bot, _calls = self._run_flow(
+            "_do_upgrade_project",
+            project_name="media",
+            run_ok=False,
+            captured="Error response from daemon: pull access denied for media",
+        )
+        final = self._final(bot)
+        self.assertIn("❌", final)
+        self.assertIn("🔻 <b>最后输出：</b>", final)
+        self.assertIn("pull access denied", final, "失败原因直接抄进面板，不用上滑找")
+        assert_html_valid(self, final)
+
+    def test_running_panel_offers_interrupt(self):
+        _core, bot, _calls = self._run_flow("_do_upgrade_project", project_name="media")
+        progress = self._sent_kwargs(bot)[0]["reply_markup"]
+        callbacks = self._callbacks(progress)
+        self.assertTrue(
+            any(cb.startswith("d|task_cancel|") for cb in callbacks),
+            "进度面板必须能中断：%s" % callbacks,
+        )
+        self.assertIn("nav|jobs", callbacks)
+
+    # ---------- 取消的边界 ----------
+    def test_cancel_on_last_step_reports_cancelled(self):
+        """在最后一个项目的命令里取消，不能被算成「✅ 成功 1 / 失败 1」。"""
+        core, bot, calls = self._run_flow("_do_upgrade_all", cancel_on_call=4)
+        self.assertEqual(len(calls), 4, "2 个项目 × 2 条命令，第 4 条是最后一步")
+
+        job = core.jobs.all_jobs()[-1]
+        self.assertEqual(job.status, "cancelled")
+        self.assertIn("已按用户请求取消", job.detail or "")
+
+        final = self._final(bot)
+        self.assertIn("🛑 🐳", final, "面板按取消收尾")
+        self.assertNotIn("✅ 🐳", final)
+        assert_html_valid(self, final)
 
 
 class HtmlGuardTests(unittest.TestCase):

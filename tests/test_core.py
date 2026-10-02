@@ -195,6 +195,29 @@ class JobsTests(unittest.TestCase):
         self.assertIn("🎬", bot.sent[-1].text)
         self.assertIn("刮削", bot.sent[-1].text)
 
+    def test_running_job_shows_last_output_line(self):
+        """运行中的任务在 /jobs 里要显示最后一行输出（compose 每秒写进来的预览）。"""
+        center = JobCenter()
+        job = center.add("docker", "拉取镜像")
+        center.update(job, progress=30, detail="a1b2c3: Downloading [==>   ]  12MB/48MB")
+        text = center.render({"docker": "🐳"})
+        self.assertIn("Downloading", text)
+        self.assertIn("30%", text)
+
+    def test_finish_never_flips_a_terminal_job(self):
+        """先到的终态说了算：取消之后流程再 finish 也不能变成 ✅。"""
+        center = JobCenter()
+        job = center.add("docker", "升级项目 media")
+        center.cancel(job.id)
+        self.assertEqual(job.status, "cancelled")
+        center.finish(job, DONE, "项目整体升级完成")
+        self.assertEqual(job.status, "cancelled", "取消不能被后续 finish 覆盖")
+        center.finish(job, "failed", "拉取失败")
+        self.assertEqual(job.status, "cancelled")
+        # 同状态允许补明细（批量升级被取消时要写清剩余几个项目）
+        center.finish(job, "cancelled", "已中止（剩余 2 个项目）")
+        self.assertEqual(job.detail, "已中止（剩余 2 个项目）")
+
 
 class PanelTests(unittest.TestCase):
     def setUp(self):
@@ -567,15 +590,16 @@ class NextActionsTests(unittest.TestCase):
         _register_module(core, "cline", "Cline 额度", "🤖")
         return core
 
-    def test_lists_other_modules_and_jobs_in_one_row(self):
+    def test_lists_other_modules_in_one_row(self):
         core = self._core_with_three()
         markup = next_actions_keyboard(core, 123456789, "docker")
         callbacks = [b.callback_data for row in markup.inline_keyboard for b in row]
         labels = [b.text for row in markup.inline_keyboard for b in row]
         self.assertEqual(len(markup.inline_keyboard), 1, "跨模块入口只占一行")
-        self.assertEqual(callbacks, [nav_open("litepan"), nav_open("cline"), nav_jobs()])
-        self.assertEqual(labels, ["🎬 LitePan", "🤖 Cline", "🧰 任务中心"])
+        self.assertEqual(callbacks, [nav_open("litepan"), nav_open("cline")])
+        self.assertEqual(labels, ["🎬 LitePan", "🤖 Cline"])
         self.assertNotIn(nav_open("docker"), callbacks, "当前模块不用再给一个按钮")
+        self.assertNotIn(nav_jobs(), callbacks, "任务中心不占收尾行（首页里有，一步可达）")
 
     def test_disabled_modules_are_not_offered(self):
         core = make_core()
@@ -583,24 +607,26 @@ class NextActionsTests(unittest.TestCase):
         _register_module(core, "litepan", "LitePan 联动", "🎬")
         markup = next_actions_keyboard(core, 123456789, "docker")
         callbacks = [b.callback_data for row in markup.inline_keyboard for b in row]
-        self.assertEqual(callbacks, [nav_open("litepan"), nav_jobs()])
+        self.assertEqual(callbacks, [nav_open("litepan")])
+
+    def test_single_module_gets_no_row(self):
+        core = make_core()
+        _register_module(core, "docker", "Docker 管理", "🐳")
+        self.assertIsNone(next_actions_keyboard(core, 123456789, "docker"))
 
     def test_acl_blocks_modules_without_permission(self):
         core = self._core_with_three()
         core.acl = ACL([999999])
-        markup = next_actions_keyboard(core, 123456789, "docker")
-        callbacks = [b.callback_data for row in markup.inline_keyboard for b in row]
-        self.assertEqual(callbacks, [nav_jobs()], "没权限的模块一个都不给")
-        unknown = next_actions_keyboard(core, None, "docker")
-        self.assertEqual(
-            [b.callback_data for row in unknown.inline_keyboard for b in row],
-            [nav_jobs()],
-            "认不出用户就按默认拒绝处理",
+        self.assertIsNone(
+            next_actions_keyboard(core, 123456789, "docker"), "没权限的模块一个都不给"
+        )
+        self.assertIsNone(
+            next_actions_keyboard(core, None, "docker"), "认不出用户就按默认拒绝处理"
         )
 
-    def test_too_many_buttons_falls_back_to_none(self):
+    def test_too_many_modules_falls_back_to_none(self):
         core = self._core_with_three()
-        self.assertIsNone(next_actions_keyboard(core, 123456789, "docker", limit=2))
+        self.assertIsNone(next_actions_keyboard(core, 123456789, "docker", limit=1))
 
     def test_merge_keyboards_skips_none(self):
         core = self._core_with_three()
