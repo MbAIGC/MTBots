@@ -24,7 +24,7 @@
 # docs/examples/mtbots-remote-setup.sh 也可以单独在远端 sudo 跑。
 
 # 也能直接 curl 下来跑（stdin 是脚本时，项目根 = 当前目录）：
-#   cd /mbots && curl -fsSL https://raw.githubusercontent.com/MbAIGC/MTBots/v1.3.0/scripts/setup-remote-host.sh \
+#   cd /mbots && curl -fsSL https://raw.githubusercontent.com/MbAIGC/MTBots/v1.3.1/scripts/setup-remote-host.sh \
 #     | sh -s -- --mode create --host 10.0.0.5 --login-user root --user mtbots --id vps
 # 这种情况下守卫/远端脚本不在本地，脚本会按 --ref（默认取当前 MTBots 版本）从 GitHub 拉。
 
@@ -32,7 +32,7 @@ set -eu
 
 CONTAINER_DATA=${MTBOTS_CONTAINER_DATA:-/app/data}
 REPO=${MTBOTS_REPO:-MbAIGC/MTBots}
-MTBOTS_VERSION_HINT=${MTBOTS_VERSION_HINT:-1.3.0}
+MTBOTS_VERSION_HINT=${MTBOTS_VERSION_HINT:-1.3.1}
 REF=""
 PROJECT_ROOT_OPT=""
 

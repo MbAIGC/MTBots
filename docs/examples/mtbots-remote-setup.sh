@@ -10,9 +10,9 @@
 #   5) 顺带验证：sudo -u <user> docker compose version
 #
 # 一行用法（**在远端主机上** root/sudo 跑；守卫从 GitHub 自己拉，公钥用字符串给）：
-#   curl -fsSL https://raw.githubusercontent.com/MbAIGC/MTBots/v1.3.0/docs/examples/mtbots-remote-setup.sh \
+#   curl -fsSL https://raw.githubusercontent.com/MbAIGC/MTBots/v1.3.1/docs/examples/mtbots-remote-setup.sh \
 #     | sudo sh -s -- --user mtbots \
-#         --guard-url https://raw.githubusercontent.com/MbAIGC/MTBots/v1.3.0/docs/examples/mtbots-compose-guard.sh \
+#         --guard-url https://raw.githubusercontent.com/MbAIGC/MTBots/v1.3.1/docs/examples/mtbots-compose-guard.sh \
 #         --pubkey-line 'ssh-ed25519 AAAAC3Nza... mtbots@bot'
 #
 # 手动用法（公钥/守卫已经在远端）：
@@ -222,11 +222,18 @@ fi
 
 say ""
 say "→ 验证「$TARGET_USER 能用 docker」..."
-if command -v sudo >/dev/null 2>&1 && sudo -u "$TARGET_USER" -H docker compose version >/dev/null 2>&1; then
-    say "   ✅ $(sudo -u "$TARGET_USER" -H docker compose version 2>/dev/null | head -1)"
+# 有 sudo 就以目标用户身份验证；没有 sudo（例如远端直接用 root 跑）就按当前身份验证
+if command -v sudo >/dev/null 2>&1; then
+    if sudo -u "$TARGET_USER" -H docker compose version >/dev/null 2>&1; then
+        say "   ✅ $(sudo -u "$TARGET_USER" -H docker compose version 2>/dev/null | head -1)"
+    else
+        warn "没验证通过。可能是：docker 组刚加还没生效（让 $TARGET_USER 重新登录/新会话）、或该用户没有 docker 权限。"
+        warn "手动确认：sudo -u $TARGET_USER -H docker compose version"
+    fi
+elif docker compose version >/dev/null 2>&1; then
+    say "   ✅ $(docker compose version 2>/dev/null | head -1)（远端没有 sudo，按当前身份直接验证）"
 else
-    warn "没验证通过。可能是：docker 组刚加还没生效（让 $TARGET_USER 重新登录/新会话）、或该用户没有 docker 权限。"
-    warn "手动确认：sudo -u $TARGET_USER -H docker compose version"
+    warn "没验证通过，且远端没有 sudo。手动确认：docker compose version"
 fi
 
 say ""

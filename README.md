@@ -150,7 +150,7 @@ cd /mbots && make add-host
 
 ```bash
 cd /mbots
-curl -fsSL https://raw.githubusercontent.com/MbAIGC/MTBots/v1.3.0/scripts/setup-remote-host.sh | sh
+curl -fsSL https://raw.githubusercontent.com/MbAIGC/MTBots/v1.3.1/scripts/setup-remote-host.sh | sh
 ```
 
 这种模式下「项目根」= 当前目录；守卫与远端脚本不在本地时会**按 ref 自动下载**（`--ref` 默认取当前 MTBots 版本，
@@ -163,9 +163,9 @@ curl -fsSL https://raw.githubusercontent.com/MbAIGC/MTBots/v1.3.0/scripts/setup-
 
 ```bash
 # 在远端主机上（root / sudo）。公钥 = MTBots 那台 ./data/ssh/id_ed25519.pub 的内容
-curl -fsSL https://raw.githubusercontent.com/MbAIGC/MTBots/v1.3.0/docs/examples/mtbots-remote-setup.sh \
+curl -fsSL https://raw.githubusercontent.com/MbAIGC/MTBots/v1.3.1/docs/examples/mtbots-remote-setup.sh \
   | sudo sh -s -- --user mtbots \
-      --guard-url https://raw.githubusercontent.com/MbAIGC/MTBots/v1.3.0/docs/examples/mtbots-compose-guard.sh \
+      --guard-url https://raw.githubusercontent.com/MbAIGC/MTBots/v1.3.1/docs/examples/mtbots-compose-guard.sh \
       --pubkey-line 'ssh-ed25519 AAAAC3Nza... mtbots@bot'
 ```
 
