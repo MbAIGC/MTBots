@@ -238,12 +238,23 @@ class MenuManager:
     def set_module_commands(self, module_id: str, entries: list[tuple[str, str]],
                             *, scope_chats: Sequence[int] | None = None) -> None: ...
     def clear_module(self, module_id: str) -> None: ...
-    def render_for(self, user_id: int) -> list[BotCommand]: ...   # 全局 + 有权限模块片段（去重、≤100）
+    def render_for(self, user_id: int, *, require_acl: bool = True) -> list[BotCommand]: ...
+    def render_for_chat(self, chat_id: int) -> list[BotCommand]: ...  # 会话作用域（私聊按权限、群取全量）
     async def apply(self, bot: Bot, *, force: bool = False,
                     chats: Sequence[int] | None = None) -> bool: ...
 ```
 * 菜单是**合并**出来的：任何模块都不得自己调用 `set_my_commands`。
-* `apply()` 内容未变化时**不发请求**（保留原 LitePan 的去重），失败只 warning 返回 False。
+* `apply()` 内容未变化时**不发请求**（保留原 LitePan 的去重），失败只 warning 返回 False；
+  失败的 `scope` 不写进去重缓存，下次 `apply()` 会自动重推。
+* **作用域语义**（Telegram 的菜单是「按会话」显示的，客户端不按人过滤）：
+  * 私聊 `chat_id > 0` 且在白名单 → `render_for(uid)`，按本人权限裁剪，各人菜单不同；
+  * 群 / 频道（负 id）→ `render_for(chat_id, require_acl=False)`，列该会话的全量命令
+    （成员权限各不相同，服务端不知道谁在看；真正的鉴权在 handler 的 `core.acl.can`）；
+  * 白名单外的私聊 → 只给 `BASE_COMMANDS`。
+  拿 `chat_id` 当 `user_id` 查 ACL 会让群里只剩基础命令，而会话作用域会**覆盖**默认作用域 ——
+  表现就是「命令菜单丢失」（v1.0.7 修）。
+* **空片段不下发**：`set_my_commands([])` 会把那个作用域的菜单擦干净，所以
+  `apply()` 遇到空列表直接跳过（宁可不改也不擦）。
 * LitePan 动态 `refresh_<slug>` 有预算（默认 30 条，`LITEPAN_MENU_BUDGET`），超出的规则进内联键盘分页。
 
 ## 7. 各 feature 包的验收标准

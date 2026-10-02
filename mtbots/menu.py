@@ -86,13 +86,32 @@ class MenuManager:
             return []
 
     # ---------- 合成 ----------
-    def render_for(self, user_id: int) -> list[BotCommand]:
+    def render_for(self, user_id: int, *, require_acl: bool = True) -> list[BotCommand]:
+        """合成菜单；`require_acl=False` 表示不按 ACL 裁剪（给群 / 频道作用域用）。"""
         entries: list[tuple[str, str]] = list(self._base)
         for module_id, spec in self._core.modules.items():
-            if not self._core.acl.can(user_id, module_id):
+            if require_acl and not self._core.acl.can(user_id, module_id):
                 continue
             entries.extend(self._entries_for(module_id, user_id))
         return [BotCommand(name, desc) for name, desc in _clean(entries)[:MAX_COMMANDS]]
+
+    def render_for_chat(self, chat_id: int) -> list[BotCommand]:
+        """会话作用域的菜单（Telegram 的命令菜单是**按会话**显示的，客户端不按人过滤）。
+
+        * 私聊（`chat_id > 0` 且在白名单里）→ 按本人权限裁剪，各人菜单不同；
+        * 群 / 频道（负 id）→ 成员权限各不相同，服务端不知道谁在看，只能列「bot 在该会话
+          提供什么」，谁点谁被 handler 的 ACL 拦；
+        * 白名单外的私聊 → 只给基础命令。
+
+        以前一律拿 chat_id 当 user_id 去查 ACL，群里的结论必然是「一个模块都没权限」，
+        于是群作用域被下发成「只剩 /start /help」；而 Telegram 一旦存在会话作用域就**覆盖**
+        默认作用域，表现就是「命令菜单经常丢失」。
+        """
+        if chat_id > 0:
+            if self._core is not None and not self._core.acl.is_allowed(chat_id):
+                return [BotCommand(name, desc) for name, desc in self._base]
+            return self.render_for(chat_id)
+        return self.render_for(chat_id, require_acl=False)
 
     def _default_entries(self) -> list[tuple[str, str]]:
         """全局作用域：基础命令 + 未指定会话作用域的模块片段。"""
@@ -111,21 +130,28 @@ class MenuManager:
         force: bool = False,
         chats: Optional[Sequence[int]] = None,
     ) -> bool:
-        """把菜单下发到 Telegram；返回 False 表示至少一个作用域失败（不致命）。"""
-        payloads: list[tuple[str, Any, list[tuple[str, str]]]] = [
-            ("default", None, self._default_entries())
-        ]
+        """把菜单下发到 Telegram；返回 False 表示至少一个作用域失败（不致命）。
+
+        空片段一律**跳过**而不是下发 `[]`：`set_my_commands([])` 等于把那个作用域的菜单
+        擦干净（全局作用域被擦 = 所有会话的菜单都没了），宁可不改也不能擦。
+        """
+        payloads: list[tuple[str, Any, list[tuple[str, str]]]] = []
+        default_entries = self._default_entries()
+        if default_entries:
+            payloads.append(("default", None, default_entries))
+        else:
+            log.warning("全局作用域没有任何命令片段，跳过一次下发（避免把菜单擦成空）")
 
         chat_scope: set[int] = set(int(c) for c in (chats or []))
         for ids in self._scopes.values():
             chat_scope.update(ids)
         for chat_id in sorted(chat_scope):
             entries = _clean(
-                [
-                    (cmd.command, cmd.description)
-                    for cmd in self.render_for(chat_id)
-                ]
+                [(cmd.command, cmd.description) for cmd in self.render_for_chat(chat_id)]
             )[:MAX_COMMANDS]
+            if not entries:
+                log.warning("会话 %d 没有任何命令片段，跳过下发", chat_id)
+                continue
             payloads.append(("chat:%d" % chat_id, BotCommandScopeChat(chat_id=chat_id), entries))
 
         ok = True

@@ -41,7 +41,6 @@ from mtbots.features.cline.core import (
     KeyLimitError,
     Settings,
     Snapshot,
-    __version__,
     esc,
     key_fingerprint,
     key_shape_note,
@@ -573,7 +572,7 @@ def commands(core: Core, uid: int) -> list[tuple[str, str]]:
 def help_text(core: Core, uid: int) -> str:
     """帮助章节（HTML，由 router 拼到 /help 里）。"""
     return (
-        f"🤖 <b>Cline 额度</b> · v{__version__}\n"
+        "🤖 <b>Cline 额度</b>\n"
         "· <code>/c_status</code> 或 <code>/quota</code> — 额度面板（所有已绑定 Key）\n"
         "· <code>/addkey &lt;别名&gt; &lt;API_KEY&gt;</code> — 添加或更新指定别名的 Key\n"
         "· <code>/delkey &lt;别名&gt;</code> — 删除指定的 Key\n"

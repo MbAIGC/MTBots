@@ -145,7 +145,7 @@ mtbots/
 ├── .github/workflows/docker.yml                      # CI：跑测试 + 构建 amd64/arm64 镜像推 GHCR
 ├── Makefile                                          # make check / health / test / run / list
 ├── docs/                                             # 设计稿、施工契约（porting-contract）、合并报告
-└── tests/                                            # 343 个 stdlib unittest 用例
+└── tests/                                            # 347 个 stdlib unittest 用例
 ```
 
 ## 配置
@@ -205,11 +205,11 @@ make check
 ```
 
 测试全部是 stdlib `unittest`、不联网也不碰真实 Telegram/Docker（Docker 用例还会把
-`subprocess` / `create_subprocess_exec` 换成抛异常的桩做反证）。当前 **343 个用例全绿**：
+`subprocess` / `create_subprocess_exec` 换成抛异常的桩做反证）。当前 **347 个用例全绿**：
 
 | 文件 | 用例 | 覆盖 |
 |---|---|---|
-| `tests/test_core.py` | 66 | 文本分片（HTML 标签闭合）、`safe_html` 出口转义、`SafeBot` 解析失败降级、ACL 默认拒绝、存储原子写/0600/损坏分类、任务中心（运行中显示最后一行输出、终态不再翻转）与收尾卡片文案、跨模块入口按钮的取舍（启用/权限/排不下）、面板唯一与两步确认、菜单去重与作用域、配置兼容、日志脱敏（含 exc_info 的 traceback）、路由消歧与兜底救援 |
+| `tests/test_core.py` | 70 | 文本分片（HTML 标签闭合）、`safe_html` 出口转义、`SafeBot` 解析失败降级、ACL 默认拒绝、存储原子写/0600/损坏分类、任务中心（运行中显示最后一行输出、终态不再翻转）与收尾卡片文案、跨模块入口按钮的取舍（启用/权限/排不下）、**命令菜单的作用域规则（私聊按权限裁剪 / 群取全量 / 空片段不下发）**、面板唯一与两步确认、菜单去重与作用域、配置兼容、日志脱敏（含 exc_info 的 traceback）、路由消歧与兜底救援 |
 | `tests/test_docker_module.py` | 52 | 项目排序/分页、pull 噪音过滤、清理候选、回调载荷、模块装配、**扫描失败诊断（实测 socket GID、未挂载目录的公共挂载点、缺命令）**、执行消息收尾（成功即删、失败必留、结果回传）、失败尾部输出与进度键盘的中断入口 |
 | `tests/test_litepan_module.py` | 59 | slug 构建（拼音/限长/去重）、users.json 校验、发现解析与缓存、菜单预算、触发与回执 |
 | `tests/test_cline_module.py` | 140 | 额度解析/渲染、Key 掩码与指纹、别名校验、存储读写与自愈、默认拒绝 |
@@ -235,6 +235,7 @@ make check
 | LitePan 报 `Can't parse entities: unsupported start tag "盘名"` | 已修：`SafeBot`（`mtbots/bot.py`）在出站口把白名单外的 `<` 全部转义，真解析失败时再降级纯文本重发；`tests/htmlcheck.py` 会把**每个面板文案**离线校验一遍，这类事故进不了 CI。 |
 | Docker 面板「⚠️ 暂未检测到任何 Docker Compose 项目」 | 面板会直接给出原因；`permission denied` 还会实测 socket 属组并告诉你填哪个 GID，见下面「Docker 读不到项目」。 |
 | 点旧按钮提示「菜单已过期」 | 回调里的长载荷（规则名、项目名）存在内存，Bot 重启后失效；重发一次命令即可。 |
+| **命令菜单丢了 / 群里只剩 `/start`、`/help`** | 已修：菜单往**会话作用域**（`BotCommandScopeChat`）下发时曾把 `chat_id` 当 `user_id` 查权限，群/频道的负 id 永远查不到，于是被下发成「只剩基础命令」；而 Telegram 一有会话作用域就**覆盖**默认作用域，群里看着就像菜单没了。现在私聊按本人权限裁剪、群/频道取该会话全量命令（谁点谁被 handler 拦）、空片段一律不下发。升到 **≥ 1.0.7** 后发一次 `/p_menu` 或重启即可重刷；若某个会话仍不对，把日志里 `命令菜单已更新：scope=...` 那几行贴出来。 |
 
 ### Docker 读不到项目
 

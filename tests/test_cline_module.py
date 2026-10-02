@@ -956,9 +956,15 @@ class TestVersion(unittest.TestCase):
     def test_version_is_semver(self):
         self.assertRegex(cli.__version__, r"^\d+\.\d+\.\d+$")
 
-    def test_panel_shows_version(self):
-        text = cli.render_panel([cli.Snapshot("a", "k")], now=datetime(2026, 9, 25, tzinfo=timezone.utc))
-        self.assertIn(f"v{cli.__version__}", text)
+    def test_panel_body_has_no_module_title(self):
+        """正文不写模块标题/版本号：面包屑与底部时间戳由 PanelManager 统一加，写两遍就是重复。"""
+        text = cli.render_panel(
+            [cli.Snapshot("a", "k")], now=datetime(2026, 9, 25, tzinfo=timezone.utc)
+        )
+        self.assertNotIn("ClinePass Status Panel", text)
+        self.assertNotIn(f"v{cli.__version__}", text)
+        self.assertNotIn("更新时间", text)
+        self.assertIn("账号/别名", text, "正文第一行就该是内容")
 
 
 # ==================== /addkey 参数拆分 ====================

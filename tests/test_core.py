@@ -332,6 +332,46 @@ class MenuTests(unittest.TestCase):
         scopes = [scope.chat_id if scope is not None else None for scope, _ in self.bot.commands]
         self.assertIn(555, scopes)
 
+    def test_group_scope_keeps_module_commands(self):
+        """群/频道的会话菜单不能按「chat_id 当 user_id」过滤——那样群里只剩基础命令。
+
+        Telegram 有会话作用域就覆盖默认作用域，所以群里被下发成 6 条基础命令时，
+        用户看到的就是「菜单丢了」。
+        """
+        self.core.menu.set_module_commands("docker", [("d_list", "项目列表")])
+        group = -1001234567890
+        names = [c.command for c in self.core.menu.render_for_chat(group)]
+        self.assertIn("d_list", names, "群作用域要列出模块命令")
+        self.assertIn("start", names, "基础命令照旧")
+
+        asyncio.run(self.core.menu.apply(self.bot, chats=[group]))
+        payload = {scope.chat_id if scope else None: cmds for scope, cmds in self.bot.commands}
+        self.assertIn("d_list", [c.command for c in payload[group]])
+
+    def test_private_scope_is_still_acl_filtered(self):
+        """私聊的 chat_id 就是 user_id：仍然按本人权限裁剪，各人菜单不同。"""
+        self.core.menu.set_module_commands("docker", [("d_list", "项目列表")])
+        self.core.acl = ACL([1], roles={1: "user"})
+        names = [c.command for c in self.core.menu.render_for_chat(1)]
+        self.assertNotIn("d_list", names)
+        self.assertIn("start", names)
+
+    def test_outsider_private_chat_gets_base_only(self):
+        self.core.menu.set_module_commands("docker", [("d_list", "项目列表")])
+        names = [c.command for c in self.core.menu.render_for_chat(999)]
+        self.assertNotIn("d_list", names)
+        self.assertIn("start", names)
+
+    def test_empty_scope_is_never_pushed(self):
+        """空片段宁可不发：`set_my_commands([])` 会把那个作用域的菜单擦干净。"""
+        core = make_core()
+        core.menu = MenuManager(core, [])
+        core.menu.attach(core)
+        add_fake_module(core, "docker")
+        core.menu.set_module_commands("docker", [])
+        self.assertTrue(asyncio.run(core.menu.apply(self.bot, chats=[123456789])))
+        self.assertEqual(self.bot.commands, [], "空菜单一次都不该下发")
+
 
 class ConfigTests(unittest.TestCase):
     def test_token_precedence_and_id_union(self):

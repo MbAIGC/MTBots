@@ -2,7 +2,7 @@
 
 > 依据：[three-bots-merge-design.md](three-bots-merge-design.md)（可行性 + 交互设计）、
 > [three-bots-merge-ux.md](three-bots-merge-ux.md)（单人版交互图）、[porting-contract.md](porting-contract.md)（施工契约）。
-> 结果：三个 Bot 已合并为 **一个进程、一个 Python 包 `mtbots`**（Bot 名 MTBots，方案 A：单进程模块化），可运行、可自检、**343 个测试全绿**。
+> 结果：三个 Bot 已合并为 **一个进程、一个 Python 包 `mtbots`**（Bot 名 MTBots，方案 A：单进程模块化），可运行、可自检、**347 个测试全绿**。
 
 ---
 
@@ -55,19 +55,19 @@
 
 ```bash
 cd /root/DSH/MTBots
-PYTHONPATH=./.vendor:. python3 -m unittest discover -s tests -t .   # 343 tests OK
+PYTHONPATH=./.vendor:. python3 -m unittest discover -s tests -t .   # 347 tests OK
 PYTHONPATH=./.vendor:. python3 -m mtbots --check                      # exit 0，离线
 PYTHONPATH=./.vendor:. python3 -m mtbots --health                     # 真实探测（compose / LitePan / Cline 存储）
 ```
 
 | 测试文件 | 用例 | 结果 |
 |---|---|---|
-| `tests/test_core.py` | 66 | OK（含 `safe_html` / `SafeBot` 降级的出口兜底用例） |
+| `tests/test_core.py` | 70 | OK（含 `safe_html` / `SafeBot` 降级的出口兜底用例） |
 | `tests/test_docker_module.py` | 52 | OK（含「把 `subprocess` 全换成抛异常的桩」反证 + 扫描失败诊断） |
 | `tests/test_litepan_module.py` | 59 | OK |
 | `tests/test_cline_module.py` | 140 | OK |
 | `tests/test_integration.py` | 26 | OK（5 个装配 + 13 个真 Update 端到端 + 6 个收尾流程 + 2 个 HTML 守卫用例） |
-| **合计** | **343** | **OK（约 6.7s，无网络）** |
+| **合计** | **347** | **OK（约 6.7s，无网络）** |
 
 端到端用例（`DispatcherTests`）用**真正的 `telegram.Update` + 记录型假 Bot** 跑 PTB 自己的
 `Application.process_update`，因此能抓到装配级事故：
@@ -159,7 +159,7 @@ DOCKER_GID=$(getent group docker | cut -d: -f3) docker compose up -d
 DOCKER_GID=$(getent group docker | cut -d: -f3) docker compose up -d --build
 ```
 
-## 10. 修复记录（线上反馈驱动，v1.0.1 → v1.0.6）
+## 10. 修复记录（线上反馈驱动，v1.0.1 → v1.0.7）
 
 上线后按线上反馈修了五轮，全部补了回归测试（342 个用例）：
 
@@ -171,3 +171,5 @@ DOCKER_GID=$(getent group docker | cut -d: -f3) docker compose up -d --build
 | 升级一个项目后留下四条消息：面板 + `✅ 拉取新镜像 - mt 完成` + `✅ 重建与启动 - mt 完成` + `✅ 🐳 升级项目 mt · 09:50（5 秒）` 卡片；三个 Bot 合在一起后「操作逻辑很乱」 | 多步任务的每一步各占一条执行消息且不回收；收尾又走 `JobCenter.announce()` 给**交互式**任务也单发一张卡片——同一个结果两处播报 | ① 统一成「**一次操作一条消息**」：交互式任务把 `jobs.card_text(job)` 画在面板上收尾，只有真后台任务（LitePan 回执）才 `announce()`；② `run_command_with_feedback(..., delete_on_success=True)`：成功先把执行消息改成完成态再删（删不掉也不会留假进度），失败/取消/超时一律留着当排错依据；③ 收尾键盘 = 模块自己的「🔙 返回列表」+ 共享的一行跨模块入口 `next_actions_keyboard()`（其他已启用且有权限的模块 + 🧰 任务中心，超过 3 个按钮就只留 🏠 返回）；④ 镜像清理的执行消息同样删，但 `Total reclaimed space` 通过 `out=` 抄进面板；⑤ LitePan 回执卡片上原来那个「⬆️ 升级 LitePan 容器」与跨模块行里的 🐳 完全重复（callback 都是 `nav|open|docker`），去掉 |
 | 收尾规则定完后自己复盘出的七处不一致（批量末步取消报成功、`/jobs` 里运行中任务的进度预览没人读、跑的时候面板没有取消按钮、`🔙 返回列表` 永远回第 1 页、失败要上滑找原因、收尾行会挤成 4 个按钮、批量卡片行与明细重复计数） | ① 批量循环只在**每轮开头**查 `cancel_requested`，取消发生在最后一个项目的命令里时 `aborted` 仍是 False，落进「部分失败」分支 → 报 ✅；② compose 每秒把输出预览写进 `job.detail`，而 `Job.line()` 只在终态渲染 detail，运行期是死数据；③ 取消入口散在步骤消息、`/jobs`、`/cancel` 三处，唯独用户盯着的面板没有；④ `up_p_do`/`up_svc_do` 的载荷里本来就带 `page`，只是没往下传；⑤ 失败详情只在执行消息里；⑥ 收尾行 + 自动追加的 `🏠 返回` 会让三个模块全开时变成一行四个按钮；⑦ `detail` 与明细表各报一次成败数 | ① 取消判定改用实时的 `state.cancel_requested`，并把被中断的项目单独记成 `⚠️ 已中断：`（不是「失败」）；② `/jobs` 运行中显示最后一行输出（截 80 字）；③ 进度面板键盘改成 `[🛑 中断执行] [🧰 任务中心]`；④ `page` 一路传到 `_finish_keyboard()`；⑤ 复用 `out=` 把命令尾部 2–3 行（批量 6 行）抄进收尾面板；⑥ 收尾行去掉 🧰 任务中心（首页里有）；⑦ 卡片行只留结论，明细保留成功/失败列表；另外 `JobCenter.finish()` 改成**终态不再翻转**（取消后流程再 finish 也不能变回 ✅） |
 | 面板底部出现两个时间：「🔄 更新时间 21:57:17」下面紧跟「🔄 21:57:17」；另外想看当前跑的是哪个版本只能去翻日志 | ① 面板层 `PanelManager._decorate()` 会给每个面板加底部时间戳，而 Cline 的 `render_panel()` 是照搬原实现的，它自己末尾也拼了一段「🔄 更新时间」——同一个面板里就有两个时间；② 版本号只在启动日志和 `--version` 里，面板上看不到 | ① 删掉 `render_panel()` 末尾那段（时间戳由面板层统一加），并加用例锁死「模块正文不得自带时间戳」；② 首页头部改成 `🏠 控制台 · MTBots v<__version__>`（版本号直接取 `mtbots.__version__`，不会再手写走样） |
+| Cline 面板顶部多一行「🤖 ClinePass Status Panel · v0.1.0」（面包屑已经写了模块名） | 移植时照搬了原面板的标题行与版本行，合并后面板层已经有面包屑，正文再写一遍就是重复；版本号还是上游的 0.1.0，和 MTBots 自己的版本容易混 | 删掉 `render_panel()` 的标题行（与上一轮的「更新时间」一起去掉），`help_text` 里那条 `· v0.1.0` 也一并对齐另外两个模块（不写版本） |
+| 「命令菜单经常丢失」，群里尤其明显 | `MenuManager` 给会话作用域（`BotCommandScopeChat`）合成命令时，把 **chat_id 当成 user_id** 去查 ACL：私聊恰好相等没问题，群/频道的负 id 永远查不到权限，于是群里被下发成「只剩 6 条基础命令」；而 Telegram 一旦存在会话作用域就**覆盖**默认作用域，用户看到的就是菜单没了 | 新增 `render_for_chat()`：私聊（正 id 且在白名单）仍按本人权限裁剪、群/频道取该会话的全量命令（谁点谁被 handler 的 ACL 拦）、白名单外的私聊只给基础命令；另外 `apply()` 遇到空片段**跳过下发**而不是发 `[]`（`set_my_commands([])` 会把那个作用域的菜单擦干净） |

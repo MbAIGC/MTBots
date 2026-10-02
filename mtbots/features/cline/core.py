@@ -1167,14 +1167,15 @@ def render_snapshot(
 def render_panel(
     snapshots: Sequence[Snapshot], now: Optional[datetime] = None, show_identity: bool = False
 ) -> str:
-    """渲染整块面板（不含分片）。
+    """渲染整块面板正文（不含分片）。
 
-    末尾**不再**自带「🔄 更新时间」：面板底部的时间戳由 `PanelManager._decorate()` 统一加，
-    模块自己再来一条就会在同一个面板里出现两个时间（线上看到的重复就是这么来的）。
+    正文里**不写模块标题，也不写时间戳**：面包屑 `🏠 › 🤖 Cline 额度` 和底部 `🔄 HH:MM:SS`
+    都由 `PanelManager._decorate()` 统一加。原实现自带
+    `🤖 ClinePass Status Panel · v0.1.0` 与 `🔄 更新时间` 两行，合并后就成了同一个面板里
+    重复两遍的冗余信息（版本号还容易和 MTBots 自己的版本号混淆），所以删掉。
     """
     moment = now or datetime.now(timezone.utc)
-    sections = [f"🤖 <b>ClinePass Status Panel</b> · v{__version__}"]
-    sections.extend(render_snapshot(s, moment, show_identity=show_identity) for s in snapshots)
+    sections = [render_snapshot(s, moment, show_identity=show_identity) for s in snapshots]
     return f"\n\n{SECTION_SEP}\n\n".join(sections)
 
 
