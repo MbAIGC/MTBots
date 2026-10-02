@@ -160,7 +160,7 @@ DOCKER_GID=$(getent group docker | cut -d: -f3) docker compose up -d
 DOCKER_GID=$(getent group docker | cut -d: -f3) docker compose up -d --build
 ```
 
-## 10. 修复记录（线上反馈驱动，v1.0.1 → v1.5.2）
+## 10. 修复记录（线上反馈驱动，v1.0.1 → v1.5.3）
 
 上线后按线上反馈修了七轮，又加了一轮功能（多主机），全部带回归测试（377 个用例）：
 
@@ -187,4 +187,4 @@ DOCKER_GID=$(getent group docker | cut -d: -f3) docker compose up -d --build
 | 多主机时 25 个项目混在一个列表里，远端被挤到第 2~5 页；「点 Docker 应该先选主机」 | 面板只有一个混合列表（多主机段是后加的），没有主机层级；首页也只有模块一个入口 | 多主机时 `/d_list` **第一屏就是选主机**（每台一行 + 「📚 全部主机」），选中后只看那台、批量升级也只作用于那台（按钮变「⬆️ 升级这台全部项目」），并给「🖥 换主机」；首页新增模块钩子 `ModuleSpec.home_entries`，Docker 用它把每台主机摆到首页（`🐳 docker（NAS）`）；单主机路径一字未改；测试 409 → 412 |
 | 「实测没变化」时日志一片安静，看不出扫描到底跑没跑、哪台扫到几个 | 扫描成功不打日志（只有失败才 WARNING），面板又可能只是没刷新 | 每次扫描汇总一行：`扫描完成（0.4s）：local 15、192-168-1-5 10，共 25 个项目`，主机失败 `主机 X 扫描失败：…`，未挂载目录也提示；结果与错误都没变化时降到 DEBUG 不刷屏。版本跳到 1.5.0 |
 | 新增的多主机日志里有远端地址/用户名/密钥路径，日志脱敏没覆盖这些 | `redact()` 原来只管 Token/Key/邮箱/密码；多主机日志会把 `mtbots@192.168.155.89`、`192-168-155-89`、`/app/data/ssh/id_ed25519` 这类信息原样落盘 | 脱敏模式补齐：IPv4 只留网段（`192.168.*.*`）、`192-168-1-5` 形态、ssh 目标里的用户名（`***@…`）、私钥文件名（`id_***`）、`Authorization/Bearer`；时间戳等普通文本不受影响；`RedactingFilter` 仍挂在 root handler 上，所有模块日志与 traceback 都过一遍；测试 412 → 413 |
-| **配了 docker-hosts.json 却处处只有本机**：启动日志打印两台主机，首页没有按主机的入口、`/d_list` 不出现选主机、扫描日志只有 `local 15` | `handlers.register()` 里有一行 `core.data["docker"] = DockerState(DockerSettings.from_env(...))`，把 `__init__.register()` 用 `make_state()`（读过主机清单）建好的 state **覆盖成只有本机的新 state**；之前的测试都在建好 state 后手工赋 `state.hosts`，把这个 bug 掩盖了 | `handlers.register()` 改为复用已有 state（没有才用 `make_state` 建），`_state()` 兜底同样走 `make_state`；新增**走真实装配路径**的回归用例（回退修复时它必失败：`['local'] != ['local', 'vps']`）；顺带把 `chat=`/`user=`/`scope=chat:` 这类会话 id 也纳入脱敏；测试 413 → 414 |
+| **配了 docker-hosts.json 却处处只有本机**：启动日志打印两台主机，首页没有按主机的入口、`/d_list` 不出现选主机、扫描日志只有 `local 15` | `handlers.register()` 里有一行 `core.data["docker"] = DockerState(DockerSettings.from_env(...))`，把 `__init__.register()` 用 `make_state()`（读过主机清单）建好的 state **覆盖成只有本机的新 state**；之前的测试都在建好 state 后手工赋 `state.hosts`，把这个 bug 掩盖了 | `handlers.register()` 改为复用已有 state（没有才用 `make_state` 建），`_state()` 兜底同样走 `make_state`；新增**走真实装配路径**的回归用例（回退修复时它必失败：`['local'] != ['local', 'vps']`）；顺带把 `chat=`/`user=`/`scope=chat:`/`update_id=`/`message_id=` 这类 id 也纳入脱敏；测试 413 → 414 |

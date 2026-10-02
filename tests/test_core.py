@@ -461,6 +461,11 @@ class LoggingTests(unittest.TestCase):
         self.assertIn("chat=***(private)", out)
         self.assertIn("user=***", out)
         self.assertIn("scope=chat:***", redact("命令菜单已更新：scope=chat:432423432，24 条"))
+
+        out = redact("收到更新：update_id=934491143 指令=/start chat=432423432(private) user=432423432")
+        self.assertNotIn("934491143", out)
+        self.assertIn("update_id=***", out)
+        self.assertIn("message_id=***", redact("message_id=42 处理完成"))
         # 时间戳/普通文本不能被动
         self.assertEqual(redact("2026-10-03 01:56:23,434 INFO ok"), "2026-10-03 01:56:23,434 INFO ok")
 

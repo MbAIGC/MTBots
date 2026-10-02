@@ -163,7 +163,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/MbAIGC/MTBots/main/scripts/s
 
 > URL 里用的是 `main`，所以不用跟着版本号改，**脚本升级也不牵扯镜像**（这两件事现在解耦了：
 > 脚本在仓库里，镜像只是顺带带一份离线副本）。想锁死某个版本：
-> 把 URL 里的 `main` 换成 `v1.5.2`，或加 `--ref v1.5.2`。
+> 把 URL 里的 `main` 换成 `v1.5.3`，或加 `--ref v1.5.3`。
 
 ### 一键接入：远端侧一条命令
 
@@ -203,7 +203,7 @@ cd /mbots && make remote-setup
 cd /mbots && make add-host          # 方式选 1「复用已有账号」，账号填 mtbots
 ```
 
-> 远端脚本里的守卫默认从 `main` 拉（跟脚本同源），所以不用手写守卫 URL；要指定版本就加 `--ref v1.5.2`。
+> 远端脚本里的守卫默认从 `main` 拉（跟脚本同源），所以不用手写守卫 URL；要指定版本就加 `--ref v1.5.3`。
 
 ### 非交互（CI / 批量，可选）
 
@@ -572,7 +572,7 @@ python3 -m mtbots --list      # 列出已启用模块
 ## 安全红线（合并后的默认姿态）
 
 1. **默认拒绝**：白名单为空时谁都不能用（旧的"ClinePass 白名单留空 = 所有人可用"已被移除）。
-2. **统一脱敏**：`redact()` + `RedactingFilter` 覆盖所有 handler 出口（Bot Token、`sk_`/`lpk_` Key、邮箱、管理员密码，以及多主机的 IPv4（只留网段 `192.168.*.*`）、`192-168-1-5` 这种主机 id、ssh 目标里的用户名、`id_ed25519` 这类私钥文件名、`Authorization/Bearer` 头、Telegram 会话/用户 id（`chat=***`/`user=***`））；
+2. **统一脱敏**：`redact()` + `RedactingFilter` 覆盖所有 handler 出口（Bot Token、`sk_`/`lpk_` Key、邮箱、管理员密码，以及多主机的 IPv4（只留网段 `192.168.*.*`）、`192-168-1-5` 这种主机 id、ssh 目标里的用户名、`id_ed25519` 这类私钥文件名、`Authorization/Bearer` 头、Telegram 各类 id（`chat=***`/`user=***`/`update_id=***`/`message_id=***`））；
    API Key 只在 `data/config.json`（0600、原子写），并且 `addkey` 会先撤回含明文 Key 的消息。
 3. **Docker 特权集中在一个模块**：`docker.sock` 只被 `features/docker` 使用并受 ACL 限制（`docker` 默认只给 owner/admin）；
    想进一步收窄可换 `docker-socket-proxy`（主进程只发 HTTP，见设计稿 §6）。

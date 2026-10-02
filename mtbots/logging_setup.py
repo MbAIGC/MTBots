@@ -37,8 +37,9 @@ _SECRET_PATTERNS = (
     (re.compile(r"\b[A-Za-z0-9._\-]{1,32}@(?=[A-Za-z0-9._\-]|\d)"), "***@"),
     # 私钥文件名（保留目录，方便排查「私钥不存在」）
     (re.compile(r"\bid_(?:rsa|dsa|ecdsa|ed25519)\b"), "id_***"),
-    # Telegram 会话/用户 id（日志形如 chat=123 / chat:123 / scope=chat:123 / user=123）
-    (re.compile(r"(?i)\b(chat|user|user_id|chat_id|from_id)([=:])(-?\d{4,})"), r"\1\2***"),
+    # Telegram 各类 id（日志形如 chat=123 / chat:123 / scope=chat:123 / user=123 / update_id=934491143）
+    (re.compile(r"(?i)\b(chat|user|user_id|chat_id|from_id|scope)([=:])(-?\d{4,})"), r"\1\2***"),
+    (re.compile(r"(?i)\b(update_id|message_id|callback_query_id|inline_message_id|msg_id)([=:])(-?\d+)\b"), r"\1\2***"),
 )
 
 _REDACT_KEYS = ("password", "api_key", "apikey", "token", "secret")
