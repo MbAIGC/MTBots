@@ -17,6 +17,7 @@ from ...text import esc
 from . import handlers
 from .compose import DockerState, make_state
 from .config import DockerSettings
+from .hosts import HOST_ID_RE
 
 log = logging.getLogger("mtbots.docker")
 
@@ -54,8 +55,11 @@ def home_entries(core: Core, user_id: int) -> list[tuple[str, str]]:
         return []
     entries: list[tuple[str, str]] = []
     for host in state.hosts:
+        # id 非法（回调放不下/含分隔符）或配置错的主机不给按钮：点了只会报「未知主机」
+        if not HOST_ID_RE.match(str(host.id or "")) or host.error:
+            continue
         label = (host.label or host.id)[:20]
-        mark = "⚠️" if (host.error or (state.host_errors or {}).get(host.id)) else ""
+        mark = "⚠️" if (state.host_errors or {}).get(host.id) else ""
         entries.append(
             ("🐳 docker（%s）%s" % (label, mark), cb_simple("d", "host_list", host.id))
         )

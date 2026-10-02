@@ -166,7 +166,16 @@ def _parse_host(raw: Any) -> DockerHost:
     target = str(raw.get("target") or "").strip()
     if not TARGET_RE.match(target):
         return DockerHost(id=host_id, label=label, kind="ssh", target=target, error="target 必须是 user@host")
-    port = _as_int(raw.get("port"), DEFAULT_PORT)
+    port_raw = raw.get("port")
+    if port_raw is None or port_raw == "":
+        port = DEFAULT_PORT
+    elif isinstance(port_raw, bool) or not str(port_raw).strip().isdigit():
+        return DockerHost(
+            id=host_id, label=label, kind="ssh", target=target,
+            error="port 必须是数字（1-65535）",
+        )
+    else:
+        port = int(str(port_raw).strip())
     if not 1 <= port <= 65535:
         return DockerHost(id=host_id, label=label, kind="ssh", target=target, error="port 超出范围")
     strict = str(raw.get("strict") or "yes").strip().lower()
@@ -181,6 +190,12 @@ def _parse_host(raw: Any) -> DockerHost:
 
     roots_raw = raw.get("roots")
     roots: list[str] = []
+    if roots_raw is not None and (isinstance(roots_raw, (str, bytes)) or not isinstance(roots_raw, Iterable)):
+        # 写一个字符串/数字进来以前会被静默忽略（roots=() 等于不限制），这里直接报错
+        return DockerHost(
+            id=host_id, label=label, kind="ssh", target=target, port=port,
+            error='roots 必须是路径数组，例如 ["/opt"]',
+        )
     if isinstance(roots_raw, Iterable) and not isinstance(roots_raw, (str, bytes)):
         for item in roots_raw:
             path = str(item or "").strip().rstrip("/")

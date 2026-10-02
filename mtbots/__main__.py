@@ -81,8 +81,25 @@ async def _health_probes(core) -> list[str]:
                 for host in hosts:
                     count = sum(1 for p in projects if p.get("host") == host.id)
                     lines.append("   · %s：%d 个" % (host.id, count))
+                # 逐主机原因**无条件**打出来：以前只在「一个项目都没有」时才打印，
+                # 于是本机有项目、远端连不上时，--health 只显示「· vps：0 个」，
+                # 恰好把最需要的排查线索藏了（README 还推荐用 --health 排障）。
+                errors = dict(getattr(state, "host_errors", {}) or {})
+                for host_id, error in errors.items():
+                    lines.append("   ⚠️ %s：%s" % (redact(host_id), redact(str(error))))
+                skipped = list(getattr(state, "skipped_projects", []) or [])
+                if skipped:
+                    lines.append(
+                        "   ℹ️ %d 个项目没有 compose 文件路径（ConfigFiles 为空），无法升级：%s"
+                        % (len(skipped), redact("、".join(skipped[:3])))
+                    )
+                for host_id, names in (getattr(state, "roots_filtered", {}) or {}).items():
+                    lines.append(
+                        "   ℹ️ %s：%d 个项目被 roots 白名单挡掉（%s）"
+                        % (redact(host_id), len(names), redact("、".join(names[:3])))
+                    )
                 if not projects:
-                    # 空列表最需要原因：权限不足 / 目录没挂载 / 命令缺失 / 远端连不上
+                    # 空列表再补上可操作提示（权限不足 / 目录没挂载 / 命令缺失）
                     hint_fn = getattr(docker_compose, "scan_hint", None)
                     for hint in hint_fn(state) if hint_fn else []:
                         lines.append("   " + redact(strip_tags(hint)))

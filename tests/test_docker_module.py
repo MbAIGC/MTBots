@@ -868,6 +868,17 @@ class HostConfigTest(unittest.TestCase):
         hosts, _notes = load_hosts(path)
         self.assertEqual([h.id for h in hosts], ["nas"])
 
+    def test_port_must_be_numeric_and_roots_must_be_a_list(self):
+        """静默放行是坑：`port:"abc"` 以前悄悄变 22，`roots:"/opt"` 以前等于不限制。"""
+        key = self._ssh_key()
+        base = {"id": "vps", "kind": "ssh", "target": "mtbots@10.0.0.5", "identity": key}
+        for bad, needle in (({"port": "abc"}, "port"), ({"port": True}, "port"),
+                            ({"port": 70000}, "port"), ({"roots": "/opt"}, "roots"),
+                            ({"roots": 123}, "roots")):
+            entry = dict(base, **bad)
+            hosts, _notes = load_hosts(self._write({"hosts": [entry]}))
+            self.assertIn(needle, hosts[0].error, "entry=%r" % (bad,))
+
     def test_target_cannot_start_with_a_dash(self):
         """`-oProxyCommand=…@host` 会被 ssh 当选项吃掉（选项注入），必须拒。"""
         key = self._ssh_key()

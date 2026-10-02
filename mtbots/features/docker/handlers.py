@@ -44,7 +44,7 @@ from .compose import (
     scan_prune_candidates,
 )
 from .config import DockerSettings
-from .hosts import explain_exit
+from .hosts import HOST_ID_RE, explain_exit
 
 log = logging.getLogger("mtbots.docker")
 
@@ -165,6 +165,12 @@ def _progress_keyboard(task_id: Optional[str]) -> InlineKeyboardMarkup:
     )
 
 
+def _host_button_ok(host: Any) -> bool:
+    """这台主机能不能安全拼进 callback_data：id 合法（≤16、无分隔符）且配置没错。"""
+    host_id = str(getattr(host, "id", "") or "")
+    return bool(HOST_ID_RE.match(host_id)) and not getattr(host, "error", "")
+
+
 def _list_back(core: Core, page: int, host: Optional[str] = None) -> InlineKeyboardMarkup:
     """「返回列表」按钮：多主机时回到那台主机（或「全部主机」），单主机保持原回调。"""
     return InlineKeyboardMarkup(
@@ -204,8 +210,15 @@ def _user_id(update: Update) -> Optional[int]:
     return user.id if user is not None else None
 
 
-def _find_project(projects: Sequence[dict], name: str, host_id: Optional[str]) -> Optional[dict]:
-    """按 (主机, 项目名) 定位项目；`host_id` 为空时只比名字（单机部署的唯一形态）。"""
+def _find_project(
+    projects: Sequence[dict], name: str, host_id: Optional[str], *, multi_host: bool = False
+) -> Optional[dict]:
+    """按 (主机, 项目名) 定位项目；`host_id` 为空时只比名字（单机部署的唯一形态）。
+
+    多主机时 `host_id` 为空是**危险**的（同名项目会命中错的那台），直接 fail-fast。
+    """
+    if multi_host and not host_id:
+        return None
     for project in projects:
         if str(project.get("name")) != name:
             continue
@@ -220,8 +233,9 @@ async def _reject_unknown_host(core: Core, update: Update, host_id: Optional[str
 
     返回 True 表示「不认识的 host，已经回复用户，调用方直接 return」。
     """
-    if not host_id:
+    if not host_id or not str(host_id).strip():
         return False
+    host_id = str(host_id).strip()
     state = _state(core)
     if state.host_by_id(host_id) is not None:
         return False
@@ -266,12 +280,20 @@ def _done_text(job: Job, extra: str = "") -> str:
     return text
 
 
-def _finish_keyboard(core: Core, user_id: Optional[int], page: int = 1) -> InlineKeyboardMarkup:
+def _finish_keyboard(
+    core: Core, user_id: Optional[int], page: int = 1, list_host: Optional[str] = None
+) -> InlineKeyboardMarkup:
     """收尾键盘：「🔙 返回列表」（回到刚才那页）+ 一行跨模块入口。
 
     排不下（或只有一个模块）时只剩「🔙 返回列表」，面板自己会补 🏠 返回。
     """
-    rows = [[InlineKeyboardButton("🔙 返回列表", callback_data=cb_simple("d", "page_turn", page))]]
+    rows = [
+        [
+            InlineKeyboardButton(
+                "🔙 返回列表", callback_data=_list_back_data(core, page, list_host)
+            )
+        ]
+    ]
     extra = next_actions_keyboard(core, user_id, "docker")
     if extra is not None:
         rows.extend(extra.inline_keyboard)
@@ -356,6 +378,10 @@ async def _render_list(
         for h in state.hosts:
             count = sum(1 for p in all_ordered if p.get("host") == h.id)
             mark = " ⚠️" if (h.error or (state.host_errors or {}).get(h.id)) else ""
+            if not _host_button_ok(h):
+                # id 非法（回调 64 字节放不下/含分隔符）或配置错：只写在正文里，别给按钮
+                text += "⚠️ <code>%s</code>：%s\n" % (esc(h.id), esc(h.error or "配置有问题"))
+                continue
             rows.append(
                 [
                     InlineKeyboardButton(
@@ -571,7 +597,14 @@ async def _show_detail(
             InlineKeyboardButton(
                 "⚡ 升级全部服务容器",
                 callback_data=cb(
-                    "d", "up_s_ask", {"name": project_name, "page": back_page, "host": host_id}
+                    "d",
+                    "up_s_ask",
+                    {
+                        "name": project_name,
+                        "page": back_page,
+                        "host": host_id,
+                        "list_host": list_host or "",
+                    },
                 ),
             )
         ]
@@ -585,7 +618,13 @@ async def _show_detail(
                     callback_data=cb(
                         "d",
                         "up_svc_ask",
-                        {"name": project_name, "svc": svc, "page": back_page, "host": host_id},
+                        {
+                            "name": project_name,
+                            "svc": svc,
+                            "page": back_page,
+                            "host": host_id,
+                            "list_host": list_host or "",
+                        },
                     ),
                 )
             ]
@@ -625,8 +664,15 @@ async def _ask_project_upgrade(
     safe_name = esc(state.project_label(target) if target else project_name)
     safe_dir = esc(target["dir"]) if target else "未知路径"
     # 不在这里探测 compose（同步 subprocess 会卡事件循环），用已缓存结果或默认展示
-    compose = " ".join(state.get_remote_compose_bin(state.host_by_id(host_id)) or ["docker", "compose"])
-    confirm_data = cb("d", "up_p_do", {"name": project_name, "page": back_page, "host": host_id})
+    # 远端探测是同步 subprocess（冷缓存时最长 2×ConnectTimeout）：必须挪出事件循环，
+    # 否则一台连不上的主机就能把整个 bot 卡住（所有用户的 update 都排队）
+    compose_bin = await asyncio.to_thread(state.get_remote_compose_bin, state.host_by_id(host_id))
+    compose = " ".join(compose_bin or ["docker", "compose"])
+    confirm_data = cb(
+        "d",
+        "up_p_do",
+        {"name": project_name, "page": back_page, "host": host_id, "list_host": list_host or ""},
+    )
 
     text = (
         "🚀 <b>升级确认 - [%s]</b>\n\n"
@@ -670,7 +716,15 @@ async def _ask_service_upgrade(
     safe_service = esc(service_name)
     safe_dir = esc(target["dir"]) if target else "未知路径"
     confirm_data = cb(
-        "d", "up_svc_do", {"name": project_name, "svc": service_name, "page": back_page, "host": host_id}
+        "d",
+        "up_svc_do",
+        {
+            "name": project_name,
+            "svc": service_name,
+            "page": back_page,
+            "host": host_id,
+            "list_host": list_host or "",
+        },
     )
     cancel_data = cb(
         "d",
@@ -750,6 +804,7 @@ async def _do_upgrade_project(
     project_name: str,
     page: int = 1,
     host: Optional[str] = None,
+    list_host: Optional[str] = None,
 ) -> None:
     """升级整个项目：pull → up -d（LDMG do_upgrade_project）。"""
     state = _state(core)
@@ -777,11 +832,15 @@ async def _do_upgrade_project(
 
         if target is None:
             status, detail = FAILED, "找不到项目 %s（可能已删除或改名，/d_list 可刷新）" % project_name
-        elif not state.get_remote_compose_bin(state.host_by_id(host)):
+        elif not await asyncio.to_thread(
+            state.get_remote_compose_bin, state.host_by_id(host)
+        ):
             status, detail = FAILED, "未检测到 docker compose / docker-compose 命令"
         else:
             upgrade_host = state.host_of(target)
             job.title = "升级项目 %s" % state.project_label(target)
+            # 预热远端 compose 探测（同步 subprocess，冷缓存时最长 20s），别卡事件循环
+            await asyncio.to_thread(state.get_remote_compose_bin, upgrade_host)
             safe_name = esc(state.project_label(target))
             await core.panels.render(
                 "docker",
@@ -844,7 +903,10 @@ async def _do_upgrade_project(
         core.jobs.finish(job, status, detail)
 
     await core.panels.render(
-        "docker", update, _done_text(job, extra), _finish_keyboard(core, _user_id(update), page)
+        "docker",
+        update,
+        _done_text(job, extra),
+        _finish_keyboard(core, _user_id(update), page, list_host),
     )
 
 
@@ -856,6 +918,7 @@ async def _do_upgrade_service(
     service_name: str,
     page: int = 1,
     host: Optional[str] = None,
+    list_host: Optional[str] = None,
 ) -> None:
     """升级单个服务：pull <svc> → up -d <svc>（LDMG do_upgrade_service）。"""
     state = _state(core)
@@ -879,17 +942,21 @@ async def _do_upgrade_service(
     try:
         await _answer(update)
         projects = await state.get_projects()
-        target = _find_project(projects, project_name, host)
+        target = _find_project(projects, project_name, host, multi_host=state.multi_host)
 
         if target is None:
             status, detail = FAILED, "未找到项目 %s（/d_list 可刷新）" % project_name
         elif service_name not in list(target.get("services") or []):
             status, detail = FAILED, "项目 %s 中没有服务 %s" % (project_name, service_name)
-        elif not state.get_remote_compose_bin(state.host_by_id(host)):
+        elif not await asyncio.to_thread(
+            state.get_remote_compose_bin, state.host_by_id(host)
+        ):
             status, detail = FAILED, "未检测到 docker compose / docker-compose 命令"
         else:
             upgrade_host = state.host_of(target)
             job.title = "升级服务 %s / %s" % (state.project_label(target), service_name)
+            # 预热远端 compose 探测（同步 subprocess，冷缓存时最长 20s），别卡事件循环
+            await asyncio.to_thread(state.get_remote_compose_bin, upgrade_host)
             safe_project = esc(state.project_label(target))
             safe_service = esc(service_name)
             await core.panels.render(
@@ -955,7 +1022,10 @@ async def _do_upgrade_service(
         core.jobs.finish(job, status, detail)
 
     await core.panels.render(
-        "docker", update, _done_text(job, extra), _finish_keyboard(core, _user_id(update), page)
+        "docker",
+        update,
+        _done_text(job, extra),
+        _finish_keyboard(core, _user_id(update), page, list_host),
     )
 
 
@@ -994,10 +1064,17 @@ async def _do_upgrade_all(
         if target_host is not None:
             all_projects = [p for p in all_projects if p.get("host") == target_host.id]
         projects = state.order(all_projects)
+        # 预热各主机的 compose 探测（同步 subprocess），别在循环里卡事件循环
+        for host_id in {str(p.get("host") or "") for p in projects}:
+            await asyncio.to_thread(state.get_remote_compose_bin, state.host_by_id(host_id))
 
         if not projects:
             status, detail = FAILED, "未检测到可升级的项目"
-        elif not any(state.get_remote_compose_bin(h) for h in state.hosts):
+        elif not await asyncio.to_thread(
+            state.get_remote_compose_bin, target_host or state.local_host
+        ):
+            # 只看**目标主机**：以前看所有主机，于是「目标主机没装 compose」会绕过预检、
+            # 在循环里抛 RuntimeError，被收成「执行异常」，提示误导
             status, detail = FAILED, "未检测到 docker compose / docker-compose 命令"
         else:
             await core.panels.render(
@@ -1127,7 +1204,11 @@ async def _show_prune_menu(core: Core, update: Update, host: Optional[str] = Non
                 )
             ]
             for item in state.hosts
+            if _host_button_ok(item)
         ]
+        for item in state.hosts:
+            if not _host_button_ok(item):
+                text += "⚠️ <code>%s</code>：%s\n" % (esc(item.id), esc(item.error or "配置有问题"))
         keyboard.append(
             [InlineKeyboardButton("🔙 返回主菜单", callback_data=cb_simple("d", "page_turn", 1))]
         )
@@ -1482,6 +1563,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             payload["name"],
             _to_int(payload.get("page"), 1),
             payload.get("host"),
+            payload.get("list_host") or None,
         )
     elif action == "up_svc_do":
         ok, why = core.panels.validate_confirm(query, data)
@@ -1496,6 +1578,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             payload["svc"],
             _to_int(payload.get("page"), 1),
             payload.get("host"),
+            payload.get("list_host") or None,
         )
     elif action == "upgrade_all":
         await _ask_upgrade_all(core, update, parts[2] if len(parts) > 2 else None)

@@ -215,6 +215,10 @@ class DockerState:
         self.host_notes: list[str] = list(host_notes or [])
         #: 远端 compose 命令探测结果（`docker compose` / `docker-compose`），按主机缓存
         self.remote_compose: dict[str, list[str]] = {}
+        #: `docker compose ls` 没给 ConfigFiles / 路径为空的项目（不静默丢，面板与 --health 里说清）
+        self.skipped_projects: list[str] = []
+        #: 被 roots 白名单挡掉的项目（只在日志里 INFO 过，用户看不到）
+        self.roots_filtered: dict[str, list[str]] = {}
         #: 上一次扫描的结果签名/错误，仅用于「只在有变化时打 INFO」
         self._last_scan_signature: Optional[tuple] = None
         self._last_scan_errors: dict[str, str] = {}
@@ -420,6 +424,8 @@ class DockerState:
         self.host_errors = {}
         self.last_scan_error = ""
         self.hidden_dirs = []
+        self.skipped_projects = []
+        self.roots_filtered = {}
         for host in self.hosts:
             try:
                 projects.extend(self._scan_host_sync(host))
@@ -526,6 +532,7 @@ class DockerState:
                 # 远端返回的是它自己的路径：不做本地存在性检查，只按可选白名单过滤
                 if work_dir and not host.allows(work_dir):
                     log.info("主机 %s 的项目 %s 不在 roots 白名单内，跳过", host.id, name)
+                    self.roots_filtered.setdefault(host.id, []).append(name)
                     continue
             elif work_dir and not os.path.isdir(work_dir):
                 # compose 文件在宿主机有、容器里没有 => 没挂载，单独提示
@@ -534,6 +541,14 @@ class DockerState:
                 continue
 
             unique_key = "%s:%s:%s" % (host.id, name, work_dir)
+            if not work_dir:
+                # `docker compose ls` 没给 ConfigFiles（`-f -`/stdin 起的项目、label 缺失）：
+                # 以前这里直接 continue，项目在面板上「凭空消失」，用户无从排查
+                label = "%s/%s" % (host.id, name)
+                if label not in self.skipped_projects:
+                    self.skipped_projects.append(label)
+                    log.warning("项目 %s 没有 compose 文件路径（ConfigFiles 为空），无法升级，已跳过", label)
+                continue
             if work_dir and unique_key not in seen_keys:
                 seen_keys.add(unique_key)
                 projects.append(
@@ -713,6 +728,22 @@ def scan_hint(state: DockerState, *, include_compose: bool = True) -> list[str]:
                 hints.extend(_local_error_hints(error))
     else:
         hints.extend(_local_error_hints(state.last_scan_error))
+
+    skipped = list(getattr(state, "skipped_projects", []) or [])
+    if skipped:
+        shown = "、".join(skipped[:3]) + (" 等 %d 个" % len(skipped) if len(skipped) > 3 else "")
+        hints.append(
+            "ℹ️ 有 %d 个项目没拿到 compose 文件路径（<code>docker compose ls</code> 的 ConfigFiles 为空），"
+            "面板里不显示、也无法升级：<code>%s</code>" % (len(skipped), esc(shown))
+        )
+
+    for host_id, names in (getattr(state, "roots_filtered", {}) or {}).items():
+        host = state.host_by_id(host_id)
+        shown = "、".join(names[:3]) + (" 等 %d 个" % len(names) if len(names) > 3 else "")
+        hints.append(
+            "ℹ️ 主机 <b>%s</b> 有 %d 个项目被 <code>roots</code> 白名单挡掉：<code>%s</code>"
+            % (esc(host.display if host is not None else host_id), len(names), esc(shown))
+        )
 
     if state.hidden_dirs:
         dirs = state.hidden_dirs

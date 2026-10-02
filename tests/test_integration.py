@@ -597,6 +597,85 @@ class MultiHostFlowTests(unittest.TestCase):
         self.assertIn("未检测到可升级的 Compose 项目", bot.last_text)
         self.assertNotIn("确认批量升级", bot.last_text)
 
+    def test_invalid_host_id_never_becomes_a_button(self):
+        """id 太长/含分隔符时不能拼成按钮：callback_data 放不下、`|` 还会被拆错。"""
+        from mtbots.features.docker.hosts import DockerHost
+
+        from mtbots.features.docker import home_entries
+
+        app, core, bot = self._make_app()
+        state = core.data["docker"]
+        state.hosts = [
+            state.hosts[0],
+            DockerHost(id="x" * 60, label="太长", kind="local", error="id 只能用小写字母/数字/_/-，长度 1-16"),
+            DockerHost(id="a|b", label="含分隔符", kind="local", error="id 只能用小写字母/数字/_/-，长度 1-16"),
+        ]
+        state.scan_hook = lambda: []
+        self._drive(app, real_update(bot, text="/d_list"))
+        callbacks = [b.callback_data for row in self._markup(bot).inline_keyboard for b in row]
+        self.assertFalse([c for c in callbacks if "host_list" in c and "x" * 10 in c], callbacks)
+        self.assertFalse([c for c in callbacks if "a|b" in c], callbacks)
+        self.assertIn("太长", bot.last_text, "非法主机要写在正文里说明")
+        self.assertEqual([label for label, _ in home_entries(core, 1)], ["🐳 docker（本机 NAS）"])
+
+    def test_prune_menu_skips_broken_hosts(self):
+        from mtbots.features.docker.hosts import DockerHost
+
+        app, core, bot = self._make_app()
+        state = core.data["docker"]
+        state.hosts = [
+            state.hosts[0],
+            DockerHost(id="bad", label="坏的", kind="ssh", target="", error="target 必须是 user@host"),
+        ]
+        self._drive(app, real_update(bot, data="d|prune_menu"))
+        callbacks = [b.callback_data for row in self._markup(bot).inline_keyboard for b in row]
+        self.assertIn("d|prune_menu|nas", callbacks)
+        self.assertNotIn("d|prune_menu|bad", callbacks, "配置错的主机不该出现在清理菜单里")
+
+    def test_detail_service_buttons_carry_the_view_you_came_from(self):
+        from mtbots.panels import cb_parse
+
+        app, core, bot = self._make_app()
+        state = core.data["docker"]
+        base = state.scan_hook()
+        base[0]["services"] = ["emby", "db"]  # 多服务才会走「详情」而不是直接升级
+        state.scan_hook = lambda: list(base)
+        self._open_all(app, bot)
+        data = None
+        for row in self._markup(bot).inline_keyboard:
+            for button in row:
+                if "⚙️" in button.text:
+                    data = button.callback_data
+        self.assertIsNotNone(data, "多服务项目应进详情")
+        self._drive(app, real_update(bot, data=data))
+        service_buttons = [
+            b.callback_data
+            for row in self._markup(bot).inline_keyboard
+            for b in row
+            if "服务" in b.text
+        ]
+        self.assertTrue(service_buttons, "详情页应有服务按钮")
+        for raw in service_buttons:
+            payload = cb_parse(raw)[2]
+            if payload:
+                self.assertEqual(payload.get("list_host"), "all", "服务按钮要记住来路")
+
+    def test_finish_keyboard_keeps_the_list_context(self):
+        from mtbots.features.docker import handlers as docker_handlers
+
+        app, core, _bot = self._make_app()
+        markup = docker_handlers._finish_keyboard(core, 123456789, 1, "all")
+        callbacks = [b.callback_data for row in markup.inline_keyboard for b in row]
+        self.assertIn("d|page_turn|1|all", callbacks)
+
+    def test_find_project_fails_fast_without_host_in_multi_host(self):
+        from mtbots.features.docker.handlers import _find_project
+
+        projects = [{"name": "blog", "host": "vps"}]
+        self.assertIsNone(_find_project(projects, "blog", None, multi_host=True))
+        self.assertEqual(_find_project(projects, "blog", "vps", multi_host=True)["host"], "vps")
+        self.assertIsNotNone(_find_project(projects, "blog", None, multi_host=False))
+
     def test_first_screen_asks_which_host(self):
         """点 Docker 进来第一屏就是选主机（每台一个按钮 + 全部主机）。"""
         app, core, bot = self._make_app()
