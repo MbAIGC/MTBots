@@ -277,6 +277,6 @@ make check
 * 群里「回复某条面板消息定位上下文」仍未实现；面板按会话唯一（跨模块共用），命令触发时新发到最底部、旧面板删除。
 * Docker 模块是**进程内**模块（不是 sidecar + `docker-socket-proxy`）。单人自用可接受；多人场景建议按设计稿 §4 方案 B 拆出去。
 * Docker 模块只能看到「挂进容器的那些 compose 目录」，且容器内路径必须与宿主机一致（探针靠 `docker compose ls` 的宿主机路径定位工作目录）。
-* **只能管理本机 Docker**。远端主机（`DOCKER_HOST` + `docker-socket-proxy` / TLS）的方案已经写完但**尚未实现**：见 [docs/docker-multi-host-design.md](docs/docker-multi-host-design.md)。
+* **只能管理本机 Docker**。远端主机（**SSH 执行**：`ssh <目标> docker compose …`，不挂载任何远端目录）的方案已写完但**尚未实现**：见 [docs/docker-multi-host-design.md](docs/docker-multi-host-design.md)。
 * LitePan 命令菜单按会话差异化下发受 `MenuManager` 限制：目前是所有已授权会话共用一份片段（含 `refresh_<slug>`）。
 * LitePan 的「自动发现」与「回执」还没拆成两个开关（旧版就是耦合的，行为未退化）。

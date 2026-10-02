@@ -230,13 +230,17 @@ user    仅自己的 Cline Key + 被授权的 LitePan 触发
 
 一个 bot 同时管理本机 + 远端主机上的 Compose 项目（列表 / 升级 / 清理 / 状态 / `--health`）：
 
-* 传输：`DOCKER_HOST` 指向远端的 `docker-socket-proxy`（明文，靠 WireGuard/内网隔离）或 dockerd 原生 TLS 2376；
-* 主机清单：`data/docker-hosts.json`（`id/label/kind/endpoint` + 只读副本挂载），无此文件时行为与今天一致；
-* 中心约束：**compose 文件是本地解析的**，所以每台远端的 compose 目录必须在容器内可读（推荐同路径只读挂载），
-  并用 `docker compose config --hash` 与远端容器的 `com.docker.compose.config-hash` 标签做**副本漂移检测**；
+* 传输：**SSH 执行**（`ssh <目标> docker compose -f <远端路径> …`）——yml 留在远端、由远端 CLI 解析，
+  **零挂载 / 零副本 / 零漂移**；代价是镜像加 `openssh-client` 与一把只读私钥；
+* 主机清单：`data/docker-hosts.json`（`id/label/kind/target/port/identity/roots`），无此文件时行为与今天一致；
+* 远端准备：专用用户 + `docker` 组 + 公钥，**建议加 `authorized_keys` 强制命令守卫**，让这把 key 只能跑 compose；
 * 项目身份从 `name` 变成 `(host, name)`，面板多主机时按主机分组显示 `vps/blog`。
 
-完整方案（含 socket-proxy 最小放行清单、代码改造清单、安全红线、测试点、分步落地）：[docker-multi-host-design.md](docker-multi-host-design.md)。
+为什么不用 `DOCKER_HOST`（socket-proxy/TLS）：compose 的 yml 由**本地 CLI** 解析，所以必须把远端目录挂进容器；
+而 yml 里的相对路径会被解析成绝对路径发给远端 daemon，路径不一致时 dockerd 会自动建空目录顶上（静默挂空目录）。
+不挂任何远端目录就选 SSH。
+
+完整方案（含远端准备、包装/引号规则、退出码提示映射、代码改造清单、安全清单、测试点、分步落地）：[docker-multi-host-design.md](docker-multi-host-design.md)。
 
 ---
 

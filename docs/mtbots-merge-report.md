@@ -141,11 +141,12 @@ PYTHONPATH=./.vendor:. python3 -m mtbots --health                     # 真实�
 
 ## 8. 后续工作（按价值排序）
 
-1. **多主机 + 多用户硬化**：把 `docker` 拆到 sidecar / `docker-socket-proxy`，主进程只发 HTTP，并顺带支持**远端主机**的容器升级（`data/docker-hosts.json` + `DOCKER_HOST`）；完整方案见 [docker-multi-host-design.md](docker-multi-host-design.md)（计划中，代码未动）；
-2. **LitePan 发现/回执解耦**：`discovery.enabled` 与 `receipt.enabled` 分开配置（设计稿 §9.2 ④）；
-3. **角色管理界面**：`/id` 已能看角色，可加 owner 专用的角色增删命令，替代手写 `MTBOTS_ROLES`；
-4. **真实环境联调**：用测试 token 跑通「首页 → Docker 升级 → LitePan 重跑 → 回执」这条主线（设计稿图 4）；
-5. `docker-compose.yml` 接入可选的 `docker-socket-proxy` 服务。
+1. **多主机**：支持**远端主机**的容器升级 —— 走 **SSH 执行**（`ssh <目标> docker compose …`，不挂载任何远端目录），主机清单 `data/docker-hosts.json`；完整方案见 [docker-multi-host-design.md](docker-multi-host-design.md)（计划中，代码未动）；
+2. **多用户硬化**：把 `docker` 拆到 sidecar / `docker-socket-proxy`，主进程只发 HTTP（设计稿 §4 方案 B 的收益在这里）；
+3. **LitePan 发现/回执解耦**：`discovery.enabled` 与 `receipt.enabled` 分开配置（设计稿 §9.2 ④）；
+4. **角色管理界面**：`/id` 已能看角色，可加 owner 专用的角色增删命令，替代手写 `MTBOTS_ROLES`；
+5. **真实环境联调**：用测试 token 跑通「首页 → Docker 升级 → LitePan 重跑 → 回执」这条主线（设计稿图 4）；
+6. `docker-compose.yml` 接入可选的 `docker-socket-proxy` 服务（多用户硬化那一项）。
 
 ## 9. 启动
 
