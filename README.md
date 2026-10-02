@@ -120,186 +120,80 @@ docker run -d --name mtbots --restart unless-stopped \
 5. **跑的时候面板上能中断**。进度面板的键盘是 `[🛑 中断执行] [🧰 任务中心]`——用户视线就在这条消息上，取消不必再去翻那条随时会消失的执行消息。
 6. **失败时把命令尾巴抄进面板**。收尾面板除了 `❌` 结论，还会带 `🔻 最后输出` 的最后 2–3 行（批量升级最多 6 行），不用上滑去找那条执行消息。取消的项目单独记成 `⚠️ 已中断：`，不算「失败」。
 
-## 目录结构
-
-```
-mtbots/
-├── app.py            # 组装：Core + 路由 + 三个模块 → 一个 Application
-├── config.py         # 全局配置（兼容三家全部旧环境变量名）
-├── acl.py            # 角色 + 模块权限（默认拒绝）
-├── logging_setup.py  # 统一日志与全局脱敏（Token / API Key / 邮箱 / 密码）
-├── text.py           # 转义 / HTML 安全分片 / 进度条 / 时间人性化 / 状态符号
-├── store.py          # 原子写 + 0600 的统一 JSON 存储
-├── panels.py         # 单会话单面板 + 面包屑 + 🏠 返回 + 两步确认 + 回调载荷表
-├── jobs.py           # 🧰 任务中心
-├── menu.py           # 合并命令菜单（模块只提交片段，禁止各自 setMyCommands）
-├── core.py           # Core 容器 + ModuleSpec（模块唯一对接口）
-├── router.py         # 首页 / 面包屑路由 / 冲突命令消歧 / 帮助 / 兜底救援
-└── features/
-    ├── docker/       # 🐳 原 LDMG：compose 扫描 / 升级 / 清理 / 进度流
-    ├── litepan/      # 🎬 原 LitePan：发现 / 规则 / 触发 / 回执轮询（同步 HTTP → to_thread）
-    └── cline/        # 🤖 原 ClinePass：Key 存储 / 额度接口 / 面板渲染
-
-仓库根：
-├── Dockerfile / docker-compose.yml / .dockerignore   # 镜像与部署（非 root、只读根、自带 docker CLI）
-├── .github/workflows/docker.yml                      # CI：跑测试 + 构建 amd64/arm64 镜像推 GHCR
-├── Makefile                                          # make check / health / test / run / list
-├── scripts/                                          # setup-remote-host.sh：一键接入远端主机（交互向导）
-├── docs/                                             # 设计稿、施工契约（porting-contract）、合并报告
-│   └── examples/                                     # 多主机：主机清单样例、远端守卫脚本、authorized_keys 样例
-└── tests/                                            # 393 个 stdlib unittest 用例
-```
-
-## 配置
-
-一份 `.env` 管三个模块，**三家旧变量名全部兼容**：
-
-| 类别 | 变量 | 说明 |
-|---|---|---|
-| Telegram | `MTBOTS_BOT_TOKEN` / `TELEGRAM_BOT_TOKEN` / `BOT_TOKEN` / `TG_BOT_TOKEN` | 四选一，**只允许一个实例在轮询** |
-| 白名单 | `ALLOWED_USER_IDS`、`TG_ALLOWED_IDS` | 取并集；**默认拒绝**（留空 = 谁都不能用） |
-| 模块 | `MTBOTS_MODULES` | 默认 `docker,litepan,cline`，可单独下线某个模块 |
-| 角色 | `MTBOTS_ROLES=123:owner,456:user` | 默认白名单内全部 `owner`；`docker` 默认只给 owner/admin |
-| 数据 | `DATA_DIR`、`CONFIG_FILE`、`LITEPAN_USERS_FILE`、`LOG_DIR` | 默认 `data/`（`config.json` + `litepan-users.json` + `logs/`，均 0600/原子写） |
-| 🐳 | `PAGE_SIZE`、`COMMAND_TIMEOUT`、`PROJECTS_CACHE_TTL` | 面板分页、单命令超时、扫描缓存 |
-| 🎬 | `LITEPAN_URL`、`LITEPAN_API_KEY`、`DRIVES`、`LITEPAN_ADMIN_USER/PASSWORD`、`LITEPAN_MENU_BUDGET` | 单用户模式；多用户请用 `data/litepan-users.json`（字段名与旧版一致） |
-| 🤖 | `CLINEPASS_API_BASE`、`MAX_KEYS_PER_USER`、`STATUS_COOLDOWN`、`DEMO_MODE`、`SHOW_IDENTITY` | 与旧版一致 |
-
-自检：
-
-```bash
-python3 -m mtbots --check     # 配置 + 三个模块的静态自检
-python3 -m mtbots --health    # 额外探测 docker compose / LitePan 连通性 / Cline 存储可写
-python3 -m mtbots --list      # 列出已启用模块
-```
-
-## 从旧三个 Bot 迁移
-
-1. 旧 `.env` 可以基本原样搬（变量名全部兼容），白名单取并集；
-2. `ClinePass-TG-Bot/config.json` → `data/config.json`（Key 直接可用，原子写 + 0600 不变）；
-3. `LitePan-TGBot/users.json` → `data/litepan-users.json`（`chat_ids`/`litepan_url`/`api_key`/`drives`/admin 字段名不变）；
-4. `docker compose up -d --build`，用**测试 token** 并行验证 `--check` / `/start` / 三个模块各一条命令；
-5. 确认无误后换正式 token，停掉旧三个容器（避免 409 抢占）。
-
-回滚：把旧容器和旧 token 起回来即可，`data/` 两边互不影响。
-
-## 安全红线（合并后的默认姿态）
-
-1. **默认拒绝**：白名单为空时谁都不能用（旧的"ClinePass 白名单留空 = 所有人可用"已被移除）。
-2. **统一脱敏**：`redact()` + `RedactingFilter` 覆盖所有 handler 出口（Bot Token、`sk_`/`lpk_` Key、邮箱、管理员密码）；
-   API Key 只在 `data/config.json`（0600、原子写），并且 `addkey` 会先撤回含明文 Key 的消息。
-3. **Docker 特权集中在一个模块**：`docker.sock` 只被 `features/docker` 使用并受 ACL 限制（`docker` 默认只给 owner/admin）；
-   想进一步收窄可换 `docker-socket-proxy`（主进程只发 HTTP，见设计稿 §6）。
-4. **密钥渲染带 user_id**：Cline 面板只渲染调用者自己的 Key；LitePan 按 `chat_id` 绑定实例，不串台。
-5. **破坏性操作两步确认**：确认按钮绑定发起人 + 60 秒过期（`PanelManager.ask_confirm/validate_confirm`）。
-6. **非 root + 只读根文件系统**（compose 已配置 `read_only` / `no-new-privileges`），只有 `data/` 与挂载的 compose 目录可写。
-7. **远端主机不给 bot 任何端口或 socket**：只放一把被 `authorized_keys` 强制命令收窄的 ssh key——
-   守卫把这条 key 限定在「MTBots 会用到的那几条 docker 命令」上，即使 bot 主机被拿下也拿不到远端 shell（见「管理多台服务器」）。
-8. **多主机回调只认配置里的 host id**：面板里的主机名来自 `data/docker-hosts.json`，伪造的 id 会被拒并记日志，绝不会拿去拼命令。
-
-## 测试
-
-```bash
-# 需要 python-telegram-bot。仓库约定的本地依赖目录是 .vendor/（已 gitignore）；
-# 如果机器上没有 pip，可以这样引导一份：
-#   curl -fsSL -o /tmp/pip.pyz https://bootstrap.pypa.io/pip/pip.pyz
-#   python3 /tmp/pip.pyz install --target ./.vendor -r requirements.txt
-
-make test          # = PYTHONPATH=./.vendor:. python3 -m unittest discover -s tests -t . -v
-make check
-```
-
-测试全部是 stdlib `unittest`、不联网也不碰真实 Telegram/Docker（Docker 用例还会把
-`subprocess` / `create_subprocess_exec` 换成抛异常的桩做反证）。当前 **393 个用例全绿**：
-
-| 文件 | 用例 | 覆盖 |
-|---|---|---|
-| `tests/test_core.py` | 70 | 文本分片（HTML 标签闭合）、`safe_html` 出口转义、`SafeBot` 解析失败降级、ACL 默认拒绝、存储原子写/0600/损坏分类、任务中心（运行中显示最后一行输出、终态不再翻转）与收尾卡片文案、跨模块入口按钮的取舍（启用/权限/排不下）、**命令菜单的作用域规则（私聊按权限裁剪 / 群取全量 / 空片段不下发）**、面板唯一与两步确认、菜单去重与作用域、配置兼容、日志脱敏（含 exc_info 的 traceback）、路由消歧与兜底救援 |
-| `tests/test_docker_module.py` | 76 | 项目排序/分页、pull 噪音过滤、清理候选、回调载荷、模块装配、**扫描失败诊断（实测 socket GID、未挂载目录的公共挂载点、缺命令）**、执行消息收尾（成功即删、失败必留、结果回传）、失败尾部输出与进度键盘的中断入口、**多主机（主机清单校验 / ssh 包装与引号 / 逐主机扫描与提示 / 退出码映射 / 只认配置内的 host id）** |
-| `tests/test_litepan_module.py` | 59 | slug 构建（拼音/限长/去重）、users.json 校验、发现解析与缓存、菜单预算、触发与回执 |
-| `tests/test_setup_script.py` | 14 | 两个接入脚本：ssh/scp 打桩跑完整向导流程（主机清单幂等合并 / `command=` 守卫行 / create 模式驱动远端脚本 / dry-run 不落地 / 非法 id 被拒），远端准备脚本（dry-run、参数校验、真跑时守卫 0755 + authorized_keys 0600 + 幂等 + 别人的 key 不动）、curl 模式（项目根取当前目录、不读 stdin、按 `--ref` 下载配套脚本） |
-| `tests/test_cline_module.py` | 140 | 额度解析/渲染、Key 掩码与指纹、别名校验、存储读写与自愈、默认拒绝 |
-| `tests/test_integration.py` | 34 | 三个真实模块一起装配、命令不重复、菜单合并、`--check` 离线可跑，**真 `telegram.Update` 走 PTB dispatcher 的端到端用例**（不重复执行、全角命令可救援、下线模块的按钮有反馈、点按钮原地改同一条面板、**所有面板文案都过一遍 Telegram HTML 合法性校验**），多主机装配用例（按主机分组、单主机无主机标题、伪造 host id 被拒且不执行、`/upgrade` 编号与面板一致、状态与清理按主机），以及**收尾只留一条消息**（批量升级不再推卡片、执行消息带 `delete_on_success`、收尾面板带跨模块入口、`🔙 返回列表` 回原页、失败抄尾部输出、进度面板可中断、最后一步取消判为取消） |
-
-## 管理多台服务器（多主机，v1.1.0+）
+## 管理多台服务器（多主机）
 
 一个 MTBots 同时管理**本机 + 若干远端服务器**上的 Compose 项目：列表、详情、升级（整项目 / 单服务 / 批量）、镜像清理、`/d_status`、`--health` 全部覆盖。
 
 > **不配这一节的文件时，行为与以前完全一致**：只有一台「本机」，面板上没有主机字样，也不会执行任何 ssh。
 > 远端是**可选能力**，随时可以加、也可以删（删掉配置文件就回到单机）。
 
-### 一键接入（推荐）
-
-远端那侧要做的所有事（建用户、加 docker 组、修家目录权限、装守卫、写 `authorized_keys`）都收在一个脚本里，
-bot 这侧的向导会自动驱动它，并顺手把主机清单写好、链路验证过：
+### 一键接入：bot 侧一条命令
 
 ```bash
-cd /mbots
-make add-host          # = docker compose exec mtbots sh /app/scripts/setup-remote-host.sh
+cd /mbots && make add-host
 ```
 
-它会问你几件事（都有默认值，直接回车也行）：
+就这一句，**参数全都由脚本在跑的过程中问**（每一问都有默认值，直接回车也行）：
 
-| 问题 | 说明 |
+| 脚本会问 | 说明 |
 |---|---|
 | 远端 IP 或域名 | 例如 `10.0.0.5` |
-| 远端准备方式 | `1` 复用已有账号（它已经能用 docker）；`2` 新建专用用户（更干净，需要一个能 sudo 的登录账号） |
+| 远端准备方式 | `1` 复用已有账号（它已经能用 docker）；`2` 新建专用用户（需要一个能 sudo 的登录账号） |
 | 账号 | 方式 2 会问「要创建的专用用户名」（默认 `mtbots`）和「用哪个账号登录做初始化」（默认 `root`） |
-| 主机 id / 显示名 | 面板与回调里用的短名（默认从地址推导），例如 `vps` / `Oracle 东京` |
-| 路径白名单 | 可选，例如 `/opt`（只允许管理这个前缀下的项目） |
+| 主机 id / 显示名 | 面板里用的短名（默认从地址推导），例如 `vps` / `Oracle 东京` |
+| 路径白名单 | 可留空（= 不限） |
 
-然后它会：
+它随后自动做完这些：生成/复用 `data/ssh/id_ed25519`（属主交给容器用户 `10001`）→ 驱动远端准备 →
+验证 `ssh → 守卫 → docker compose version` → 按 id **合并**写进 `data/docker-hosts.json` → 问你要不要重建容器。
 
-1. 生成 `data/ssh/id_ed25519`（已存在就复用），并把属主交给容器用户 `10001`；
-2. 方式 2：把公钥、守卫脚本、远端准备脚本打包上传，用 `sudo` 在远端一次跑完「建用户 + 加组 + 家目录权限 + 装守卫 + 写 `authorized_keys`」（sudo 要密码时会就地提示输入）；
-   方式 1：用 `ssh-copy-id` 装公钥（提示输入远端密码），再把守卫装到 `~/.local/bin`（有免密 sudo 就装 `/usr/local/bin`）；
-3. 验证 `ssh → 守卫 → docker compose version` 整条链路；
-4. 把主机**合并**写进 `data/docker-hosts.json`（按 id 幂等，已有清单不会被覆盖；会自动带上 `local`）；
-5. 最后问你要不要直接 `docker compose up -d --force-recreate`。
-
-重复执行安全：同一台主机再跑一次只会更新那一条，同一把 key 在 `authorized_keys` 里始终只有一行（改前自动备份 `authorized_keys.bak.<时间戳>`）。
-
-**没克隆仓库 / 想直接跑**的话，curl 一行也行（在项目根执行）：
+没克隆仓库、想直接跑最新脚本也行（**在项目根的宿主机上**跑；容器里没有 curl）：
 
 ```bash
 cd /mbots
-curl -fsSL https://raw.githubusercontent.com/MbAIGC/MTBots/v1.2.2/scripts/setup-remote-host.sh \
-  | sh -s -- --mode create --host 10.0.0.5 --login-user root --user mtbots --id vps --label "Oracle 东京" --roots /opt
+curl -fsSL https://raw.githubusercontent.com/MbAIGC/MTBots/v1.3.0/scripts/setup-remote-host.sh | sh
 ```
 
-* 这种模式下「项目根」= **当前目录**（所以先 `cd /mbots`；也可 `--project-root /mbots` 指定）；
-* 守卫与远端准备脚本不在本地时会**按 ref 自动下载**：`--ref` 默认取当前 MTBots 版本（如 `v1.2.2`），
-  取不到就用 `main`；换仓库用 `--repo OWNER/REPO`；
-* 交互提问读 `/dev/tty`，所以 `curl | sh` 也能正常问（管道不会把脚本正文吃掉）；
-  没有终端时全部走默认值，请把参数写全 + 加 `--yes`；
-* 这一行在**宿主机**上跑（要用宿主机的 curl；镜像里没装 curl/wget）——容器里本来就有这两个脚本，
-  所以 `make add-host` 那条路不需要下载，也不需要宿主机有 ssh 客户端。
-* url 里的版本号建议跟你在跑的镜像一致（`docker compose exec mtbots python -m mtbots --version`）。
-  版本探测不到时会退回 `main` 并给出警告——`main` 上的守卫白名单可能比你在跑的旧镜像新，
-  这种情况请显式写 `--ref v1.2.2`。
+这种模式下「项目根」= 当前目录；守卫与远端脚本不在本地时会**按 ref 自动下载**（`--ref` 默认取当前 MTBots 版本，
+取不到用 `main` 并给出警告）；交互输入读 `/dev/tty`，所以管道不会把脚本正文吃掉。
 
-不想交互也可以一行到底：
+### 一键接入：远端侧一条命令
+
+远端那台**没法让 bot 直接 ssh 进去**（要先用密码、或者得从跳板机进）时，在**远端主机**上以 root 跑这一条就够——
+脚本会自己下载守卫、建用户、加 `docker` 组、修家目录权限、写 `authorized_keys`：
 
 ```bash
-# 新建专用用户（远端 root 或能 sudo 的账号 + 密码登录；-y 表示不再确认，最后仍需你重建容器）
-docker compose exec mtbots sh /app/scripts/setup-remote-host.sh \
-  --mode create --host 10.0.0.5 --login-user root --user mtbots --id vps --label "Oracle 东京" --roots /opt -y
-
-# 复用已有账号
-docker compose exec mtbots sh /app/scripts/setup-remote-host.sh \
-  --mode existing --host 10.0.0.5 --user admin --id nas2 -y
+# 在远端主机上（root / sudo）。公钥 = MTBots 那台 ./data/ssh/id_ed25519.pub 的内容
+curl -fsSL https://raw.githubusercontent.com/MbAIGC/MTBots/v1.3.0/docs/examples/mtbots-remote-setup.sh \
+  | sudo sh -s -- --user mtbots \
+      --guard-url https://raw.githubusercontent.com/MbAIGC/MTBots/v1.3.0/docs/examples/mtbots-compose-guard.sh \
+      --pubkey-line 'ssh-ed25519 AAAAC3Nza... mtbots@bot'
 ```
 
-**不想让向导 ssh 出去**（比如远端只能从别的跳板进）就这么办：
+记不住这条？让脚本替你拼（会自动带上你本机的公钥）：
 
 ```bash
-make remote-setup      # 打印 3 条命令：scp 公钥 / scp 守卫 / ssh 远端 sudo sh -s -- …
+cd /mbots && make remote-setup      # 打印上面那条，复制粘贴到远端跑
 ```
 
-那 3 条里的第 3 条会把 [`docs/examples/mtbots-remote-setup.sh`](docs/examples/mtbots-remote-setup.sh) 直接喂给远端的 `sudo sh`，一次跑完远端那串；之后回到 bot 这边只差写清单（`make add-host` 或手写）。
+远端跑完，回 bot 这边把主机写进清单（向导发现密钥已可用，就只写清单 + 验证）：
 
-> 脚本要求镜像 **v1.2.0+**（`scripts/` 与 `docs/examples/` 在镜像里）。老镜像先 `docker compose pull && docker compose up -d`。
-> 下面 §0–§10 的手动步骤**完整保留**，脚本做的和手动做的完全等价；想搞清楚每一步在干什么，或者脚本在你环境里跑不通，就照手动步骤来。
+```bash
+cd /mbots && make add-host          # 方式选 1「复用已有账号」，账号填 mtbots
+```
+
+两个脚本都是**幂等**的：重复跑只会更新自己那一条；`authorized_keys` 里同一把 key 永远只有一行，
+改动前自动备份 `authorized_keys.bak.<时间戳>`，**别人的 key 不动**。
+
+### 非交互（CI / 批量，可选）
+
+参数给全了就不再提问（`--yes` 省掉最后的确认；重启仍需显式 `--restart`）：
+
+```bash
+docker compose exec mtbots sh /app/scripts/setup-remote-host.sh \
+  --mode create --host 10.0.0.5 --login-user root --user mtbots --id vps --yes
+```
+
+不想用脚本：下面 §0–§10 是**完整手动步骤**，脚本做的与手动完全等价；脚本在你环境里跑不通时就照手动来。
 
 ### 0. 先讲清楚它到底怎么跑（为什么是 SSH）
 
@@ -543,6 +437,107 @@ docker compose exec mtbots python -m mtbots --health | grep 🐳
 * **回滚**：删掉 `/mbots/data/docker-hosts.json` → `docker compose up -d --force-recreate`，立刻回到单机；密钥留着不影响（以后想再加不用重新生成）。
 
 相关文件：[`scripts/setup-remote-host.sh`](scripts/setup-remote-host.sh)（bot 侧向导，`make add-host`）、[`docs/examples/mtbots-remote-setup.sh`](docs/examples/mtbots-remote-setup.sh)（远端一次性准备）、[`docs/examples/mtbots-compose-guard.sh`](docs/examples/mtbots-compose-guard.sh)（守卫脚本）、[`docs/examples/docker-hosts.json`](docs/examples/docker-hosts.json)（清单样例）、[`docs/examples/authorized_keys.sample`](docs/examples/authorized_keys.sample)（authorized_keys 样例）、[`docs/docker-multi-host-design.md`](docs/docker-multi-host-design.md)（设计与落地清单）。
+
+## 目录结构
+
+```
+mtbots/
+├── app.py            # 组装：Core + 路由 + 三个模块 → 一个 Application
+├── config.py         # 全局配置（兼容三家全部旧环境变量名）
+├── acl.py            # 角色 + 模块权限（默认拒绝）
+├── logging_setup.py  # 统一日志与全局脱敏（Token / API Key / 邮箱 / 密码）
+├── text.py           # 转义 / HTML 安全分片 / 进度条 / 时间人性化 / 状态符号
+├── store.py          # 原子写 + 0600 的统一 JSON 存储
+├── panels.py         # 单会话单面板 + 面包屑 + 🏠 返回 + 两步确认 + 回调载荷表
+├── jobs.py           # 🧰 任务中心
+├── menu.py           # 合并命令菜单（模块只提交片段，禁止各自 setMyCommands）
+├── core.py           # Core 容器 + ModuleSpec（模块唯一对接口）
+├── router.py         # 首页 / 面包屑路由 / 冲突命令消歧 / 帮助 / 兜底救援
+└── features/
+    ├── docker/       # 🐳 原 LDMG：compose 扫描 / 升级 / 清理 / 进度流
+    ├── litepan/      # 🎬 原 LitePan：发现 / 规则 / 触发 / 回执轮询（同步 HTTP → to_thread）
+    └── cline/        # 🤖 原 ClinePass：Key 存储 / 额度接口 / 面板渲染
+
+仓库根：
+├── Dockerfile / docker-compose.yml / .dockerignore   # 镜像与部署（非 root、只读根、自带 docker CLI）
+├── .github/workflows/docker.yml                      # CI：跑测试 + 构建 amd64/arm64 镜像推 GHCR
+├── Makefile                                          # make check / health / test / run / list
+├── scripts/                                          # setup-remote-host.sh：一键接入远端主机（交互向导）
+├── docs/                                             # 设计稿、施工契约（porting-contract）、合并报告
+│   └── examples/                                     # 多主机：主机清单样例、远端守卫脚本、authorized_keys 样例
+└── tests/                                            # 396 个 stdlib unittest 用例
+```
+
+## 配置
+
+一份 `.env` 管三个模块，**三家旧变量名全部兼容**：
+
+| 类别 | 变量 | 说明 |
+|---|---|---|
+| Telegram | `MTBOTS_BOT_TOKEN` / `TELEGRAM_BOT_TOKEN` / `BOT_TOKEN` / `TG_BOT_TOKEN` | 四选一，**只允许一个实例在轮询** |
+| 白名单 | `ALLOWED_USER_IDS`、`TG_ALLOWED_IDS` | 取并集；**默认拒绝**（留空 = 谁都不能用） |
+| 模块 | `MTBOTS_MODULES` | 默认 `docker,litepan,cline`，可单独下线某个模块 |
+| 角色 | `MTBOTS_ROLES=123:owner,456:user` | 默认白名单内全部 `owner`；`docker` 默认只给 owner/admin |
+| 数据 | `DATA_DIR`、`CONFIG_FILE`、`LITEPAN_USERS_FILE`、`LOG_DIR` | 默认 `data/`（`config.json` + `litepan-users.json` + `logs/`，均 0600/原子写） |
+| 🐳 | `PAGE_SIZE`、`COMMAND_TIMEOUT`、`PROJECTS_CACHE_TTL` | 面板分页、单命令超时、扫描缓存 |
+| 🎬 | `LITEPAN_URL`、`LITEPAN_API_KEY`、`DRIVES`、`LITEPAN_ADMIN_USER/PASSWORD`、`LITEPAN_MENU_BUDGET` | 单用户模式；多用户请用 `data/litepan-users.json`（字段名与旧版一致） |
+| 🤖 | `CLINEPASS_API_BASE`、`MAX_KEYS_PER_USER`、`STATUS_COOLDOWN`、`DEMO_MODE`、`SHOW_IDENTITY` | 与旧版一致 |
+
+自检：
+
+```bash
+python3 -m mtbots --check     # 配置 + 三个模块的静态自检
+python3 -m mtbots --health    # 额外探测 docker compose / LitePan 连通性 / Cline 存储可写
+python3 -m mtbots --list      # 列出已启用模块
+```
+
+## 从旧三个 Bot 迁移
+
+1. 旧 `.env` 可以基本原样搬（变量名全部兼容），白名单取并集；
+2. `ClinePass-TG-Bot/config.json` → `data/config.json`（Key 直接可用，原子写 + 0600 不变）；
+3. `LitePan-TGBot/users.json` → `data/litepan-users.json`（`chat_ids`/`litepan_url`/`api_key`/`drives`/admin 字段名不变）；
+4. `docker compose up -d --build`，用**测试 token** 并行验证 `--check` / `/start` / 三个模块各一条命令；
+5. 确认无误后换正式 token，停掉旧三个容器（避免 409 抢占）。
+
+回滚：把旧容器和旧 token 起回来即可，`data/` 两边互不影响。
+
+## 安全红线（合并后的默认姿态）
+
+1. **默认拒绝**：白名单为空时谁都不能用（旧的"ClinePass 白名单留空 = 所有人可用"已被移除）。
+2. **统一脱敏**：`redact()` + `RedactingFilter` 覆盖所有 handler 出口（Bot Token、`sk_`/`lpk_` Key、邮箱、管理员密码）；
+   API Key 只在 `data/config.json`（0600、原子写），并且 `addkey` 会先撤回含明文 Key 的消息。
+3. **Docker 特权集中在一个模块**：`docker.sock` 只被 `features/docker` 使用并受 ACL 限制（`docker` 默认只给 owner/admin）；
+   想进一步收窄可换 `docker-socket-proxy`（主进程只发 HTTP，见设计稿 §6）。
+4. **密钥渲染带 user_id**：Cline 面板只渲染调用者自己的 Key；LitePan 按 `chat_id` 绑定实例，不串台。
+5. **破坏性操作两步确认**：确认按钮绑定发起人 + 60 秒过期（`PanelManager.ask_confirm/validate_confirm`）。
+6. **非 root + 只读根文件系统**（compose 已配置 `read_only` / `no-new-privileges`），只有 `data/` 与挂载的 compose 目录可写。
+7. **远端主机不给 bot 任何端口或 socket**：只放一把被 `authorized_keys` 强制命令收窄的 ssh key——
+   守卫把这条 key 限定在「MTBots 会用到的那几条 docker 命令」上，即使 bot 主机被拿下也拿不到远端 shell（见「管理多台服务器」）。
+8. **多主机回调只认配置里的 host id**：面板里的主机名来自 `data/docker-hosts.json`，伪造的 id 会被拒并记日志，绝不会拿去拼命令。
+
+## 测试
+
+```bash
+# 需要 python-telegram-bot。仓库约定的本地依赖目录是 .vendor/（已 gitignore）；
+# 如果机器上没有 pip，可以这样引导一份：
+#   curl -fsSL -o /tmp/pip.pyz https://bootstrap.pypa.io/pip/pip.pyz
+#   python3 /tmp/pip.pyz install --target ./.vendor -r requirements.txt
+
+make test          # = PYTHONPATH=./.vendor:. python3 -m unittest discover -s tests -t . -v
+make check
+```
+
+测试全部是 stdlib `unittest`、不联网也不碰真实 Telegram/Docker（Docker 用例还会把
+`subprocess` / `create_subprocess_exec` 换成抛异常的桩做反证）。当前 **396 个用例全绿**：
+
+| 文件 | 用例 | 覆盖 |
+|---|---|---|
+| `tests/test_core.py` | 70 | 文本分片（HTML 标签闭合）、`safe_html` 出口转义、`SafeBot` 解析失败降级、ACL 默认拒绝、存储原子写/0600/损坏分类、任务中心（运行中显示最后一行输出、终态不再翻转）与收尾卡片文案、跨模块入口按钮的取舍（启用/权限/排不下）、**命令菜单的作用域规则（私聊按权限裁剪 / 群取全量 / 空片段不下发）**、面板唯一与两步确认、菜单去重与作用域、配置兼容、日志脱敏（含 exc_info 的 traceback）、路由消歧与兜底救援 |
+| `tests/test_docker_module.py` | 76 | 项目排序/分页、pull 噪音过滤、清理候选、回调载荷、模块装配、**扫描失败诊断（实测 socket GID、未挂载目录的公共挂载点、缺命令）**、执行消息收尾（成功即删、失败必留、结果回传）、失败尾部输出与进度键盘的中断入口、**多主机（主机清单校验 / ssh 包装与引号 / 逐主机扫描与提示 / 退出码映射 / 只认配置内的 host id）** |
+| `tests/test_litepan_module.py` | 59 | slug 构建（拼音/限长/去重）、users.json 校验、发现解析与缓存、菜单预算、触发与回执 |
+| `tests/test_setup_script.py` | 17 | 两个接入脚本：ssh/scp 打桩跑完整向导流程（主机清单幂等合并 / `command=` 守卫行 / create 模式驱动远端脚本 / dry-run 不落地 / 非法 id 被拒），远端准备脚本（dry-run、参数校验、真跑时守卫 0755 + authorized_keys 0600 + 幂等 + 别人的 key 不动）、curl 模式（项目根取当前目录、不读 stdin、按 `--ref` 下载配套脚本）、远端侧 `--pubkey-line`/`--guard-url`（dry-run 离线、真跑写入一致） |
+| `tests/test_cline_module.py` | 140 | 额度解析/渲染、Key 掩码与指纹、别名校验、存储读写与自愈、默认拒绝 |
+| `tests/test_integration.py` | 34 | 三个真实模块一起装配、命令不重复、菜单合并、`--check` 离线可跑，**真 `telegram.Update` 走 PTB dispatcher 的端到端用例**（不重复执行、全角命令可救援、下线模块的按钮有反馈、点按钮原地改同一条面板、**所有面板文案都过一遍 Telegram HTML 合法性校验**），多主机装配用例（按主机分组、单主机无主机标题、伪造 host id 被拒且不执行、`/upgrade` 编号与面板一致、状态与清理按主机），以及**收尾只留一条消息**（批量升级不再推卡片、执行消息带 `delete_on_success`、收尾面板带跨模块入口、`🔙 返回列表` 回原页、失败抄尾部输出、进度面板可中断、最后一步取消判为取消） |
 
 ## 与原三个 Bot 的差异（有意为之）
 

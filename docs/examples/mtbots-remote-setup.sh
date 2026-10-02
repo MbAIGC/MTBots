@@ -9,15 +9,19 @@
 #      command="<守卫>",restrict <公钥>   （幂等：同一把 key 只保留一行，改前自动备份）
 #   5) 顺带验证：sudo -u <user> docker compose version
 #
-# 手动用法（把公钥与守卫先传到远端）：
-#   scp ./data/ssh/id_ed25519.pub 远端:/tmp/mtbots.pub
-#   scp docs/examples/mtbots-compose-guard.sh 远端:/tmp/guard.sh
-#   ssh 远端 'sudo sh /tmp/mtbots-remote-setup.sh --user mtbots --pubkey /tmp/mtbots.pub --guard /tmp/guard.sh'
+# 一行用法（**在远端主机上** root/sudo 跑；守卫从 GitHub 自己拉，公钥用字符串给）：
+#   curl -fsSL https://raw.githubusercontent.com/MbAIGC/MTBots/v1.3.0/docs/examples/mtbots-remote-setup.sh \
+#     | sudo sh -s -- --user mtbots \
+#         --guard-url https://raw.githubusercontent.com/MbAIGC/MTBots/v1.3.0/docs/examples/mtbots-compose-guard.sh \
+#         --pubkey-line 'ssh-ed25519 AAAAC3Nza... mtbots@bot'
 #
-# 也可以单独用（不建用户，只装公钥/守卫）：
-#   sudo sh mtbots-remote-setup.sh --user $USER --pubkey /tmp/mtbots.pub --guard /tmp/guard.sh --no-useradd
+# 手动用法（公钥/守卫已经在远端）：
+#   sudo sh mtbots-remote-setup.sh --user mtbots --pubkey /tmp/mtbots.pub --guard /tmp/guard.sh
 #
-# 通用做法是让 bot 那边的向导自动调用它：
+# 不建用户、只装公钥/守卫：
+#   sudo sh mtbots-remote-setup.sh --user $USER --pubkey-line "$(cat /tmp/mtbots.pub)" --no-useradd
+#
+# 通用做法是让 bot 那边的向导自动调用它（它会自己把公钥/守卫送过来）：
 #   docker compose exec mtbots sh /app/scripts/setup-remote-host.sh
 
 set -eu
@@ -28,6 +32,9 @@ PUBKEY=""
 GUARD=""
 GUARD_DEST=/usr/local/bin
 GUARD_NAME=mtbots-compose-guard
+PUBKEY_LINE=""
+PUBKEY_URL=""
+GUARD_URL=""
 DO_USERADD=1
 DRY_RUN=0
 DOCKER_GROUP=docker
@@ -37,8 +44,11 @@ usage() {
 用法: sudo sh mtbots-remote-setup.sh --pubkey FILE [选项]
 
   --user NAME        要授权的远端账号（默认：当前登录用户）
-  --pubkey FILE      MTBots 的公钥（.pub，必填）
+  --pubkey FILE      MTBots 的公钥文件（.pub）
+  --pubkey-line STR  直接给公钥内容（一行字符串；curl|sh 场景用这个）
+  --pubkey-url URL   从 URL 拉公钥（例如你放在 Gist/网盘上的 id_ed25519.pub）
   --guard FILE       守卫脚本（默认不装；装了才写 command="…",restrict）
+  --guard-url URL    守卫脚本从 URL 拉（curl|sh 场景用这个，脚本自己下载）
   --guard-dest DIR   守卫安装目录（默认 /usr/local/bin）
   --no-useradd       不建用户、不加组，只写 authorized_keys（账号已存在）
   --home DIR         指定家目录（默认按 getent 解析；NAS 上家目录不在 /home 时有用）
@@ -56,7 +66,10 @@ while [ $# -gt 0 ]; do
         --user) TARGET_USER=${2:-}; shift 2 ;;
         --home) HOME_DIR=${2:-}; shift 2 ;;
         --pubkey) PUBKEY=${2:-}; shift 2 ;;
+        --pubkey-line) PUBKEY_LINE=${2:-}; shift 2 ;;
+        --pubkey-url) PUBKEY_URL=${2:-}; shift 2 ;;
         --guard) GUARD=${2:-}; shift 2 ;;
+        --guard-url) GUARD_URL=${2:-}; shift 2 ;;
         --guard-dest) GUARD_DEST=${2:-}; shift 2 ;;
         --no-useradd) DO_USERADD=0; shift ;;
         --dry-run) DRY_RUN=1; shift ;;
@@ -65,8 +78,40 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-[ -n "$PUBKEY" ] || die "必须给 --pubkey（MTBots 机上的 data/ssh/id_ed25519.pub）"
+fetch_url() {
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL "$1" -o "$2" || die "下载失败：$1"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -qO "$2" "$1" || die "下载失败：$1"
+    else
+        die "远端没有 curl/wget，拉不到 $1；改成 --pubkey/--guard 先把文件传过来"
+    fi
+    say "  已下载：$1"
+}
+
+# 公钥三种来源：文件 > 字符串 > URL
+if [ -z "$PUBKEY" ] && [ -z "$PUBKEY_LINE" ] && [ -n "$PUBKEY_URL" ] && [ "$DRY_RUN" != 1 ]; then
+    PUBKEY=${TMPDIR:-/tmp}/mtbots-pubkey.$$
+    fetch_url "$PUBKEY_URL" "$PUBKEY"
+fi
+if [ -z "$PUBKEY" ] && [ -n "$PUBKEY_LINE" ]; then
+    PUBKEY=${TMPDIR:-/tmp}/mtbots-pubkey-line.$$
+    printf '%s\n' "$PUBKEY_LINE" > "$PUBKEY"
+fi
+[ -n "$PUBKEY" ] || die "得给一个公钥来源：--pubkey FILE / --pubkey-line 'ssh-ed25519 AAAA…' / --pubkey-url URL"
 [ -f "$PUBKEY" ] || die "公钥文件不存在：$PUBKEY"
+
+# 守卫也可以从 URL 拉（dry-run 只说明，不联网）
+GUARD_FROM_URL=0
+if [ -z "$GUARD" ] && [ -n "$GUARD_URL" ]; then
+    GUARD_FROM_URL=1
+    if [ "$DRY_RUN" = 1 ]; then
+        say "（dry-run）守卫将从 $GUARD_URL 下载到 $GUARD_DEST/$GUARD_NAME"
+    else
+        GUARD=${TMPDIR:-/tmp}/mtbots-guard.$$
+        fetch_url "$GUARD_URL" "$GUARD"
+    fi
+fi
 
 if [ "$DRY_RUN" != 1 ]; then
     [ "$(id -u)" = "0" ] || die "请用 root 运行（sudo sh $0 …）"
@@ -117,8 +162,10 @@ fi
 
 # ---------- 3. 守卫脚本 ----------
 GUARD_REMOTE=""
-if [ -n "$GUARD" ]; then
-    [ -f "$GUARD" ] || die "守卫脚本不存在：$GUARD"
+if [ -n "$GUARD" ] || [ "$GUARD_FROM_URL" = 1 ]; then
+    if [ -n "$GUARD" ]; then
+        [ -f "$GUARD" ] || die "守卫脚本不存在：$GUARD"
+    fi
     GUARD_REMOTE=$GUARD_DEST/$GUARD_NAME
     say "→ 安装守卫：$GUARD_REMOTE"
     if [ "$DRY_RUN" = 1 ]; then
@@ -130,7 +177,7 @@ if [ -n "$GUARD" ]; then
         chown root:root "$GUARD_REMOTE" 2>/dev/null || true
     fi
 else
-    warn "没有 --guard：只装公钥、不装守卫。这把 key 等于远端 shell，建议补上守卫。"
+    warn "没有 --guard/--guard-url：只装公钥、不装守卫。这把 key 等于远端 shell，建议补上守卫。"
 fi
 
 # ---------- 4. authorized_keys（幂等） ----------

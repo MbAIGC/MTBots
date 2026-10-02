@@ -2,7 +2,7 @@
 
 > 依据：[three-bots-merge-design.md](three-bots-merge-design.md)（可行性 + 交互设计）、
 > [three-bots-merge-ux.md](three-bots-merge-ux.md)（单人版交互图）、[porting-contract.md](porting-contract.md)（施工契约）。
-> 结果：三个 Bot 已合并为 **一个进程、一个 Python 包 `mtbots`**（Bot 名 MTBots，方案 A：单进程模块化），可运行、可自检、**393 个测试全绿**。
+> 结果：三个 Bot 已合并为 **一个进程、一个 Python 包 `mtbots`**（Bot 名 MTBots，方案 A：单进程模块化），可运行、可自检、**396 个测试全绿**。
 
 ---
 
@@ -55,7 +55,7 @@
 
 ```bash
 cd /root/DSH/MTBots
-PYTHONPATH=./.vendor:. python3 -m unittest discover -s tests -t .   # 393 tests OK
+PYTHONPATH=./.vendor:. python3 -m unittest discover -s tests -t .   # 396 tests OK
 PYTHONPATH=./.vendor:. python3 -m mtbots --check                      # exit 0，离线
 PYTHONPATH=./.vendor:. python3 -m mtbots --health                     # 真实探测（compose / LitePan / Cline 存储）
 ```
@@ -67,7 +67,7 @@ PYTHONPATH=./.vendor:. python3 -m mtbots --health                     # 真实�
 | `tests/test_litepan_module.py` | 59 | OK |
 | `tests/test_cline_module.py` | 140 | OK |
 | `tests/test_integration.py` | 34 | OK（5 个装配 + 13 个真 Update 端到端 + 6 个收尾流程 + 6 个多主机流程 + 2 个 HTML 守卫用例） |
-| **合计** | **393** | **OK（约 9.4s，无网络）** |
+| **合计** | **396** | **OK（约 10s，无网络）** |
 
 端到端用例（`DispatcherTests`）用**真正的 `telegram.Update` + 记录型假 Bot** 跑 PTB 自己的
 `Application.process_update`，因此能抓到装配级事故：
@@ -160,7 +160,7 @@ DOCKER_GID=$(getent group docker | cut -d: -f3) docker compose up -d
 DOCKER_GID=$(getent group docker | cut -d: -f3) docker compose up -d --build
 ```
 
-## 10. 修复记录（线上反馈驱动，v1.0.1 → v1.2.2）
+## 10. 修复记录（线上反馈驱动，v1.0.1 → v1.3.0）
 
 上线后按线上反馈修了七轮，又加了一轮功能（多主机），全部带回归测试（377 个用例）：
 
@@ -177,3 +177,4 @@ DOCKER_GID=$(getent group docker | cut -d: -f3) docker compose up -d --build
 | 想用同一个 bot 管理**其他服务器**上的容器，又不想给远端挂载任何目录 | 原方案（`DOCKER_HOST` + socket-proxy）要求容器内能读到远端 yml：compose 的 yml 由**本地 CLI** 解析，而相对路径（`./data`）会被解析成绝对路径发给远端 daemon，路径不一致时 dockerd 会**静默建一个空目录顶上**；于是还得挂同路径副本 + 做漂移检测 | 改走 **SSH 执行**：`ssh <目标> docker compose -f <远端路径> …`，yml 留在远端由远端 CLI 解析——零挂载、零副本、零漂移；新增 `hosts.py`（清单校验 + 命令包装 + 退出码提示）、逐主机扫描/执行/清理/状态、面板按主机分组、回调只认配置内 host id；镜像加 `openssh-client`，远端只需一个 `docker` 组用户 + 一把公钥，并用 `authorized_keys` 强制命令把 key 收窄到 13 种 compose 命令；测试 347 → 377 |
 | 多主机里「本机项目正常、远端连不上」时面板一片正常 | `scan_hint()` 只在项目列表**为空**时被调用（那是单机时代的写法：空列表才需要解释原因），所以远端故障被主机计数里的一个 `0` 掩盖了 | 面板两种情况下都渲染主机异常 / 未挂载目录提示（列表非空时附在项目下方）；补两条回归用例（远端故障 + 部分目录未挂载），测试 377 → 379 |
 | 手动接远端主机要十几步、容易卡在权限（`tee authorized_keys: Permission denied`） | 手动步骤分散在 README，`authorized_keys` 那步还要 `sudo -u` 才能写，NAS 家目录常常不在 `/home` | 加两个脚本：`scripts/setup-remote-host.sh`（bot 侧交互向导：生成密钥 → 驱动远端准备 → 验证链路 → 幂等合并主机清单 → 可选重启）、`docs/examples/mtbots-remote-setup.sh`（远端一次性跑完：建用户 + docker 组 + 家目录/.ssh 权限 + 装守卫 + 写 authorized_keys，幂等且改前备份）；`make add-host` 一条命令进向导，手动步骤在 README 完整保留；测试 379 → 391 |
+| bot 侧有向导了，但远端那台没法让 bot ssh 进去时还是没招；而且文档里的一行命令参数太多 | 远端准备脚本只能吃「已经传过去的公钥/守卫文件」，README 又把一长串 `--mode/--host/--user/--id/--label/--roots` 当主推写法 | 远端脚本新增 `--pubkey-line`（公钥直接给字符串）、`--pubkey-url`、`--guard-url`（守卫自己从 URL 拉），于是远端一条 `curl … | sudo sh -s -- …` 就能装完；`make remote-setup` 自动拼好这条命令（带上本机公钥）；README 的一键部分改成「命令只一句、参数全由脚本问」，非交互写法降为附注；多主机章节从 README 后半段移到「交互约定」之后；测试 393 → 396 |

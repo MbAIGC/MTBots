@@ -1,5 +1,6 @@
 PY ?= python3
 export PYTHONPATH := $(CURDIR)/.vendor:$(CURDIR)
+VERSION := $(shell $(PY) -c "import mtbots; print(mtbots.__version__)" 2>/dev/null || echo 0.0.0)
 
 .PHONY: help check health test run list add-host remote-setup fmt clean
 
@@ -31,15 +32,17 @@ run:
 add-host:
 	docker compose exec mtbots sh /app/scripts/setup-remote-host.sh
 
-# 不想让向导 ssh 出去时：照这三条在远端把用户/公钥/守卫装好，再回 make add-host 写清单
+# 远端那台自己跑（bot 这边没有能 ssh 过去的账号/root 时用）：打印一条可直接粘贴的命令
+HOST_USER ?= mtbots
+REF ?= v$(VERSION)
+RAW := https://raw.githubusercontent.com/MbAIGC/MTBots/$(REF)
 remote-setup:
-	@echo "把下面 3 条里的 <远端> 换成你的地址；第 1、2 条在 MTBots 这台机器上跑："
-	@echo ""
-	@echo "  scp ./data/ssh/id_ed25519.pub <远端>:/tmp/mtbots.pub"
-	@echo "  scp docs/examples/mtbots-compose-guard.sh <远端>:/tmp/guard.sh"
-	@echo "  ssh <远端> 'sudo sh -s -- --user mtbots --pubkey /tmp/mtbots.pub --guard /tmp/guard.sh' < docs/examples/mtbots-remote-setup.sh"
-	@echo ""
-	@echo "（第 3 条会把脚本喂给远端的 sudo sh，一次跑完：建用户 + docker 组 + 家目录权限 + 装守卫 + 写 authorized_keys）"
+	@pub=$$(cat ./data/ssh/id_ed25519.pub 2>/dev/null || echo 'ssh-ed25519 AAAA…（把 ./data/ssh/id_ed25519.pub 的内容粘到这里）'); \
+	echo "在【远端主机】上以 root 跑这一条（自己下守卫、建用户、加 docker 组、写 authorized_keys）："; \
+	echo ""; \
+	echo "curl -fsSL $(RAW)/docs/examples/mtbots-remote-setup.sh | sudo sh -s -- --user $(HOST_USER) --guard-url $(RAW)/docs/examples/mtbots-compose-guard.sh --pubkey-line '$$pub'"; \
+	echo ""; \
+	echo "（要换账号：make remote-setup HOST_USER=admin；要固定其它版本：make remote-setup REF=v1.3.0）"
 
 clean:
 	find . -name '__pycache__' -type d -prune -exec rm -rf {} +

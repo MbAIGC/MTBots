@@ -330,6 +330,46 @@ class RemoteSetupScriptTest(unittest.TestCase):
     def _ak(self) -> str:
         return (self.home / ".ssh" / "authorized_keys").read_text(encoding="utf-8")
 
+    def test_pubkey_line_and_guard_url_dry_run_is_offline(self):
+        """`curl|sh` 场景：公钥用字符串给、守卫用 URL 给；dry-run 不联网也能看出要装什么。"""
+        pub_line = self.pub.read_text(encoding="utf-8").strip()
+        proc = _run(
+            REMOTE_SETUP,
+            "--user", os.environ.get("USER") or "root",
+            "--home", str(self.home),
+            "--pubkey-line", pub_line,
+            "--guard-url", "https://example.invalid/mtbots-compose-guard.sh",
+            "--guard-dest", str(self.bin),
+            "--no-useradd",
+            "--dry-run",
+            cwd=self.base,
+            env=dict(os.environ),
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("https://example.invalid/mtbots-compose-guard.sh", proc.stdout)
+        self.assertIn('command="%s/mtbots-compose-guard",restrict ssh-ed25519 %s'
+                      % (self.bin, pub_line.split()[1]), proc.stdout)
+        self.assertFalse((self.home / ".ssh").exists())
+
+    def test_missing_pubkey_source_is_rejected(self):
+        proc = _run(REMOTE_SETUP, "--user", "root", "--home", str(self.home), "--dry-run",
+                    cwd=self.base, env=dict(os.environ))
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("公钥", proc.stderr)
+
+    @unittest.skipUnless(os.geteuid() == 0, "写 authorized_keys/chown 需要 root")
+    def test_pubkey_line_writes_the_same_key(self):
+        pub_line = self.pub.read_text(encoding="utf-8").strip()
+        proc = _run(REMOTE_SETUP, "--user", os.environ.get("USER") or "root",
+                    "--home", str(self.home), "--pubkey-line", pub_line,
+                    "--guard", str(GUARD), "--guard-dest", str(self.bin),
+                    "--no-useradd", cwd=self.base, env=dict(os.environ))
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        line = self._ak().strip()
+        # 脚本按「类型 + blob」写入（注释丢掉），与文件来源无关
+        self.assertEqual(line, 'command="%s/mtbots-compose-guard",restrict %s'
+                              % (self.bin, " ".join(pub_line.split()[:2])))
+
     def test_dry_run_prints_plan_without_writing(self):
         proc = self._run("--dry-run")
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
