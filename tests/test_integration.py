@@ -559,6 +559,76 @@ class MultiHostFlowTests(unittest.TestCase):
         self.assertIn("主机：Oracle", text)
         assert_html_valid(self, text)
 
+    def test_empty_remote_host_still_gets_a_section(self):
+        """远端 0 个项目时，面板也要画出它那一段——否则远端在列表里彻底看不见。"""
+        app, core, bot = self._make_app()
+        state = core.data["docker"]
+        local_only = [p for p in state.scan_hook() if p.get("host") == "nas"]
+        state.scan_hook = lambda: list(local_only)
+
+        self._drive(app, real_update(bot, text="/d_list"))
+        text = bot.last_text
+        self.assertIn("nas/media", text)
+        self.assertIn("🖥 <b>Oracle</b>", text, "0 个项目的远端主机也要有标题")
+        self.assertIn("未检测到 Compose 项目", text)
+        assert_html_valid(self, text)
+
+    def test_broken_remote_host_section_shows_the_reason(self):
+        app, core, bot = self._make_app()
+        state = core.data["docker"]
+        local_only = [p for p in state.scan_hook() if p.get("host") == "nas"]
+
+        def hook():
+            state.host_errors = {"vps": "SSH 连不上或认证失败（检查网络、端口、私钥、known_hosts）"}
+            return list(local_only)
+
+        state.scan_hook = hook
+        self._drive(app, real_update(bot, text="/d_list"))
+        text = bot.last_text
+        self.assertIn("🖥 <b>Oracle</b>", text)
+        self.assertIn("SSH 连不上", text)
+        assert_html_valid(self, text)
+
+    def test_host_with_config_error_shows_its_error(self):
+        from mtbots.features.docker.hosts import DockerHost
+
+        app, core, bot = self._make_app()
+        state = core.data["docker"]
+        state.hosts = [
+            state.hosts[0],
+            DockerHost(id="vps", label="Oracle", kind="ssh", target="", error="私钥不存在：/app/data/ssh/id_ed25519"),
+        ]
+        state.scan_hook = lambda: [p for p in [{
+            "name": "media", "dir": "/data/media", "status": "running(1)", "services": [],
+            "config_files": ["/x/docker-compose.yml"], "host": "nas", "host_label": "本机 NAS",
+        }]]
+        self._drive(app, real_update(bot, text="/d_list"))
+        text = bot.last_text
+        self.assertIn("🖥 <b>Oracle</b>", text)
+        self.assertIn("私钥不存在", text)
+        assert_html_valid(self, text)
+
+    def test_host_with_projects_on_another_page_says_so(self):
+        app, core, bot = self._make_app()
+        state = core.data["docker"]
+        projects = []
+        for i in range(6):  # page_size=6：把 6 个本机项目塞满第一页
+            projects.append({
+                "name": "p%d" % i, "dir": "/data/p%d" % i, "status": "running(1)", "services": [],
+                "config_files": ["/x/docker-compose.yml"], "host": "nas", "host_label": "本机 NAS",
+            })
+        projects.append({
+            "name": "blog", "dir": "/opt/blog", "status": "running(1)", "services": [],
+            "config_files": ["/x/docker-compose.yml"], "host": "vps", "host_label": "Oracle",
+        })
+        state.scan_hook = lambda: list(projects)
+
+        self._drive(app, real_update(bot, text="/d_list"))
+        text = bot.last_text
+        self.assertIn("🖥 <b>Oracle</b>", text)
+        self.assertIn("这一页没有它的项目", text)
+        assert_html_valid(self, text)
+
     def test_single_host_list_has_no_host_chrome(self):
         app, _core, bot = self._make_app(hosts="single")
         self._drive(app, real_update(bot, text="/d_list"))

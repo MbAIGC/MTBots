@@ -324,62 +324,89 @@ async def _render_list(
     # 于是「本机 5 个项目 + 远端连不上」的面板看着一切正常，只有主机计数里那个 0 露馅。
     hints = scan_hint(state, include_compose=False)
 
+    numbers = {(p.get("host"), p.get("name")): i + 1 for i, p in enumerate(ordered)}
+
+    def row_text(p: dict) -> str:
+        """画一条项目（编号与 `/upgrade NN` 同序），并把按钮挂进 keyboard。"""
+        num = "%02d" % numbers.get((p.get("host"), p.get("name")), 0)
+        name = str(p.get("name", ""))
+        label = state.project_label(p)
+        status = str(p.get("status", ""))
+        status_icon = "🟢" if "running" in status.lower() else "🟡"
+        disp_name = label[:26] + ".." if len(label) > 28 else label
+        services = list(p.get("services") or [])
+        services_str = ", ".join(services) if services else "-"
+
+        out = "<b>%s.</b> %s %s <code>[%s]</code>\n" % (num, esc(label), status_icon, esc(status))
+        if state.multi_host:
+            out += "     主机：%s\n" % esc(str(p.get("host_label") or p.get("host") or ""))
+        out += "     路径：<code>%s</code>\n" % esc(p.get("dir", ""))
+        out += "     容器：%s\n\n" % esc(services_str)
+
+        payload = {"name": name, "page": page, "host": p.get("host")}
+        if len(services) > 1:
+            data = cb("d", "p_sel", payload)
+            keyboard.append(
+                [InlineKeyboardButton("⚙️ %s. %s (多服务)" % (num, disp_name), callback_data=data)]
+            )
+        else:
+            data = cb("d", "up_s_ask", payload)
+            keyboard.append(
+                [InlineKeyboardButton("🚀 %s. %s" % (num, disp_name), callback_data=data)]
+            )
+        return out
+
     if not ordered:
         text += "⚠️ 暂未检测到任何 Docker Compose 项目\n"
         for hint in hints:
             text += hint + "\n"
+    elif state.multi_host:
+        # 多主机：**每台主机都画一段**，0 个项目 / 连不上的主机也要看得见——
+        # 否则「远端没项目或没连上」在面板上完全看不出来，只剩顶部计数里一个 0。
+        page_by_host: dict[str, list[dict]] = {}
+        for p in page_projects:
+            page_by_host.setdefault(str(p.get("host") or ""), []).append(p)
+        total_by_host: dict[str, int] = {}
+        for p in ordered:
+            key = str(p.get("host") or "")
+            total_by_host[key] = total_by_host.get(key, 0) + 1
+
+        drawn: set[str] = set()
+        for host in state.hosts:
+            text += "🖥 <b>%s</b>\n" % esc(host.display)
+            drawn.add(host.id)
+            if host.error:
+                text += "     ⚠️ %s\n\n" % esc(host.error)
+                continue
+            mine = page_by_host.get(host.id, [])
+            if mine:
+                for p in mine:
+                    text += row_text(p)
+                continue
+            err = (state.host_errors or {}).get(host.id)
+            if total_by_host.get(host.id):
+                text += "     （这一页没有它的项目，翻页看看）\n\n"
+            elif err:
+                text += "     ⚠️ %s\n\n" % esc(err)
+            else:
+                text += "     （未检测到 Compose 项目）\n\n"
+
+        # 兜底：不在 state.hosts 里的项目（正常不会出现）也不能凭空消失
+        for p in page_projects:
+            if str(p.get("host") or "") not in drawn:
+                text += row_text(p)
+
+        if hints:
+            text += "\n" + "\n".join(hints) + "\n"
     else:
         last_group: Optional[str] = None
-        for i, p in enumerate(page_projects, start=start_idx + 1):
+        for p in page_projects:
             is_running = "running" in str(p.get("status", "")).lower()
-            if state.multi_host:
-                # 多主机时按主机分组（运行中/已停止的图标仍然在每一行上）
-                group = str(p.get("host") or "")
-                if group != last_group:
-                    text += "🖥 <b>%s</b>\n" % esc(str(p.get("host_label") or group))
-                    last_group = group
-            else:
-                group = "running" if is_running else "stopped"
-                if group != last_group:
-                    text += "🟢 <b>运行中</b>\n" if is_running else "🟡 <b>已停止</b>\n"
-                    last_group = group
-
-            num = "%02d" % i
-            name = str(p.get("name", ""))
-            label = state.project_label(p)
-            status = str(p.get("status", ""))
-            status_icon = "🟢" if is_running else "🟡"
-            disp_name = label[:26] + ".." if len(label) > 28 else label
-            services = list(p.get("services") or [])
-            services_str = ", ".join(services) if services else "-"
-
-            text += "<b>%s.</b> %s %s <code>[%s]</code>\n" % (
-                num,
-                esc(label),
-                status_icon,
-                esc(status),
-            )
-            if state.multi_host:
-                text += "     主机：%s\n" % esc(str(p.get("host_label") or p.get("host") or ""))
-            text += "     路径：<code>%s</code>\n" % esc(p.get("dir", ""))
-            text += "     容器：%s\n\n" % esc(services_str)
-
-            payload = {"name": name, "page": page, "host": p.get("host")}
-            if len(services) > 1:
-                data = cb("d", "p_sel", payload)
-                keyboard.append(
-                    [
-                        InlineKeyboardButton(
-                            "⚙️ %s. %s (多服务)" % (num, disp_name), callback_data=data
-                        )
-                    ]
-                )
-            else:
-                data = cb("d", "up_s_ask", payload)
-                keyboard.append(
-                    [InlineKeyboardButton("🚀 %s. %s" % (num, disp_name), callback_data=data)]
-                )
-
+            group = "running" if is_running else "stopped"
+            if group != last_group:
+                text += "🟢 <b>运行中</b>\n" if is_running else "🟡 <b>已停止</b>\n"
+                last_group = group
+            text += row_text(p)
         if hints:
             text += "\n" + "\n".join(hints) + "\n"
 
