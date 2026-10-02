@@ -469,6 +469,15 @@ class LoggingTests(unittest.TestCase):
         # 时间戳/普通文本不能被动
         self.assertEqual(redact("2026-10-03 01:56:23,434 INFO ok"), "2026-10-03 01:56:23,434 INFO ok")
 
+    def test_version_skips_four(self):
+        """维护者约定：版本号里**跳过数字 4**（1.4.x 不发、1.5.4 也跳过，直接 1.5.5）。
+
+        这条是给人看的提醒：发版前 bump 版本号时别顺手写 4。
+        """
+        import mtbots
+
+        self.assertNotIn("4", mtbots.__version__, "版本号里跳过 4（例如 1.5.3 之后是 1.5.5）")
+
     def test_token_mask_filter(self):
         import logging
 
