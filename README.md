@@ -150,12 +150,15 @@ cd /mbots && make add-host
 
 ```bash
 cd /mbots
-bash <(curl -fsSL https://raw.githubusercontent.com/MbAIGC/MTBots/v1.3.4/scripts/setup-remote-host.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/MbAIGC/MTBots/main/scripts/setup-remote-host.sh)
 ```
 
 这种模式下「项目根」= 当前目录；守卫与远端脚本不在本地时会**按 ref 自动下载**（`--ref` 默认取当前 MTBots 版本，
 取不到用 `main` 并给出警告）。不是 bash 的 shell 用管道形式也一样：
 `curl -fsSL <同一个 URL> | sh`——脚本的提问读 `/dev/tty`，管道不会把问题吃掉。
+
+> URL 里用的是 `main`，所以不用跟着版本号改。想锁死某个版本（比如镜像停在 v1.3.4）：
+> 把 URL 里的 `main` 换成 `v1.3.4`，或加 `--ref v1.3.4`。
 
 ### 一键接入：远端侧一条命令
 
@@ -163,10 +166,10 @@ bash <(curl -fsSL https://raw.githubusercontent.com/MbAIGC/MTBots/v1.3.4/scripts
 
 ```bash
 # 在远端主机上（root / sudo）——就这一句，没有参数
-sudo bash <(curl -fsSL https://raw.githubusercontent.com/MbAIGC/MTBots/v1.3.4/docs/examples/mtbots-remote-setup.sh)
+sudo bash <(curl -fsSL https://raw.githubusercontent.com/MbAIGC/MTBots/main/docs/examples/mtbots-remote-setup.sh)
 
 # 不是 bash 的 shell（群晖等 /bin/sh）用管道形式，效果一样：
-# curl -fsSL https://raw.githubusercontent.com/MbAIGC/MTBots/v1.3.4/docs/examples/mtbots-remote-setup.sh | sudo sh
+# curl -fsSL https://raw.githubusercontent.com/MbAIGC/MTBots/main/docs/examples/mtbots-remote-setup.sh | sudo sh
 ```
 
 跑起来只有几问，全部有默认值（回车即可）：
@@ -195,6 +198,9 @@ cd /mbots && make remote-setup
 cd /mbots && make add-host          # 方式选 1「复用已有账号」，账号填 mtbots
 ```
 
+> 远端脚本里的守卫默认按**它自己的版本**从同名 tag 拉取（例如 `main` 上的脚本拉 `main` 的守卫），
+> 所以不用手写守卫 URL；要指定版本就加 `--ref v1.3.4`。
+
 ### 非交互（CI / 批量，可选）
 
 两个脚本都支持把参数全写出来（`--yes`/`-y` 表示不再提问）：
@@ -205,7 +211,7 @@ docker compose exec mtbots sh /app/scripts/setup-remote-host.sh \
   --mode create --host 10.0.0.5 --login-user root --user mtbots --id vps --yes
 
 # 远端侧（等价于上面那几问的回答）
-sudo bash <(curl -fsSL https://raw.githubusercontent.com/MbAIGC/MTBots/v1.3.4/docs/examples/mtbots-remote-setup.sh) \
+sudo bash <(curl -fsSL https://raw.githubusercontent.com/MbAIGC/MTBots/main/docs/examples/mtbots-remote-setup.sh) \
   --user mtbots --yes --pubkey-line 'ssh-ed25519 AAAAC3Nza... mtbots@bot'
 ```
 

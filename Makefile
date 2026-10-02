@@ -1,6 +1,8 @@
 PY ?= python3
 export PYTHONPATH := $(CURDIR)/.vendor:$(CURDIR)
 VERSION := $(shell $(PY) -c "import mtbots; print(mtbots.__version__)" 2>/dev/null || echo 0.0.0)
+# 脚本 URL 默认走 main（不用跟着版本号改）；要锁版本：make remote-setup REF=v$(VERSION)
+REF ?= main
 
 .PHONY: help check health test run list add-host remote-setup fmt clean
 
@@ -33,7 +35,6 @@ add-host:
 	docker compose exec mtbots sh /app/scripts/setup-remote-host.sh
 
 # 远端那台自己跑（bot 这边没有能 ssh 过去的账号/root 时用）：打印短命令 + 要粘的公钥
-REF ?= v$(VERSION)
 RAW := https://raw.githubusercontent.com/MbAIGC/MTBots/$(REF)
 remote-setup:
 	@pub=$$(cat ./data/ssh/id_ed25519.pub 2>/dev/null || echo '（本机还没有密钥：先在项目根跑 make add-host 生成）'); \
@@ -45,7 +46,7 @@ remote-setup:
 	echo ""; \
 	echo "  $$pub"; \
 	echo ""; \
-	echo "（要固定别的版本：make remote-setup REF=v1.3.2）"
+	echo "（要锁版本：make remote-setup REF=v$(VERSION)）"
 
 clean:
 	find . -name '__pycache__' -type d -prune -exec rm -rf {} +

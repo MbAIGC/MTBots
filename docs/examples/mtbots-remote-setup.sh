@@ -10,7 +10,7 @@
 #   5) 顺带验证：sudo -u <user> docker compose version
 #
 # 一行用法（**在远端主机上** root/sudo 跑；跑起来会**交互问你**，不需要记参数）：
-#   sudo bash <(curl -fsSL https://raw.githubusercontent.com/MbAIGC/MTBots/v1.3.4/docs/examples/mtbots-remote-setup.sh)
+#   sudo bash <(curl -fsSL https://raw.githubusercontent.com/MbAIGC/MTBots/main/docs/examples/mtbots-remote-setup.sh)
 #   （非 bash 的 sh：curl -fsSL <同一个 URL> | sudo sh —— 脚本读 /dev/tty，提问照样能答）
 #
 #   它会问：授权哪个账号 → 粘贴公钥（或给路径/URL）→ 装不装守卫（默认从 GitHub 拉）→ 守卫装哪。
