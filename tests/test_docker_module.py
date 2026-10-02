@@ -859,6 +859,24 @@ class HostConfigTest(unittest.TestCase):
         self.assertEqual([h.id for h in hosts], ["local"])
         self.assertTrue(notes)
 
+    def test_disabled_host_is_skipped(self):
+        path = self._write({"hosts": [
+            {"id": "nas", "kind": "local"},
+            {"id": "vps", "kind": "ssh", "target": "mtbots@10.0.0.5", "identity": self._ssh_key(), "enabled": False},
+            {"id": "old", "kind": "local", "enabled": "0"},
+        ]})
+        hosts, _notes = load_hosts(path)
+        self.assertEqual([h.id for h in hosts], ["nas"])
+
+    def test_target_cannot_start_with_a_dash(self):
+        """`-oProxyCommand=…@host` 会被 ssh 当选项吃掉（选项注入），必须拒。"""
+        key = self._ssh_key()
+        path = self._write({"hosts": [
+            {"id": "vps", "kind": "ssh", "target": "-oProxyCommand=touch /tmp/x@10.0.0.5", "identity": key}
+        ]})
+        hosts, _notes = load_hosts(path)
+        self.assertTrue(hosts[0].error, "以 - 开头的 target 必须被拒")
+
     def test_invalid_targets_are_rejected(self):
         key = self._ssh_key()
         for bad in ("10.0.0.5", "mtbots@10.0.0.5; rm -rf /", "mtbots@host -o ProxyCommand=x", ""):
@@ -942,8 +960,8 @@ class HostCommandTest(unittest.TestCase):
         self.assertIn("BatchMode=yes", wrapped)
         self.assertIn("StrictHostKeyChecking=accept-new", wrapped)
         self.assertIn("UserKnownHostsFile=/app/data/ssh/known_hosts", wrapped)
-        self.assertEqual(wrapped[-3], "mtbots@10.0.0.5")
-        self.assertEqual(wrapped[-2], "--")
+        self.assertEqual(wrapped[-3], "--", "-- 必须在目标之前（结束选项解析，防注入）")
+        self.assertEqual(wrapped[-2], "mtbots@10.0.0.5")
         self.assertEqual(
             wrapped[-1], "docker compose -f /opt/blog/docker-compose.yml pull"
         )

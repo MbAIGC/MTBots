@@ -26,8 +26,9 @@ log = logging.getLogger("mtbots.docker")
 
 #: 主机 id：只用小写字母/数字/_/-，避免拼进回调或命令时出花样
 HOST_ID_RE = re.compile(r"^[a-z0-9_-]{1,16}$")
-#: ssh 目标：user@host / user@1.2.3.4 / user@[::1]，不允许空格、引号、分号、`-o` 之类
-TARGET_RE = re.compile(r"^[A-Za-z0-9._-]+@[A-Za-z0-9._:\-\[\]]+$")
+#: ssh 目标：user@host / user@1.2.3.4 / user@[::1]。
+#: user 部分**不许以 `-` 开头**：否则 `-oProxyCommand=…@host` 会被 ssh 当成选项（选项注入）。
+TARGET_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]*@[A-Za-z0-9._:\-\[\]]+$")
 
 DEFAULT_IDENTITY = "/app/data/ssh/id_ed25519"
 DEFAULT_KNOWN_HOSTS = "/app/data/ssh/known_hosts"
@@ -101,8 +102,10 @@ class DockerHost:
             "StrictHostKeyChecking=%s" % self.strict,
             "-o",
             "UserKnownHostsFile=%s" % self.known_hosts,
-            self.target,
+            # `--` 放在目标**之前**：选项解析在这里结束，目标即便形似选项也只会被当成主机名
+            # （放在目标之后的话，`-oProxyCommand=…` 这种目标会被 ssh 当选项吃掉）
             "--",
+            self.target,
             shlex.join(cmd),
         ]
 
@@ -132,6 +135,16 @@ def _as_int(value: Any, default: int) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _is_disabled(raw: Mapping) -> bool:
+    """`enabled: false` / `"false"` / `"0"` / `"no"` 都算临时下线这台主机。"""
+    if "enabled" not in raw:
+        return False
+    value = raw.get("enabled")
+    if isinstance(value, str):
+        return value.strip().lower() in ("0", "false", "no", "off")
+    return not value
 
 
 def _parse_host(raw: Any) -> DockerHost:
@@ -223,6 +236,8 @@ def load_hosts(path: Any = None) -> tuple[list[DockerHost], list[str]]:
     hosts: list[DockerHost] = []
     seen: set[str] = set()
     for item in items:
+        if isinstance(item, Mapping) and _is_disabled(item):
+            continue  # enabled: false —— 临时下线，不出现在面板/扫描/自检里
         host = _parse_host(item)
         if host.id in seen:
             notes.append("⚠️ 主机 id 重复：<code>%s</code>（已忽略后一条）" % esc(host.id))

@@ -513,6 +513,13 @@ class MultiHostFlowTests(unittest.TestCase):
     def _open_host(self, app, bot, host_id):
         self._drive(app, real_update(bot, data="d|host_list|%s" % host_id))
 
+    @staticmethod
+    def _markup(bot):
+        """最后一次渲染的键盘：回调触发的渲染是「原地编辑」，命令触发的才是新消息。"""
+        if bot.rec["edit_kwargs"]:
+            return bot.rec["edit_kwargs"][-1].get("reply_markup")
+        return bot.rec["sent"][-1][2].get("reply_markup")
+
     def test_startup_keeps_hosts_file_loaded(self):
         """走真实装配路径：register() 之后 state 里必须还是主机清单里的那几台。
 
@@ -554,6 +561,41 @@ class MultiHostFlowTests(unittest.TestCase):
         self.assertEqual([h.id for h in state.hosts], ["local", "vps"], "注册后主机清单不能丢")
         self.assertTrue(state.multi_host)
         self.assertEqual(len(home_entries(core, 1)), 2, "首页应给每台主机一个入口")
+
+    def test_home_has_no_redundant_module_button(self):
+        """多主机时首页只画每台主机的按钮，不再重复一个笼统的「Docker 管理」。"""
+        app, core, bot = self._make_app()
+        self._drive(app, real_update(bot, text="/start"))
+        labels = [
+            b.text
+            for row in bot.rec["sent"][-1][2]["reply_markup"].inline_keyboard
+            for b in row
+        ]
+        self.assertEqual([x for x in labels if "docker" in x], ["🐳 docker（本机 NAS）", "🐳 docker（Oracle）"])
+        self.assertNotIn("🐳 Docker 管理", labels, "有每台主机入口时不该再有笼统的模块按钮")
+
+    def test_detail_back_returns_to_the_view_you_came_from(self):
+        """从「全部主机」点进项目，返回列表要回「全部主机」，不是那台主机的列表。"""
+        app, core, bot = self._make_app()
+        self._open_all(app, bot)
+        payload = None
+        for row in bot.rec["sent"][-1][2]["reply_markup"].inline_keyboard:
+            for button in row:
+                if "🚀" in button.text or "⚙️" in button.text:
+                    payload = button.callback_data
+        self.assertIsNotNone(payload, "全部主机视图里应有项目按钮")
+        self._drive(app, real_update(bot, data=payload))
+        callbacks = [b.callback_data for row in self._markup(bot).inline_keyboard for b in row]
+        self.assertIn("d|page_turn|1|all", callbacks, "返回列表应回到全部主机")
+
+    def test_upgrade_all_on_empty_host_says_so(self):
+        app, core, bot = self._make_app()
+        state = core.data["docker"]
+        local_only = [p for p in state.scan_hook() if p.get("host") == "nas"]
+        state.scan_hook = lambda: list(local_only)
+        self._drive(app, real_update(bot, data="d|upgrade_all|vps"))
+        self.assertIn("未检测到可升级的 Compose 项目", bot.last_text)
+        self.assertNotIn("确认批量升级", bot.last_text)
 
     def test_first_screen_asks_which_host(self):
         """点 Docker 进来第一屏就是选主机（每台一个按钮 + 全部主机）。"""

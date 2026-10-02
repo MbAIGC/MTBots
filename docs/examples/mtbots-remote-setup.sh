@@ -34,7 +34,7 @@ GUARD=""
 GUARD_DEST=/usr/local/bin
 GUARD_NAME=mtbots-compose-guard
 #: 本脚本自带的版本号（跟这次提交一致）：守卫默认按它从 GitHub 拉，所以不需要手打 URL
-# 守卫默认跟 main 走（脚本本身也从 main 取时天然一致）；要锁版本用 --ref v1.5.3
+# 守卫默认跟 main 走（脚本本身也从 main 取时天然一致）；要锁版本用 --ref v1.5.4
 MTBOTS_REF=${MTBOTS_REF:-main}
 DEFAULT_GUARD_URL=https://raw.githubusercontent.com/MbAIGC/MTBots/$MTBOTS_REF/docs/examples/mtbots-compose-guard.sh
 PUBKEY_LINE=""

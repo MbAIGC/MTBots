@@ -2,7 +2,7 @@
 
 > 依据：[three-bots-merge-design.md](three-bots-merge-design.md)（可行性 + 交互设计）、
 > [three-bots-merge-ux.md](three-bots-merge-ux.md)（单人版交互图）、[porting-contract.md](porting-contract.md)（施工契约）。
-> 结果：三个 Bot 已合并为 **一个进程、一个 Python 包 `mtbots`**（Bot 名 MTBots，方案 A：单进程模块化），可运行、可自检、**414 个测试全绿**。
+> 结果：三个 Bot 已合并为 **一个进程、一个 Python 包 `mtbots`**（Bot 名 MTBots，方案 A：单进程模块化），可运行、可自检、**419 个测试全绿**。
 
 ---
 
@@ -55,7 +55,7 @@
 
 ```bash
 cd /root/DSH/MTBots
-PYTHONPATH=./.vendor:. python3 -m unittest discover -s tests -t .   # 414 tests OK
+PYTHONPATH=./.vendor:. python3 -m unittest discover -s tests -t .   # 419 tests OK
 PYTHONPATH=./.vendor:. python3 -m mtbots --check                      # exit 0，离线
 PYTHONPATH=./.vendor:. python3 -m mtbots --health                     # 真实探测（compose / LitePan / Cline 存储）
 ```
@@ -67,7 +67,7 @@ PYTHONPATH=./.vendor:. python3 -m mtbots --health                     # 真实�
 | `tests/test_litepan_module.py` | 59 | OK |
 | `tests/test_cline_module.py` | 140 | OK |
 | `tests/test_integration.py` | 34 | OK（5 个装配 + 13 个真 Update 端到端 + 6 个收尾流程 + 6 个多主机流程 + 2 个 HTML 守卫用例） |
-| **合计** | **414** | **OK（约 13s，无网络）** |
+| **合计** | **419** | **OK（约 15s，无网络）** |
 
 端到端用例（`DispatcherTests`）用**真正的 `telegram.Update` + 记录型假 Bot** 跑 PTB 自己的
 `Application.process_update`，因此能抓到装配级事故：
@@ -160,7 +160,7 @@ DOCKER_GID=$(getent group docker | cut -d: -f3) docker compose up -d
 DOCKER_GID=$(getent group docker | cut -d: -f3) docker compose up -d --build
 ```
 
-## 10. 修复记录（线上反馈驱动，v1.0.1 → v1.5.3）
+## 10. 修复记录（线上反馈驱动，v1.0.1 → v1.5.4）
 
 上线后按线上反馈修了七轮，又加了一轮功能（多主机），全部带回归测试（377 个用例）：
 
@@ -188,3 +188,4 @@ DOCKER_GID=$(getent group docker | cut -d: -f3) docker compose up -d --build
 | 「实测没变化」时日志一片安静，看不出扫描到底跑没跑、哪台扫到几个 | 扫描成功不打日志（只有失败才 WARNING），面板又可能只是没刷新 | 每次扫描汇总一行：`扫描完成（0.4s）：local 15、192-168-1-5 10，共 25 个项目`，主机失败 `主机 X 扫描失败：…`，未挂载目录也提示；结果与错误都没变化时降到 DEBUG 不刷屏。版本跳到 1.5.0 |
 | 新增的多主机日志里有远端地址/用户名/密钥路径，日志脱敏没覆盖这些 | `redact()` 原来只管 Token/Key/邮箱/密码；多主机日志会把 `mtbots@192.168.155.89`、`192-168-155-89`、`/app/data/ssh/id_ed25519` 这类信息原样落盘 | 脱敏模式补齐：IPv4 只留网段（`192.168.*.*`）、`192-168-1-5` 形态、ssh 目标里的用户名（`***@…`）、私钥文件名（`id_***`）、`Authorization/Bearer`；时间戳等普通文本不受影响；`RedactingFilter` 仍挂在 root handler 上，所有模块日志与 traceback 都过一遍；测试 412 → 413 |
 | **配了 docker-hosts.json 却处处只有本机**：启动日志打印两台主机，首页没有按主机的入口、`/d_list` 不出现选主机、扫描日志只有 `local 15` | `handlers.register()` 里有一行 `core.data["docker"] = DockerState(DockerSettings.from_env(...))`，把 `__init__.register()` 用 `make_state()`（读过主机清单）建好的 state **覆盖成只有本机的新 state**；之前的测试都在建好 state 后手工赋 `state.hosts`，把这个 bug 掩盖了 | `handlers.register()` 改为复用已有 state（没有才用 `make_state` 建），`_state()` 兜底同样走 `make_state`；新增**走真实装配路径**的回归用例（回退修复时它必失败：`['local'] != ['local', 'vps']`）；顺带把 `chat=`/`user=`/`scope=chat:`/`update_id=`/`message_id=` 这类 id 也纳入脱敏；测试 413 → 414 |
+| 首页多主机时既有一排主机按钮、又有笼统的「Docker 管理」；另外请顺手排查其它 bug | 首页钩子实现时保留了模块按钮；同时排查发现 4 个真实问题（见右） | ① 首页有每台主机入口时**不再画笼统的模块按钮**；② `TARGET_RE` 允许 user 以 `-` 开头 + `--` 放在目标**之后**，`-oProxyCommand=…@host` 会被 ssh 当选项（选项注入）——正则收紧 + `--` 移到目标之前（真 sshd 验证）；③ 文档写了 `enabled: false` 但代码没实现——补上（`false`/`"0"`/`"no"` 都认）；④ 从「全部主机」点进项目后「返回列表」会跳到那台主机的列表——改为按来路返回；另外选中主机 0 个项目时「升级这台全部项目」不再弹「0 个」的确认；测试 414 → 419 |

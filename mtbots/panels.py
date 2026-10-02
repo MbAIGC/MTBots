@@ -364,10 +364,8 @@ class PanelManager:
                 except Exception as exc:  # 首页绝不能因为某个模块出错而打不开
                     log.warning("模块 %s 的首页入口失败：%s", spec.id, exc)
             if entries:
-                # 有额外入口（例如多主机）：模块按钮 + 每台主机一个按钮
-                rows.append(
-                    [InlineKeyboardButton("%s %s" % (spec.icon, spec.title), callback_data=nav_open(spec.id))]
-                )
+                # 有额外入口（例如多主机）：**只画每台主机的按钮**，不再重复一个笼统的模块入口
+                # （进模块/换主机/全部主机都能从某台主机的列表里点到）
                 extra: list[InlineKeyboardButton] = []
                 for label, data in entries:
                     extra.append(InlineKeyboardButton(label, callback_data=data))

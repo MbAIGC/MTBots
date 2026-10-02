@@ -1,6 +1,0 @@
-fix: update_id / message_id 也脱敏（v1.5.3）
-
-router 的「收到更新」日志带 update_id，之前没抹掉。补齐 Telegram 各类 id：
-- update_id / message_id / callback_query_id / inline_message_id / msg_id -> ***
-- chat / user / scope（上一个版本加的）
-时间戳与普通数字不受影响（有回归用例）。

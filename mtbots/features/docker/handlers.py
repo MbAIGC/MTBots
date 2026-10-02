@@ -166,9 +166,18 @@ def _progress_keyboard(task_id: Optional[str]) -> InlineKeyboardMarkup:
 
 
 def _list_back(core: Core, page: int, host: Optional[str] = None) -> InlineKeyboardMarkup:
-    """项目/确认页面的「返回列表」：多主机时回到那台主机的列表，单主机保持原回调。"""
+    """「返回列表」按钮：多主机时回到那台主机（或「全部主机」），单主机保持原回调。"""
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("🔙 返回列表", callback_data=_list_back_data(core, page, host))]]
+    )
+
+
+def _list_back_data(core: Core, page: int, host: Optional[str] = None) -> str:
+    """「返回列表」的 callback_data（`ask_confirm` 的 cancel_data 要的是字符串，不是键盘）。"""
     state = _state(core)
-    return _back_keyboard(page, (host or "all") if state.multi_host else None)
+    if state.multi_host:
+        return cb_simple("d", "page_turn", page, host or "all")
+    return cb_simple("d", "page_turn", page)
 
 
 def _back_keyboard(page: int = 1, list_host: Optional[str] = None) -> InlineKeyboardMarkup:
@@ -387,7 +396,7 @@ async def _render_list(
             text += "🖥 <b>主机：</b>%s\n" % esc(
                 " / ".join(
                     "%s %d" % (h.id, sum(1 for p in all_ordered if p.get("host") == h.id))
-                    for h in state.hosts
+                    for h in sorted(state.hosts, key=lambda item: str(item.id))
                 )
             )
     text += "📖 <b>页码：</b>%d / %d\n" % (page, total_pages)
@@ -529,7 +538,12 @@ async def _render_list(
 
 
 async def _show_detail(
-    core: Core, update: Update, project_name: str, back_page: int = 1, host: Optional[str] = None
+    core: Core,
+    update: Update,
+    project_name: str,
+    back_page: int = 1,
+    host: Optional[str] = None,
+    list_host: Optional[str] = None,
 ) -> None:
     """项目卡片：选整项目升级还是单服务升级。"""
     await _answer(update)
@@ -580,7 +594,7 @@ async def _show_detail(
         [
             InlineKeyboardButton(
                 "🔙 返回列表",
-                callback_data=cb_simple("d", "page_turn", back_page, host_id)
+                callback_data=cb_simple("d", "page_turn", back_page, list_host or host_id)
                 if state.multi_host
                 else cb_simple("d", "page_turn", back_page),
             )
@@ -592,7 +606,12 @@ async def _show_detail(
 
 # ==================== 两步确认（panels.ask_confirm） ====================
 async def _ask_project_upgrade(
-    core: Core, update: Update, project_name: str, back_page: int = 1, host: Optional[str] = None
+    core: Core,
+    update: Update,
+    project_name: str,
+    back_page: int = 1,
+    host: Optional[str] = None,
+    list_host: Optional[str] = None,
 ) -> None:
     """整项目升级确认（LDMG ask_single_upgrade）。"""
     await _answer(update)
@@ -623,7 +642,7 @@ async def _ask_project_upgrade(
         update,
         text,
         confirm_data,
-        cancel_data=cb_simple("d", "page_turn", back_page),
+        cancel_data=_list_back_data(core, back_page, list_host or host),
         confirm_label="✅ 确认升级",
         cancel_label="🔙 取消返回",
     )
@@ -636,6 +655,7 @@ async def _ask_service_upgrade(
     service_name: str,
     back_page: int = 1,
     host: Optional[str] = None,
+    list_host: Optional[str] = None,
 ) -> None:
     """单服务升级确认（LDMG ask_svc_upgrade）。"""
     await _answer(update)
@@ -652,7 +672,11 @@ async def _ask_service_upgrade(
     confirm_data = cb(
         "d", "up_svc_do", {"name": project_name, "svc": service_name, "page": back_page, "host": host_id}
     )
-    cancel_data = cb("d", "p_sel", {"name": project_name, "page": back_page, "host": host_id})
+    cancel_data = cb(
+        "d",
+        "p_sel",
+        {"name": project_name, "page": back_page, "host": host_id, "list_host": list_host or ""},
+    )
 
     text = (
         "🚀 <b>服务升级确认 - [%s]</b>\n\n"
@@ -683,8 +707,21 @@ async def _ask_upgrade_all(core: Core, update: Update, host: Optional[str] = Non
     if target_host is not None:
         projects = [p for p in projects if p.get("host") == target_host.id]
         scope = "主机 <b>%s</b> 上的 %d 个" % (esc(target_host.display), len(projects))
+        if not projects:
+            await core.panels.render(
+                "docker",
+                update,
+                "⚠️ 主机 <b>%s</b> 上未检测到可升级的 Compose 项目。" % esc(target_host.display),
+                _list_back(core, 1, target_host.id),
+            )
+            return
     else:
         scope = "全部 %d 个" % len(projects)
+        if not projects:
+            await core.panels.render(
+                "docker", update, "⚠️ 未检测到可升级的 Compose 项目。", _list_back(core, 1, "all")
+            )
+            return
     text = (
         "⚠️ <b>确认批量升级？</b>\n"
         "%s Compose 项目将依次执行 <code>pull</code> + <code>up -d</code>。\n"
@@ -1407,11 +1444,21 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
     elif action == "p_sel":
         await _show_detail(
-            core, update, payload["name"], _to_int(payload.get("page"), 1), payload.get("host")
+            core,
+            update,
+            payload["name"],
+            _to_int(payload.get("page"), 1),
+            payload.get("host"),
+            payload.get("list_host") or None,
         )
     elif action == "up_s_ask":
         await _ask_project_upgrade(
-            core, update, payload["name"], _to_int(payload.get("page"), 1), payload.get("host")
+            core,
+            update,
+            payload["name"],
+            _to_int(payload.get("page"), 1),
+            payload.get("host"),
+            payload.get("list_host") or None,
         )
     elif action == "up_svc_ask":
         await _ask_service_upgrade(
@@ -1421,6 +1468,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             payload["svc"],
             _to_int(payload.get("page"), 1),
             payload.get("host"),
+            payload.get("list_host") or None,
         )
     elif action == "up_p_do":
         ok, why = core.panels.validate_confirm(query, data)
