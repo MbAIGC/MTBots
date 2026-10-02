@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -262,6 +263,23 @@ class WizardScriptTest(unittest.TestCase):
         self.assertNotIn("roots", hosts["hosts"][1], "空 --roots 不能被写成 []")
         self.assertFalse(self.hosts_file.exists(), "不能写到别的项目根里")
 
+    def test_bash_process_substitution_uses_cwd_as_project_root(self):
+        """`bash <(curl …)`（$0 是 /dev/fd/63）：项目根取当前目录。"""
+        project = Path(self.tmp.name) / "ps-project"
+        (project / "data").mkdir(parents=True)
+        (project / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
+
+        inner = ('bash <(cat %s) --mode existing --host 10.0.0.5 --user admin --id vps '
+                 '--label V --roots "" --no-guard --yes --dry-run' % shlex.quote(str(self.script)))
+        proc = subprocess.run(
+            ["bash", "-c", inner], cwd=str(project), env=self.env,
+            capture_output=True, text=True, timeout=120,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("curl 模式", proc.stdout)
+        self.assertIn("项目根：%s" % project, proc.stdout)
+        self.assertFalse((project / "data" / "docker-hosts.json").exists(), "dry-run 不落盘")
+
     def test_fetches_companions_when_repo_files_are_absent(self):
         """脚本旁边没有 docs/examples 时，按 --ref 从 GitHub 取守卫与远端准备脚本。"""
         bare = Path(self.tmp.name) / "bare"
@@ -350,6 +368,30 @@ class RemoteSetupScriptTest(unittest.TestCase):
         self.assertIn('command="%s/mtbots-compose-guard",restrict ssh-ed25519 %s'
                       % (self.bin, pub_line.split()[1]), proc.stdout)
         self.assertFalse((self.home / ".ssh").exists())
+
+    def test_interactive_mode_collects_user_and_pubkey(self):
+        """不给参数、强制交互时：账号与公钥从提问里拿（--ask 便于无终端环境/测试）。"""
+        answers = "mtbots\n%s\nn\n" % self.pub.read_text(encoding="utf-8").strip()
+        proc = _run(
+            REMOTE_SETUP, "--ask", "--home", str(self.home), "--guard-dest", str(self.bin),
+            "--no-useradd", "--dry-run",
+            cwd=self.base, env=dict(os.environ), stdin=answers,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("要授权/创建的远端账号", proc.stderr + proc.stdout)
+        self.assertIn("目标账号：mtbots", proc.stdout)
+        self.assertIn("ssh-ed25519", proc.stdout)
+
+    def test_interactive_yes_installs_guard_from_default_url(self):
+        """交互里同意装守卫 → 用脚本自带的官方 URL（dry-run 只打印，不联网）。"""
+        answers = "mtbots\n%s\ny\n/srv/bin\n" % self.pub.read_text(encoding="utf-8").strip()
+        proc = _run(
+            REMOTE_SETUP, "--ask", "--home", str(self.home), "--no-useradd", "--dry-run",
+            cwd=self.base, env=dict(os.environ), stdin=answers,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("raw.githubusercontent.com/MbAIGC/MTBots/", proc.stdout)
+        self.assertIn('command="/srv/bin/mtbots-compose-guard",restrict', proc.stdout)
 
     def test_missing_pubkey_source_is_rejected(self):
         proc = _run(REMOTE_SETUP, "--user", "root", "--home", str(self.home), "--dry-run",

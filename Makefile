@@ -32,17 +32,20 @@ run:
 add-host:
 	docker compose exec mtbots sh /app/scripts/setup-remote-host.sh
 
-# 远端那台自己跑（bot 这边没有能 ssh 过去的账号/root 时用）：打印一条可直接粘贴的命令
-HOST_USER ?= mtbots
+# 远端那台自己跑（bot 这边没有能 ssh 过去的账号/root 时用）：打印短命令 + 要粘的公钥
 REF ?= v$(VERSION)
 RAW := https://raw.githubusercontent.com/MbAIGC/MTBots/$(REF)
 remote-setup:
-	@pub=$$(cat ./data/ssh/id_ed25519.pub 2>/dev/null || echo 'ssh-ed25519 AAAA…（把 ./data/ssh/id_ed25519.pub 的内容粘到这里）'); \
-	echo "在【远端主机】上以 root 跑这一条（自己下守卫、建用户、加 docker 组、写 authorized_keys）："; \
+	@pub=$$(cat ./data/ssh/id_ed25519.pub 2>/dev/null || echo '（本机还没有密钥：先在项目根跑 make add-host 生成）'); \
+	echo "在【远端主机】上以 root 跑这一条（跑起来它会问你账号和公钥）："; \
 	echo ""; \
-	echo "curl -fsSL $(RAW)/docs/examples/mtbots-remote-setup.sh | sudo sh -s -- --user $(HOST_USER) --guard-url $(RAW)/docs/examples/mtbots-compose-guard.sh --pubkey-line '$$pub'"; \
+	echo "  sudo bash <(curl -fsSL $(RAW)/docs/examples/mtbots-remote-setup.sh)"; \
 	echo ""; \
-	echo "（要换账号：make remote-setup HOST_USER=admin；要固定其它版本：make remote-setup REF=v1.3.0）"
+	echo "问「公钥」时把下面这行粘进去："; \
+	echo ""; \
+	echo "  $$pub"; \
+	echo ""; \
+	echo "（要固定别的版本：make remote-setup REF=v1.3.2）"
 
 clean:
 	find . -name '__pycache__' -type d -prune -exec rm -rf {} +

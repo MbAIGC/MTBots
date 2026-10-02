@@ -24,15 +24,15 @@
 # docs/examples/mtbots-remote-setup.sh 也可以单独在远端 sudo 跑。
 
 # 也能直接 curl 下来跑（stdin 是脚本时，项目根 = 当前目录）：
-#   cd /mbots && curl -fsSL https://raw.githubusercontent.com/MbAIGC/MTBots/v1.3.1/scripts/setup-remote-host.sh \
-#     | sh -s -- --mode create --host 10.0.0.5 --login-user root --user mtbots --id vps
+#   cd /mbots && bash <(curl -fsSL https://raw.githubusercontent.com/MbAIGC/MTBots/v1.3.2/scripts/setup-remote-host.sh)
+#   （`curl … | sh -s -- …` 也行：脚本读 /dev/tty，管道不会把提问吃掉）
 # 这种情况下守卫/远端脚本不在本地，脚本会按 --ref（默认取当前 MTBots 版本）从 GitHub 拉。
 
 set -eu
 
 CONTAINER_DATA=${MTBOTS_CONTAINER_DATA:-/app/data}
 REPO=${MTBOTS_REPO:-MbAIGC/MTBots}
-MTBOTS_VERSION_HINT=${MTBOTS_VERSION_HINT:-1.3.1}
+MTBOTS_VERSION_HINT=${MTBOTS_VERSION_HINT:-1.3.2}
 REF=""
 PROJECT_ROOT_OPT=""
 
@@ -124,9 +124,13 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-# 自己是怎么被执行的：仓库里的文件，还是 `curl … | sh`（此时 stdin 是脚本本身）
+# 自己是怎么被执行的：
+#   · 仓库里的文件（$0 是真实路径）→ 项目根 = 仓库上一级
+#   · `curl … | sh`（stdin 是脚本，$0 是 sh/dash/bash）
+#   · `bash <(curl …)`（$0 是 /dev/fd/63 这类进程替换路径）
+# 后两种都拿不到仓库布局，项目根取当前目录（或用 --project-root 指定）。
 case "$0" in
-    ""|-|sh|dash|ash|bash|*/sh|*/dash|*/ash|*/bash) PIPED=1 ;;
+    ""|-|sh|dash|ash|bash|*/sh|*/dash|*/ash|*/bash|/dev/fd/*|/proc/self/fd/*) PIPED=1 ;;
     *) PIPED=0 ;;
 esac
 if [ "$PIPED" = 1 ] || [ ! -f "$0" ]; then

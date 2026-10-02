@@ -9,17 +9,18 @@
 #      command="<守卫>",restrict <公钥>   （幂等：同一把 key 只保留一行，改前自动备份）
 #   5) 顺带验证：sudo -u <user> docker compose version
 #
-# 一行用法（**在远端主机上** root/sudo 跑；守卫从 GitHub 自己拉，公钥用字符串给）：
-#   curl -fsSL https://raw.githubusercontent.com/MbAIGC/MTBots/v1.3.1/docs/examples/mtbots-remote-setup.sh \
-#     | sudo sh -s -- --user mtbots \
-#         --guard-url https://raw.githubusercontent.com/MbAIGC/MTBots/v1.3.1/docs/examples/mtbots-compose-guard.sh \
-#         --pubkey-line 'ssh-ed25519 AAAAC3Nza... mtbots@bot'
+# 一行用法（**在远端主机上** root/sudo 跑；跑起来会**交互问你**，不需要记参数）：
+#   sudo bash <(curl -fsSL https://raw.githubusercontent.com/MbAIGC/MTBots/v1.3.2/docs/examples/mtbots-remote-setup.sh)
+#   （非 bash 的 sh：curl -fsSL <同一个 URL> | sudo sh —— 脚本读 /dev/tty，提问照样能答）
 #
-# 手动用法（公钥/守卫已经在远端）：
+#   它会问：授权哪个账号 → 粘贴公钥（或给路径/URL）→ 装不装守卫（默认从 GitHub 拉）→ 守卫装哪。
+#   每一问都有默认值，直接回车也行。
+#
+# 全参数（自动化/无终端时用，等价于上面那些回答）：
+#   sudo sh mtbots-remote-setup.sh --user mtbots --pubkey-line 'ssh-ed25519 AAAA…' --guard-url … --yes
+#
+# 手动传文件（公钥/守卫已经在远端）：
 #   sudo sh mtbots-remote-setup.sh --user mtbots --pubkey /tmp/mtbots.pub --guard /tmp/guard.sh
-#
-# 不建用户、只装公钥/守卫：
-#   sudo sh mtbots-remote-setup.sh --user $USER --pubkey-line "$(cat /tmp/mtbots.pub)" --no-useradd
 #
 # 通用做法是让 bot 那边的向导自动调用它（它会自己把公钥/守卫送过来）：
 #   docker compose exec mtbots sh /app/scripts/setup-remote-host.sh
@@ -32,26 +33,41 @@ PUBKEY=""
 GUARD=""
 GUARD_DEST=/usr/local/bin
 GUARD_NAME=mtbots-compose-guard
+#: 本脚本自带的版本号（跟这次提交一致）：守卫默认按它从 GitHub 拉，所以不需要手打 URL
+MTBOTS_REF=${MTBOTS_REF:-v1.3.2}
+DEFAULT_GUARD_URL=https://raw.githubusercontent.com/MbAIGC/MTBots/$MTBOTS_REF/docs/examples/mtbots-compose-guard.sh
 PUBKEY_LINE=""
 PUBKEY_URL=""
 GUARD_URL=""
 DO_USERADD=1
 DRY_RUN=0
+ASSUME_YES=0
+FORCE_ASK=0
 DOCKER_GROUP=docker
+USER_SET=0
+PUBKEY_SET=0
+GUARD_SET=0
+GUARD_DEST_SET=0
 
 usage() {
     cat <<'EOF'
 用法: sudo sh mtbots-remote-setup.sh --pubkey FILE [选项]
 
+不给任何选项时进入**交互向导**（推荐）：会问账号、公钥、是否装守卫、守卫装哪。
+
   --user NAME        要授权的远端账号（默认：当前登录用户）
   --pubkey FILE      MTBots 的公钥文件（.pub）
-  --pubkey-line STR  直接给公钥内容（一行字符串；curl|sh 场景用这个）
+  --pubkey-line STR  直接给公钥内容（一行字符串；curl|sh 无终端时用这个）
   --pubkey-url URL   从 URL 拉公钥（例如你放在 Gist/网盘上的 id_ed25519.pub）
-  --guard FILE       守卫脚本（默认不装；装了才写 command="…",restrict）
-  --guard-url URL    守卫脚本从 URL 拉（curl|sh 场景用这个，脚本自己下载）
+  --guard FILE       守卫脚本文件
+  --guard-url URL    守卫脚本从 URL 拉（默认就是官方那份：<上面的 DEFAULT_GUARD_URL>）
   --guard-dest DIR   守卫安装目录（默认 /usr/local/bin）
+  --no-guard         不装守卫（不推荐：这把 key 就等于远端 shell）
   --no-useradd       不建用户、不加组，只写 authorized_keys（账号已存在）
   --home DIR         指定家目录（默认按 getent 解析；NAS 上家目录不在 /home 时有用）
+  --ref REF          拉守卫用的 git ref（默认 v1.3.2）
+  -y, --yes          不再提问，全部用默认值/已给的值（自动化用）
+  --ask              强制进入交互（没有终端时也能用，例如把答案用管道喂进来）
   --dry-run          只打印将要做什么
   -h, --help         显示本帮助
 EOF
@@ -63,20 +79,102 @@ die()  { printf '❌ %s\n' "$*" >&2; exit 1; }
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --user) TARGET_USER=${2:-}; shift 2 ;;
+        --user) TARGET_USER=${2:-}; USER_SET=1; shift 2 ;;
         --home) HOME_DIR=${2:-}; shift 2 ;;
-        --pubkey) PUBKEY=${2:-}; shift 2 ;;
-        --pubkey-line) PUBKEY_LINE=${2:-}; shift 2 ;;
-        --pubkey-url) PUBKEY_URL=${2:-}; shift 2 ;;
-        --guard) GUARD=${2:-}; shift 2 ;;
-        --guard-url) GUARD_URL=${2:-}; shift 2 ;;
-        --guard-dest) GUARD_DEST=${2:-}; shift 2 ;;
+        --pubkey) PUBKEY=${2:-}; PUBKEY_SET=1; shift 2 ;;
+        --pubkey-line) PUBKEY_LINE=${2:-}; PUBKEY_SET=1; shift 2 ;;
+        --pubkey-url) PUBKEY_URL=${2:-}; PUBKEY_SET=1; shift 2 ;;
+        --guard) GUARD=${2:-}; GUARD_SET=1; shift 2 ;;
+        --guard-url) GUARD_URL=${2:-}; GUARD_SET=1; shift 2 ;;
+        --no-guard) GUARD_SET=2; shift ;;
+        --guard-dest) GUARD_DEST=${2:-}; GUARD_DEST_SET=1; shift 2 ;;
+        --ref) MTBOTS_REF=${2:-}; DEFAULT_GUARD_URL=https://raw.githubusercontent.com/MbAIGC/MTBots/$MTBOTS_REF/docs/examples/mtbots-compose-guard.sh; shift 2 ;;
         --no-useradd) DO_USERADD=0; shift ;;
+        --yes|-y) ASSUME_YES=1; shift ;;
+        --ask) FORCE_ASK=1; shift ;;
         --dry-run) DRY_RUN=1; shift ;;
         -h|--help) usage; exit 0 ;;
         *) echo "未知参数：$1（--help 看用法）" >&2; exit 2 ;;
     esac
 done
+
+# ---------- 交互补齐 ----------
+# 优先读 /dev/tty：`curl … | sudo sh` 时 stdin 是脚本正文，读 stdin 会把脚本吃光
+read_answer() {
+    if [ -r /dev/tty ] && ( : < /dev/tty ) 2>/dev/null; then
+        IFS= read -r _answer < /dev/tty || _answer=""
+    else
+        IFS= read -r _answer || _answer=""
+    fi
+    printf '%s' "$_answer"
+}
+
+ask() {
+    _prompt=$1
+    _default=${2:-}
+    if [ -n "$_default" ]; then
+        printf '%s [%s]: ' "$_prompt" "$_default" >&2
+    else
+        printf '%s: ' "$_prompt" >&2
+    fi
+    _answer=$(read_answer)
+    [ -n "$_answer" ] || _answer=$_default
+    printf '%s' "$_answer"
+}
+
+ask_yes() {
+    _prompt=$1
+    _default=${2:-y}
+    printf '%s (y/n) [%s]: ' "$_prompt" "$_default" >&2
+    _answer=$(read_answer)
+    [ -n "$_answer" ] || _answer=$_default
+    case "$_answer" in
+        [Yy]*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+INTERACTIVE=0
+if [ "$ASSUME_YES" != 1 ]; then
+    if [ "$FORCE_ASK" = 1 ]; then
+        INTERACTIVE=1
+    elif [ -r /dev/tty ] && ( : < /dev/tty ) 2>/dev/null; then
+        INTERACTIVE=1
+    elif [ -t 0 ]; then
+        INTERACTIVE=1
+    fi
+fi
+
+if [ "$INTERACTIVE" = 1 ]; then
+    say "== MTBots 远端向导（直接回车 = 用默认值）=="
+    if [ "$USER_SET" != 1 ]; then
+        TARGET_USER=$(ask "要授权/创建的远端账号" "mtbots")
+        USER_SET=1
+    fi
+    if [ "$PUBKEY_SET" != 1 ]; then
+        say "把 MTBots 那台 ./data/ssh/id_ed25519.pub 的整行内容粘进来（也可以给文件路径或 http 地址）：" >&2
+        _a=$(ask "公钥" "")
+        case "$_a" in
+            "") : ;;
+            ssh-*|ecdsa-*|sk-*) PUBKEY_LINE=$_a; PUBKEY_SET=1 ;;
+            http://*|https://*) PUBKEY_URL=$_a; PUBKEY_SET=1 ;;
+            *) if [ -f "$_a" ]; then PUBKEY=$_a; PUBKEY_SET=1; else warn "既不像公钥、也不是存在的文件或 URL：$_a"; fi ;;
+        esac
+    fi
+    if [ "$GUARD_SET" = 0 ]; then
+        if ask_yes "装强制命令守卫（自动下载官方那份）" y; then
+            GUARD_URL=$DEFAULT_GUARD_URL
+            GUARD_SET=1
+        else
+            GUARD_SET=2
+            warn "选择不装守卫：这把 key 就等于远端 shell 权限。"
+        fi
+    fi
+    if [ "$GUARD_SET" = 1 ] && [ "$GUARD_DEST_SET" != 1 ]; then
+        GUARD_DEST=$(ask "守卫安装目录" "$GUARD_DEST")
+    fi
+    say ""
+fi
 
 fetch_url() {
     if command -v curl >/dev/null 2>&1; then
@@ -98,7 +196,7 @@ if [ -z "$PUBKEY" ] && [ -n "$PUBKEY_LINE" ]; then
     PUBKEY=${TMPDIR:-/tmp}/mtbots-pubkey-line.$$
     printf '%s\n' "$PUBKEY_LINE" > "$PUBKEY"
 fi
-[ -n "$PUBKEY" ] || die "得给一个公钥来源：--pubkey FILE / --pubkey-line 'ssh-ed25519 AAAA…' / --pubkey-url URL"
+[ -n "$PUBKEY" ] || die "得给一个公钥来源：--pubkey FILE / --pubkey-line 'ssh-ed25519 AAAA…' / --pubkey-url URL（不加参数直接跑，脚本会问你）"
 [ -f "$PUBKEY" ] || die "公钥文件不存在：$PUBKEY"
 
 # 守卫也可以从 URL 拉（dry-run 只说明，不联网）
