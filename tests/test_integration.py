@@ -513,6 +513,48 @@ class MultiHostFlowTests(unittest.TestCase):
     def _open_host(self, app, bot, host_id):
         self._drive(app, real_update(bot, data="d|host_list|%s" % host_id))
 
+    def test_startup_keeps_hosts_file_loaded(self):
+        """走真实装配路径：register() 之后 state 里必须还是主机清单里的那几台。
+
+        以前 handlers.register 会用 `DockerState(...)` 重建 state，把 __init__.register()
+        读进来的主机清单冲成「只有本机」——启动日志打印两台、运行时只有一台。
+        """
+        import json as _json
+        import os as _os
+        import tempfile as _tempfile
+        from pathlib import Path as _Path
+
+        from mtbots.features.docker import home_entries
+
+        base = _Path(_tempfile.mkdtemp(prefix="mtbots-startup-"))
+        key = base / "id_ed25519"
+        key.write_text("PRIVATE", encoding="utf-8")
+        hosts_file = base / "docker-hosts.json"
+        hosts_file.write_text(
+            _json.dumps({"hosts": [
+                {"id": "local", "label": "本机", "kind": "local"},
+                {"id": "vps", "label": "Oracle", "kind": "ssh", "target": "mtbots@10.0.0.5",
+                 "identity": str(key)},
+            ]}),
+            encoding="utf-8",
+        )
+        old_env = _os.environ.get("DOCKER_HOSTS_FILE")
+        _os.environ["DOCKER_HOSTS_FILE"] = str(hosts_file)
+        self.addCleanup(
+            lambda: _os.environ.__setitem__("DOCKER_HOSTS_FILE", old_env)
+            if old_env is not None
+            else _os.environ.pop("DOCKER_HOSTS_FILE", None)
+        )
+        try:
+            app, core, _bot = make_recording_app(modules="docker")
+        finally:
+            pass
+
+        state = core.data["docker"]
+        self.assertEqual([h.id for h in state.hosts], ["local", "vps"], "注册后主机清单不能丢")
+        self.assertTrue(state.multi_host)
+        self.assertEqual(len(home_entries(core, 1)), 2, "首页应给每台主机一个入口")
+
     def test_first_screen_asks_which_host(self):
         """点 Docker 进来第一屏就是选主机（每台一个按钮 + 全部主机）。"""
         app, core, bot = self._make_app()

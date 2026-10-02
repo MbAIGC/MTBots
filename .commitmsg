@@ -1,13 +1,16 @@
-feat: 日志脱敏覆盖多主机信息（v1.5.1）
+fix: 多主机配置被 handlers.register 覆盖成单机（v1.5.2）+ 会话 id 脱敏
 
-新增的扫描/主机日志会把远端地址、ssh 用户名、私钥路径写进日志，原来的 redact()
-只管 Token/Key/邮箱/密码，这些都会原样落盘（也进滚动文件日志）。
+反馈证据链：启动日志写 `主机=local,192-168-*-*`，但运行时处处单机——
+首页没有按主机的入口、/d_list 不出现选主机、扫描日志只有 `local 15`。
 
-补齐脱敏模式（仍挂在 root handler 的 RedactingFilter 上，所有模块日志与 traceback 都过一遍）：
-- IPv4 只留网段：192.168.155.89 -> 192.168.*.*
-- 主机 id 形态：192-168-155-89 -> 192-168-*-*
-- ssh 目标里的用户名：mtbots@192.168.*.* -> ***@192.168.*.*
-- 私钥文件名：/app/data/ssh/id_ed25519 -> /app/data/ssh/id_***（目录保留，方便排查）
-- Authorization/Bearer 头
+根因：handlers.register() 里有一行
+    core.data["docker"] = DockerState(DockerSettings.from_env(core.settings))
+它把 __init__.register() 用 make_state()（已读 docker-hosts.json）建好的 state
+**覆盖成只有本机的新 state**；启动日志打印发生在覆盖之前，所以看着是两台。
 
-时间戳、普通数字文本不受影响（已加回归用例锁死）。测试 412 → 413。
+- handlers.register() 改为复用已有 state（没有才 make_state 建）；
+- _state() 的兜底同样改走 make_state()（直接构造会丢主机清单）；
+- 新增走**真实装配路径**（make_recording_app → register）的回归用例：
+  回退修复时它必失败（['local'] != ['local','vps']），修复后通过。
+  之前的多主机用例都是在建好 state 后手工赋 state.hosts，正好掩盖了这个 bug。
+- 脱敏补 Telegram 会话 id：chat=123 / chat:123 / scope=chat:123 / user=123 → ***。

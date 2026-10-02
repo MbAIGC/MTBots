@@ -35,6 +35,7 @@ from ...panels import (
 from ...text import esc
 from .compose import (
     DockerState,
+    make_state,
     dump_container_status,
     format_prune_snapshot,
     paginate_projects,
@@ -63,11 +64,11 @@ _BUSY_TEXT = "⚠️ 已有任务在跑（同时只允许一个 compose 任务�
 
 # ==================== 基础工具 ====================
 def _state(core: Core) -> DockerState:
-    """取本模块的 DockerState（register() 已放进 core.data["docker"]）。"""
+    """取本模块的 DockerState；没有就用 make_state() 建一个（会读主机清单）。"""
     state = core.data.get("docker")
     if not isinstance(state, DockerState):
-        # 兜底：register() 之前的极端调用路径也能工作（正常不会走到）
-        state = DockerState(DockerSettings.from_env(core.settings))
+        # 兜底也要走 make_state：直接 DockerState(...) 会丢掉主机清单，静默退回单机
+        state = make_state(DockerSettings.from_env(core.settings))
         core.data["docker"] = state
     return state
 
@@ -1640,7 +1641,10 @@ def register(app: Application, core: Core) -> None:
     并转发到 `spec.show_list` / `spec.show_status`。同一条命令注册两次虽然运行时无害，
     却会让装配级「命令不打架」检查失败，所以这里只在命令还没被注册时补上。
     """
-    core.data["docker"] = DockerState(DockerSettings.from_env(core.settings))
+    # 注意：这里必须复用已有的 state。以前直接 `DockerState(DockerSettings.from_env(...))`
+    # 重建，会把 __init__.register() 里 make_state() 读进来的主机清单冲成「只有本机」——
+    # 表现为「配了 docker-hosts.json 却处处只有本机」，而且启动日志还傻乎乎地打印了两台主机。
+    _state(core)
 
     owned = _registered_commands(app)
     plan = (
