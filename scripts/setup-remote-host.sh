@@ -32,6 +32,7 @@ set -eu
 
 CONTAINER_DATA=${MTBOTS_CONTAINER_DATA:-/app/data}
 REPO=${MTBOTS_REPO:-MbAIGC/MTBots}
+MTBOTS_VERSION_HINT=${MTBOTS_VERSION_HINT:-1.2.2}
 REF=""
 PROJECT_ROOT_OPT=""
 
@@ -206,6 +207,7 @@ detect_ref() {
         printf 'v%s' "$_v"
         return
     fi
+    warn "拿不到本地 MTBots 版本，配套脚本按 main 下载（守卫白名单可能与你在跑的版本不一致）；要固定就加 --ref v$MTBOTS_VERSION_HINT" >&2
     printf 'main'
 }
 

@@ -263,16 +263,20 @@ make add-host          # = docker compose exec mtbots sh /app/scripts/setup-remo
 
 ```bash
 cd /mbots
-curl -fsSL https://raw.githubusercontent.com/MbAIGC/MTBots/v1.2.1/scripts/setup-remote-host.sh \
+curl -fsSL https://raw.githubusercontent.com/MbAIGC/MTBots/v1.2.2/scripts/setup-remote-host.sh \
   | sh -s -- --mode create --host 10.0.0.5 --login-user root --user mtbots --id vps --label "Oracle 东京" --roots /opt
 ```
 
 * 这种模式下「项目根」= **当前目录**（所以先 `cd /mbots`；也可 `--project-root /mbots` 指定）；
-* 守卫与远端准备脚本不在本地时会**按 ref 自动下载**：`--ref` 默认取当前 MTBots 版本（如 `v1.2.1`），
+* 守卫与远端准备脚本不在本地时会**按 ref 自动下载**：`--ref` 默认取当前 MTBots 版本（如 `v1.2.2`），
   取不到就用 `main`；换仓库用 `--repo OWNER/REPO`；
 * 交互提问读 `/dev/tty`，所以 `curl | sh` 也能正常问（管道不会把脚本正文吃掉）；
   没有终端时全部走默认值，请把参数写全 + 加 `--yes`；
-* 没有 curl / 不想下载：容器里本来就有这两个脚本，用上面的 `make add-host` 更省事。
+* 这一行在**宿主机**上跑（要用宿主机的 curl；镜像里没装 curl/wget）——容器里本来就有这两个脚本，
+  所以 `make add-host` 那条路不需要下载，也不需要宿主机有 ssh 客户端。
+* url 里的版本号建议跟你在跑的镜像一致（`docker compose exec mtbots python -m mtbots --version`）。
+  版本探测不到时会退回 `main` 并给出警告——`main` 上的守卫白名单可能比你在跑的旧镜像新，
+  这种情况请显式写 `--ref v1.2.2`。
 
 不想交互也可以一行到底：
 
