@@ -150,7 +150,7 @@ cd /mbots && make add-host
 
 ```bash
 cd /mbots
-bash <(curl -fsSL https://raw.githubusercontent.com/MbAIGC/MTBots/v1.3.2/scripts/setup-remote-host.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/MbAIGC/MTBots/v1.3.3/scripts/setup-remote-host.sh)
 ```
 
 这种模式下「项目根」= 当前目录；守卫与远端脚本不在本地时会**按 ref 自动下载**（`--ref` 默认取当前 MTBots 版本，
@@ -163,10 +163,10 @@ bash <(curl -fsSL https://raw.githubusercontent.com/MbAIGC/MTBots/v1.3.2/scripts
 
 ```bash
 # 在远端主机上（root / sudo）——就这一句，没有参数
-sudo bash <(curl -fsSL https://raw.githubusercontent.com/MbAIGC/MTBots/v1.3.2/docs/examples/mtbots-remote-setup.sh)
+sudo bash <(curl -fsSL https://raw.githubusercontent.com/MbAIGC/MTBots/v1.3.3/docs/examples/mtbots-remote-setup.sh)
 
 # 不是 bash 的 shell（群晖等 /bin/sh）用管道形式，效果一样：
-# curl -fsSL https://raw.githubusercontent.com/MbAIGC/MTBots/v1.3.2/docs/examples/mtbots-remote-setup.sh | sudo sh
+# curl -fsSL https://raw.githubusercontent.com/MbAIGC/MTBots/v1.3.3/docs/examples/mtbots-remote-setup.sh | sudo sh
 ```
 
 跑起来只有几问，全部有默认值（回车即可）：
@@ -205,7 +205,7 @@ docker compose exec mtbots sh /app/scripts/setup-remote-host.sh \
   --mode create --host 10.0.0.5 --login-user root --user mtbots --id vps --yes
 
 # 远端侧（等价于上面那几问的回答）
-sudo bash <(curl -fsSL https://raw.githubusercontent.com/MbAIGC/MTBots/v1.3.2/docs/examples/mtbots-remote-setup.sh) \
+sudo bash <(curl -fsSL https://raw.githubusercontent.com/MbAIGC/MTBots/v1.3.3/docs/examples/mtbots-remote-setup.sh) \
   --user mtbots --yes --pubkey-line 'ssh-ed25519 AAAAC3Nza... mtbots@bot'
 ```
 
@@ -481,7 +481,7 @@ mtbots/
 ├── scripts/                                          # setup-remote-host.sh：一键接入远端主机（交互向导）
 ├── docs/                                             # 设计稿、施工契约（porting-contract）、合并报告
 │   └── examples/                                     # 多主机：主机清单样例、远端守卫脚本、authorized_keys 样例
-└── tests/                                            # 399 个 stdlib unittest 用例
+└── tests/                                            # 400 个 stdlib unittest 用例
 ```
 
 ## 配置
@@ -544,14 +544,14 @@ make check
 ```
 
 测试全部是 stdlib `unittest`、不联网也不碰真实 Telegram/Docker（Docker 用例还会把
-`subprocess` / `create_subprocess_exec` 换成抛异常的桩做反证）。当前 **399 个用例全绿**：
+`subprocess` / `create_subprocess_exec` 换成抛异常的桩做反证）。当前 **400 个用例全绿**：
 
 | 文件 | 用例 | 覆盖 |
 |---|---|---|
 | `tests/test_core.py` | 70 | 文本分片（HTML 标签闭合）、`safe_html` 出口转义、`SafeBot` 解析失败降级、ACL 默认拒绝、存储原子写/0600/损坏分类、任务中心（运行中显示最后一行输出、终态不再翻转）与收尾卡片文案、跨模块入口按钮的取舍（启用/权限/排不下）、**命令菜单的作用域规则（私聊按权限裁剪 / 群取全量 / 空片段不下发）**、面板唯一与两步确认、菜单去重与作用域、配置兼容、日志脱敏（含 exc_info 的 traceback）、路由消歧与兜底救援 |
 | `tests/test_docker_module.py` | 76 | 项目排序/分页、pull 噪音过滤、清理候选、回调载荷、模块装配、**扫描失败诊断（实测 socket GID、未挂载目录的公共挂载点、缺命令）**、执行消息收尾（成功即删、失败必留、结果回传）、失败尾部输出与进度键盘的中断入口、**多主机（主机清单校验 / ssh 包装与引号 / 逐主机扫描与提示 / 退出码映射 / 只认配置内的 host id）** |
 | `tests/test_litepan_module.py` | 59 | slug 构建（拼音/限长/去重）、users.json 校验、发现解析与缓存、菜单预算、触发与回执 |
-| `tests/test_setup_script.py` | 20 | 两个接入脚本：ssh/scp 打桩跑完整向导流程（主机清单幂等合并 / `command=` 守卫行 / create 模式驱动远端脚本 / dry-run 不落地 / 非法 id 被拒），远端准备脚本（dry-run、参数校验、真跑时守卫 0755 + authorized_keys 0600 + 幂等 + 别人的 key 不动）、curl 模式（项目根取当前目录、不读 stdin、按 `--ref` 下载配套脚本）、远端侧交互向导（账号/公钥/守卫三问 + `--pubkey-line`/`--guard-url`）、`bash <(curl …)` 形式（$0=/dev/fd/* 时项目根取当前目录） |
+| `tests/test_setup_script.py` | 21 | 两个接入脚本：ssh/scp 打桩跑完整向导流程（主机清单幂等合并 / `command=` 守卫行 / create 模式驱动远端脚本 / dry-run 不落地 / 非法 id 被拒），远端准备脚本（dry-run、参数校验、真跑时守卫 0755 + authorized_keys 0600 + 幂等 + 别人的 key 不动）、curl 模式（项目根取当前目录、不读 stdin、按 `--ref` 下载配套脚本）、远端侧交互向导（账号/公钥/守卫三问 + `--pubkey-line`/`--guard-url`）、`bash <(curl …)` 形式（$0=/dev/fd/* 时项目根取当前目录） |
 | `tests/test_cline_module.py` | 140 | 额度解析/渲染、Key 掩码与指纹、别名校验、存储读写与自愈、默认拒绝 |
 | `tests/test_integration.py` | 34 | 三个真实模块一起装配、命令不重复、菜单合并、`--check` 离线可跑，**真 `telegram.Update` 走 PTB dispatcher 的端到端用例**（不重复执行、全角命令可救援、下线模块的按钮有反馈、点按钮原地改同一条面板、**所有面板文案都过一遍 Telegram HTML 合法性校验**），多主机装配用例（按主机分组、单主机无主机标题、伪造 host id 被拒且不执行、`/upgrade` 编号与面板一致、状态与清理按主机），以及**收尾只留一条消息**（批量升级不再推卡片、执行消息带 `delete_on_success`、收尾面板带跨模块入口、`🔙 返回列表` 回原页、失败抄尾部输出、进度面板可中断、最后一步取消判为取消） |
 

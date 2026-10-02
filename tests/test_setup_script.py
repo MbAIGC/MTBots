@@ -37,6 +37,10 @@ case "$last" in
   *'docker compose version'*) echo 'Docker Compose version v2.35.1'; exit 0 ;;
   *'sudo -n install'*) exit 1 ;;
 esac
+# 模拟「远端还没有这把公钥」：deny-login 标记存在时，连 true 都失败
+case "$last" in
+  true) [ -f "$FAKE_DIR/deny-login" ] && exit 255 ;;
+esac
 exit 0
 """
 
@@ -308,6 +312,24 @@ class WizardScriptTest(unittest.TestCase):
 
         hosts = json.loads((bare / "data" / "docker-hosts.json").read_text(encoding="utf-8"))
         self.assertEqual([h["id"] for h in hosts["hosts"]], ["local", "vps"])
+
+    def test_login_failure_points_at_remote_one_liner(self):
+        """密钥登不上时，要把「远端自己跑那条 curl」摆在眼前，而不是只丢一个密码提示。"""
+        (self.fake / "deny-login").write_text("1", encoding="utf-8")
+        (self.fake / "ssh-copy-id").write_text(
+            "#!/bin/sh\nexit 1\n", encoding="utf-8"
+        )
+        (self.fake / "ssh-copy-id").chmod(0o755)
+
+        proc = self._wizard("--mode", "existing", "--host", "10.0.0.5", "--user", "admin",
+                            "--id", "vps", "--label", "V", "--roots", "", "--no-guard",
+                            "--yes", "--no-restart")
+        self.assertNotEqual(proc.returncode, 0)
+        err = proc.stderr
+        self.assertIn("远端还没有这把公钥", err)
+        self.assertIn("sudo bash <(curl -fsSL https://raw.githubusercontent.com/MbAIGC/MTBots/", err)
+        self.assertIn("mtbots-remote-setup.sh", err)
+        self.assertFalse(self.hosts_file.exists())
 
     def test_local_host_can_be_omitted(self):
         proc = self._wizard("--mode", "existing", "--host", "10.0.0.5", "--user", "admin",

@@ -10,7 +10,7 @@
 #   5) 顺带验证：sudo -u <user> docker compose version
 #
 # 一行用法（**在远端主机上** root/sudo 跑；跑起来会**交互问你**，不需要记参数）：
-#   sudo bash <(curl -fsSL https://raw.githubusercontent.com/MbAIGC/MTBots/v1.3.2/docs/examples/mtbots-remote-setup.sh)
+#   sudo bash <(curl -fsSL https://raw.githubusercontent.com/MbAIGC/MTBots/v1.3.3/docs/examples/mtbots-remote-setup.sh)
 #   （非 bash 的 sh：curl -fsSL <同一个 URL> | sudo sh —— 脚本读 /dev/tty，提问照样能答）
 #
 #   它会问：授权哪个账号 → 粘贴公钥（或给路径/URL）→ 装不装守卫（默认从 GitHub 拉）→ 守卫装哪。
@@ -34,7 +34,7 @@ GUARD=""
 GUARD_DEST=/usr/local/bin
 GUARD_NAME=mtbots-compose-guard
 #: 本脚本自带的版本号（跟这次提交一致）：守卫默认按它从 GitHub 拉，所以不需要手打 URL
-MTBOTS_REF=${MTBOTS_REF:-v1.3.2}
+MTBOTS_REF=${MTBOTS_REF:-v1.3.3}
 DEFAULT_GUARD_URL=https://raw.githubusercontent.com/MbAIGC/MTBots/$MTBOTS_REF/docs/examples/mtbots-compose-guard.sh
 PUBKEY_LINE=""
 PUBKEY_URL=""
@@ -65,7 +65,7 @@ usage() {
   --no-guard         不装守卫（不推荐：这把 key 就等于远端 shell）
   --no-useradd       不建用户、不加组，只写 authorized_keys（账号已存在）
   --home DIR         指定家目录（默认按 getent 解析；NAS 上家目录不在 /home 时有用）
-  --ref REF          拉守卫用的 git ref（默认 v1.3.2）
+  --ref REF          拉守卫用的 git ref（默认 v1.3.3）
   -y, --yes          不再提问，全部用默认值/已给的值（自动化用）
   --ask              强制进入交互（没有终端时也能用，例如把答案用管道喂进来）
   --dry-run          只打印将要做什么

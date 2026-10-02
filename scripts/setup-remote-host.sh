@@ -24,7 +24,7 @@
 # docs/examples/mtbots-remote-setup.sh 也可以单独在远端 sudo 跑。
 
 # 也能直接 curl 下来跑（stdin 是脚本时，项目根 = 当前目录）：
-#   cd /mbots && bash <(curl -fsSL https://raw.githubusercontent.com/MbAIGC/MTBots/v1.3.2/scripts/setup-remote-host.sh)
+#   cd /mbots && bash <(curl -fsSL https://raw.githubusercontent.com/MbAIGC/MTBots/v1.3.3/scripts/setup-remote-host.sh)
 #   （`curl … | sh -s -- …` 也行：脚本读 /dev/tty，管道不会把提问吃掉）
 # 这种情况下守卫/远端脚本不在本地，脚本会按 --ref（默认取当前 MTBots 版本）从 GitHub 拉。
 
@@ -32,7 +32,7 @@ set -eu
 
 CONTAINER_DATA=${MTBOTS_CONTAINER_DATA:-/app/data}
 REPO=${MTBOTS_REPO:-MbAIGC/MTBots}
-MTBOTS_VERSION_HINT=${MTBOTS_VERSION_HINT:-1.3.2}
+MTBOTS_VERSION_HINT=${MTBOTS_VERSION_HINT:-1.3.3}
 REF=""
 PROJECT_ROOT_OPT=""
 
@@ -398,6 +398,7 @@ fi
 need_cmd ssh
 need_cmd scp
 REF=$(detect_ref)
+RAW_BASE=https://raw.githubusercontent.com/$REPO/$REF
 if [ "$USE_GUARD" = 1 ]; then
     GUARD_SRC=$(resolve_companion docs/examples/mtbots-compose-guard.sh "$GUARD_SRC")
     [ -f "$GUARD_SRC" ] || die "找不到守卫脚本：$GUARD_SRC（用 --guard 指定，或 --no-guard 跳过）"
@@ -475,16 +476,25 @@ else
     if ssh_run true >/dev/null 2>&1; then
         say "  密钥已被远端接受（重复执行时会走到这里）"
     else
-        warn "用密钥登录失败，尝试用 ssh-copy-id 装公钥（会提示输入远端密码）"
-        if command -v ssh-copy-id >/dev/null 2>&1; then
-            if ! ssh-copy-id -i "$PUB" -p "$SSH_PORT" \
-                    -o StrictHostKeyChecking="$STRICT" -o UserKnownHostsFile="$KNOWN_HOSTS" \
-                    "$TARGET"; then
-                die "ssh-copy-id 失败。可手动把下面这行追加到远端 ~/.ssh/authorized_keys：
+        warn "用密钥登录失败：远端还没有这把公钥。接下来两条路，任选一条："
+        say "" >&2
+        say "  ① 这个账号能用密码登录 → 接着输入它的密码即可（只这一次，用来把公钥装上去）" >&2
+        say "  ② 不想输密码 / 远端禁止密码登录 → 到【远端主机】上以 root 跑：" >&2
+        say "       sudo bash <(curl -fsSL $RAW_BASE/docs/examples/mtbots-remote-setup.sh)" >&2
+        say "     跑完回到这里重跑本脚本：它会发现密钥已可用，自动跳过这一步。" >&2
+        say "" >&2
+        if ! command -v ssh-copy-id >/dev/null 2>&1; then
+            die "本机没有 ssh-copy-id。请把下面这行手动加到远端 ~/.ssh/authorized_keys 后重跑：
   $(cat "$PUB")"
-            fi
-        else
-            die "没有 ssh-copy-id。请手动把下面这行追加到远端 ~/.ssh/authorized_keys 后重跑：
+        fi
+        if [ "$ASSUME_YES" != 1 ] && ! ask_yes "现在用 ssh-copy-id 装公钥（会让你输入远端密码）？" y; then
+            die "已取消。照上面 ② 在远端装好后重跑本脚本即可。"
+        fi
+        if ! ssh-copy-id -i "$PUB" -p "$SSH_PORT" \
+                -o StrictHostKeyChecking="$STRICT" -o UserKnownHostsFile="$KNOWN_HOSTS" \
+                "$TARGET"; then
+            die "ssh-copy-id 失败（密码不对 / 远端禁用了密码登录 / 端口或账号不对）。
+  照上面 ② 在远端跑那条 curl，或者手动把下面这行加到远端 ~/.ssh/authorized_keys：
   $(cat "$PUB")"
         fi
         ssh_run true >/dev/null 2>&1 || die "装了公钥还是连不上，请检查远端 sshd 配置"
