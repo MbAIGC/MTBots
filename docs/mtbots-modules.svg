@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 500" width="900" height="500" role="img" aria-label="MTBots 模块与命令一览：首页控制台通往 Docker、LitePan、Cline 三个模块与任务中心">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#8c959f"/>
+    </marker>
+  </defs>
+
+  <rect x="0.5" y="0.5" width="899" height="499" rx="10" fill="#ffffff" stroke="#d8dee4"/>
+
+  <text x="32" y="40" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans CJK SC','Microsoft YaHei',sans-serif" font-size="17" font-weight="700" fill="#1f2328">MTBots · 一个进程，三个模块</text>
+  <text x="32" y="64" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans CJK SC','Microsoft YaHei',sans-serif" font-size="12.5" fill="#59636e">模块 = 命名空间：命名空间由「你当前所在的位置」决定，不靠命令前缀</text>
+
+  <rect x="240" y="86" width="420" height="42" rx="8" fill="#f6f8fa" stroke="#d0d7de"/>
+  <text x="450" y="112" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans CJK SC','Microsoft YaHei',sans-serif" font-size="12.5" fill="#1f2328">/start   /home   /menu    ·    /help   /id   /jobs   /cancel</text>
+
+  <line x1="450" y1="128" x2="450" y2="154" stroke="#8c959f" marker-end="url(#arrow)"/>
+
+  <rect x="300" y="156" width="300" height="58" rx="8" fill="#f6f8fa" stroke="#0969da"/>
+  <text x="450" y="181" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans CJK SC','Microsoft YaHei',sans-serif" font-size="15" font-weight="700" fill="#1f2328">🏠 控制台（首页）</text>
+  <text x="450" y="201" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans CJK SC','Microsoft YaHei',sans-serif" font-size="11.5" fill="#59636e">先渲染缓存 → 后台刷新 → 原地更新同一条</text>
+
+  <line x1="450" y1="214" x2="450" y2="238" stroke="#8c959f"/>
+  <line x1="155" y1="238" x2="745" y2="238" stroke="#8c959f"/>
+  <line x1="155" y1="238" x2="155" y2="260" stroke="#8c959f" marker-end="url(#arrow)"/>
+  <line x1="450" y1="238" x2="450" y2="260" stroke="#8c959f" marker-end="url(#arrow)"/>
+  <line x1="745" y1="238" x2="745" y2="260" stroke="#8c959f" marker-end="url(#arrow)"/>
+
+  <rect x="40" y="262" width="230" height="106" rx="8" fill="#f6f8fa" stroke="#2496ed"/>
+  <text x="155" y="291" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans CJK SC','Microsoft YaHei',sans-serif" font-size="15" font-weight="700" fill="#1f2328">🐳 Docker 管理</text>
+  <text x="155" y="318" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans CJK SC','Microsoft YaHei',sans-serif" font-size="12" fill="#1f2328">/d_list   /d_status</text>
+  <text x="155" y="340" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans CJK SC','Microsoft YaHei',sans-serif" font-size="12" fill="#1f2328">/upgrade   /prune</text>
+  <text x="155" y="360" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans CJK SC','Microsoft YaHei',sans-serif" font-size="11.5" fill="#59636e">点项目：升级 / 停止</text>
+
+  <rect x="335" y="262" width="230" height="106" rx="8" fill="#f6f8fa" stroke="#8250df"/>
+  <text x="450" y="291" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans CJK SC','Microsoft YaHei',sans-serif" font-size="15" font-weight="700" fill="#1f2328">🎬 LitePan 联动</text>
+  <text x="450" y="318" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans CJK SC','Microsoft YaHei',sans-serif" font-size="12" fill="#1f2328">/p_list   /p_status</text>
+  <text x="450" y="340" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans CJK SC','Microsoft YaHei',sans-serif" font-size="12" fill="#1f2328">/refresh  /run  /strm</text>
+  <text x="450" y="360" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans CJK SC','Microsoft YaHei',sans-serif" font-size="11.5" fill="#59636e">/p_menu 重刷菜单</text>
+
+  <rect x="630" y="262" width="230" height="106" rx="8" fill="#f6f8fa" stroke="#1a7f37"/>
+  <text x="745" y="291" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans CJK SC','Microsoft YaHei',sans-serif" font-size="15" font-weight="700" fill="#1f2328">🤖 Cline 额度</text>
+  <text x="745" y="318" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans CJK SC','Microsoft YaHei',sans-serif" font-size="12" fill="#1f2328">/c_status   /quota</text>
+  <text x="745" y="340" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans CJK SC','Microsoft YaHei',sans-serif" font-size="12" fill="#1f2328">/addkey   /delkey</text>
+  <text x="745" y="360" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans CJK SC','Microsoft YaHei',sans-serif" font-size="11.5" fill="#59636e">/keys   /clear</text>
+
+  <line x1="155" y1="368" x2="155" y2="396" stroke="#afb8c1" stroke-dasharray="4 4"/>
+  <line x1="450" y1="368" x2="450" y2="396" stroke="#afb8c1" stroke-dasharray="4 4"/>
+  <line x1="745" y1="368" x2="745" y2="396" stroke="#afb8c1" stroke-dasharray="4 4"/>
+  <line x1="155" y1="396" x2="745" y2="396" stroke="#afb8c1" stroke-dasharray="4 4"/>
+  <line x1="450" y1="396" x2="450" y2="416" stroke="#afb8c1" stroke-dasharray="4 4" marker-end="url(#arrow)"/>
+
+  <rect x="290" y="418" width="320" height="44" rx="8" fill="#f6f8fa" stroke="#bf8700" stroke-dasharray="5 4"/>
+  <text x="450" y="445" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans CJK SC','Microsoft YaHei',sans-serif" font-size="13.5" fill="#1f2328">🧰 任务中心 · /jobs —— 跨模块长任务，可取消</text>
+
+  <text x="32" y="486" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans CJK SC','Microsoft YaHei',sans-serif" font-size="12" fill="#59636e">/status、/list 有模块上下文就按模块解释；/d_* /p_* /c_* 显式指定，绕开上下文</text>
+</svg>

@@ -227,8 +227,8 @@ class DockerHost:
 
 1. **只读接入**：`hosts.py` + 配置 + ssh 包装 + 扫描 + 面板分组 + `--health`。验收：面板列出远端项目、连不上/缺密钥的提示准确；远端项目先只读（升级按钮对远端回「暂不支持」）。回滚 = 删 `docker-hosts.json`。
 2. **升级/清理**：确认与执行、退出码提示、按主机 prune/status。验收：远端 `pull` + `up -d` 全流程，含中断与失败提示。
-3. **硬化**：README 的远端准备步骤（用户、公钥、**守卫脚本**、known_hosts）+ `--health` 补充检查项。
-4. **文档与示例**：README「多主机」章节 + `docs/examples/`（守卫脚本、`authorized_keys` 片段）+ 合并报告 §10。
+3. **硬化**：远端准备步骤（用户、公钥、**守卫脚本**、known_hosts，现落在 [multi-host-setup.md](multi-host-setup.md)）+ `--health` 补充检查项。
+4. **文档与示例**：README「多主机」章节 + [multi-host-setup.md](multi-host-setup.md) + `docs/examples/`（守卫脚本、`authorized_keys` 片段）+ 合并报告 §10。
 
 ## 13. 风险
 
@@ -272,7 +272,7 @@ class DockerHost:
 | 回调只认配置内 host | `handlers._reject_unknown_host()` | 伪造 id → `⚠️ 未知主机`，不执行任何命令（有用例断言） |
 | 清理 / 状态按主机 | `_show_prune_menu`（先选主机）、`_do_prune`、`_show_status`（每台一段） | 清理命令同样经 `host.command()` 包装 |
 | `--health` / `/id` / 首页摘要 | `__main__._health_probes`、`docker/__init__.py` | 逐主机项目数、主机异常 |
-| 远端准备与守卫 | `docs/examples/mtbots-compose-guard.sh`、`authorized_keys.sample`、README「管理多台服务器」 | 守卫已逐条验证：放行 bot 会发的 14 种命令形态（含 v1.5.8 的 `compose stop`），拒绝 `bash -i` / `docker run` / `docker exec` / `curl` / 命令链；`tests/test_setup_script.py::GuardScriptTest` 真的用 `sh` 跑一遍守卫 |
+| 远端准备与守卫 | `docs/examples/mtbots-compose-guard.sh`、`authorized_keys.sample`、README「多主机」+ [multi-host-setup.md](multi-host-setup.md)（手动步骤 1.4） | 守卫已逐条验证：放行 bot 会发的 16 种命令形态（含 v1.5.8 的 `compose stop`），拒绝 `bash -i` / `docker run` / `docker exec` / `curl` / 命令链；`tests/test_setup_script.py::GuardScriptTest` 真的用 `sh` 跑一遍守卫 |
 | 测试 | `tests/test_docker_module.py::Host*`、`MultiHostStateTest`、`tests/test_integration.py::MultiHostFlowTests` | 新增 30 条（总计 377，全绿） |
 
 **未做（有意留白）**：跨主机并行执行（全局仍是一把任务锁）、远端构建 / git / 日志 / `exec`、跨主机迁移容器或卷。
