@@ -5,8 +5,19 @@ on:
   push:
     branches: [main]
     tags: ["v*"]
+    # 纯文档/图片改动不触发 CI（全是这类文件才跳过；tag 推送不受路径过滤影响，发版照常出镜像）
+    paths-ignore:
+      - "**/*.md"
+      - "**/*.svg"
+      - "**/*.png"
+      - "**/*.gif"
   pull_request:
     branches: [main]
+    paths-ignore:
+      - "**/*.md"
+      - "**/*.svg"
+      - "**/*.png"
+      - "**/*.gif"
   workflow_dispatch:
 
 env:

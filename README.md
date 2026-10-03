@@ -124,7 +124,7 @@ docker run -d --name mtbots --restart unless-stopped \
 首页（就是 `🏠 控制台` 那条消息）长这样，正文由各模块自己给，刷新完原地更新：
 
 ```text
-🏠 控制台 · MTBots v1.5.8
+🏠 控制台 · MTBots v1.5.9
 ───────────────
 🐳 Docker · 2 台主机，NAS（15）、VPS（10）
 🤖 Cline · 12 个 Key（正常 10 · 失败 2）
@@ -205,7 +205,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/MbAIGC/MTBots/main/scripts/s
 
 这种模式下「项目根」= 当前目录，守卫与远端脚本不在本地时按 ref 自动下载（`--ref` 默认取当前 MTBots 版本，取不到用 `main` 并告警）。不是 bash 的 shell 用管道形式一样，脚本读 `/dev/tty`，提问不会被管道吃掉：`curl -fsSL <同一个 URL> | sh`。
 
-想锁死版本就把 URL 里的 `main` 换成 tag（例如 `v1.5.8`），或给脚本加 `--ref v1.5.8`——配套的守卫与远端脚本按同一个 ref 取。建议在**宿主机**跑：向导最后那步要在项目根执行 `docker compose up -d --force-recreate`，`chown 10001` 也只有宿主机的 root 能做。
+想锁死版本就把 URL 里的 `main` 换成 tag（例如 `v1.5.9`），或给脚本加 `--ref v1.5.9`——配套的守卫与远端脚本按同一个 ref 取。建议在**宿主机**跑：向导最后那步要在项目根执行 `docker compose up -d --force-recreate`，`chown 10001` 也只有宿主机的 root 能做。
 
 远端**没法让 bot 直接 ssh 进去**（要先用密码、或得从跳板机进）时，在远端以 root 跑这一条：
 
@@ -219,7 +219,7 @@ sudo bash <(curl -fsSL https://raw.githubusercontent.com/MbAIGC/MTBots/main/docs
 
 只有几问，全部有默认值：授权/创建的账号（默认 `mtbots`）、公钥那行（可粘贴、给路径或给 http 地址）、是否装守卫（默认装）、守卫装到哪（默认 `/usr/local/bin`）。随后自动做完：建用户 → 加 `docker` 组 → 修家目录 / `.ssh` 属主权限 → 下载安装守卫 → 写 `authorized_keys`（`command="…",restrict`，幂等、改前备份、别人的 key 不动）→ 自检 docker 可用性。
 
-不想记那行 curl 就让脚本替你打印（连公钥一起给）：`cd /mbots && make remote-setup`。远端脚本里的守卫默认从 `main` 拉（跟脚本同源），要锁版本加 `--ref v1.5.8`。远端跑完回 bot 这边把主机写进清单（向导发现密钥已可用就只写清单 + 验证）：
+不想记那行 curl 就让脚本替你打印（连公钥一起给）：`cd /mbots && make remote-setup`。远端脚本里的守卫默认从 `main` 拉（跟脚本同源），要锁版本加 `--ref v1.5.9`。远端跑完回 bot 这边把主机写进清单（向导发现密钥已可用就只写清单 + 验证）：
 
 ```bash
 cd /mbots && make add-host          # 方式选 1「复用已有账号」，账号填 mtbots
