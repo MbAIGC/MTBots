@@ -162,6 +162,8 @@ python3 -m mtbots --health    # 额外探测 docker compose / LitePan 连通性 
 python3 -m mtbots --list      # 列出已启用模块
 ```
 
+CI（[.github/workflows/docker.yml](.github/workflows/docker.yml)）：push 到 `main` 跑测试并构建 `amd64/arm64` 镜像，推 `:main` 与 `:latest`；打 `v*` tag 时额外推 semver 标签（`:1.5.9`、`:1.5`）。**只改文档或图片（`*.md`、`*.svg`、`*.png`、`*.gif`）的推送会跳过 CI**；`docs/examples/*.sh` 这类会被打进镜像的脚本不算文档，改了照常构建。
+
 ## 多主机
 
 一个 MTBots 同时管**本机 + 若干远端**上的 Compose 项目：列表、详情、升级（整项目 / 单服务 / 批量）、停止、镜像清理、`/d_status`、`--health` 全覆盖。
