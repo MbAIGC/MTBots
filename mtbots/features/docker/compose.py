@@ -17,6 +17,8 @@ import signal
 import subprocess
 import time
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Optional, Sequence
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -33,6 +35,14 @@ log = logging.getLogger("mtbots.docker")
 PROBE_TIMEOUT = 10
 SERVICES_TIMEOUT = 15
 SCAN_TIMEOUT = 30
+
+#: 服务列表（`compose config --services`）缓存秒数：compose 文件很少改，缓存久一点没关系；
+#: 升级/清理之后 `invalidate_cache()` 会连它一起清掉。
+SERVICES_CACHE_TTL = 300.0
+#: 服务列表并发获取的最大线程数（每个项目一条子进程/一次 ssh）
+SERVICES_PARALLEL = 6
+#: 主机并发扫描的最大线程数（每台主机一条 `compose ls`）
+HOST_PARALLEL = 4
 
 #: docker pull 每层进度的噪音行，仅在「最终完成消息」中过滤：
 #: Downloading [==>...] 1MB/2MB、Downloading 3%、Download complete、Extracting 12s、Verifying Checksum 等
@@ -183,6 +193,18 @@ async def delete_message_quietly(message: Any) -> bool:
 
 
 # ==================== 全局状态 ====================
+@dataclass
+class HostScan:
+    """一台主机的扫描结果（线程里跑，结果由主线程合并——不再让 worker 直接改共享属性）。"""
+
+    host_id: str
+    projects: list[dict] = field(default_factory=list)
+    error: str = ""
+    hidden_dirs: list[str] = field(default_factory=list)
+    skipped_projects: list[str] = field(default_factory=list)
+    roots_filtered: list[str] = field(default_factory=list)
+
+
 class DockerState:
     """LDMG 全部可变全局状态的宿主（每个 register() 建一个）。"""
 
@@ -201,6 +223,11 @@ class DockerState:
         self.compose_bin: Optional[list[str]] = None
         self.projects_cache: list[dict] = []
         self.projects_cache_time: float = 0.0
+        #: 项目扫描互斥：并发的面板刷新/后台刷新只跑一次全量扫描
+        self._scan_lock: Optional[asyncio.Lock] = None
+        #: 服务列表缓存 `key -> (时间, [服务…])`：扫描**不再**逐项目跑 `compose config`，
+        #: 只对当前页/详情页按需取，取过一次就长期复用（这是主面板从秒级回到亚秒级的关键）。
+        self.services_cache: dict[str, tuple[float, list[str]]] = {}
         #: 测试/嵌入用：替换真实扫描（返回项目列表）
         self.scan_hook: Optional[Callable[[], list[dict]]] = None
         #: 最近一次扫描的失败原因（空 = 成功）。以前这里失败是静默的，
@@ -273,6 +300,12 @@ class DockerState:
         if self.exec_lock is None:
             self.exec_lock = asyncio.Lock()
         return self.exec_lock
+
+    def get_scan_lock(self) -> asyncio.Lock:
+        """项目扫描锁（惰性创建：DockerState 可能在事件循环之外被构造）。"""
+        if self._scan_lock is None:
+            self._scan_lock = asyncio.Lock()
+        return self._scan_lock
 
     async def begin_task(self, task_id: str) -> bool:
         """原子地获取执行锁并登记当前任务；拿不到锁返回 False。
@@ -347,6 +380,9 @@ class DockerState:
         """
         if not host.is_remote:
             return self.get_compose_bin()
+        if host.error:
+            # 配置本身就有错（私钥不存在 / target 非法）：绝不为了探测再发一次 ssh
+            return []
         cached = self.remote_compose.get(host.id)
         if cached is not None:
             return cached
@@ -363,6 +399,18 @@ class DockerState:
                     self.remote_compose[host.id] = list(cand)
                     log.info("远端主机 %s 使用 compose 命令: %s", host.id, " ".join(cand))
                     return self.remote_compose[host.id]
+                if probe.returncode == 255:
+                    # ssh 自己就没通（连不上/认证失败/守卫拒绝）：换 `docker-compose` 再试一次
+                    # 只是白等一个 ConnectTimeout（10s），直接放弃
+                    detail = (probe.stderr or probe.stdout or "").strip().splitlines()
+                    log.warning(
+                        "远端主机 %s 的 ssh 探测失败（退出码 %s）：%s｜%s",
+                        host.id,
+                        probe.returncode,
+                        explain_exit(probe.returncode, probe.stderr or probe.stdout, host),
+                        detail[0][:200] if detail else "-",  # ssh 的原话，排查时最有用
+                    )
+                    break
             except Exception:
                 continue
 
@@ -375,6 +423,9 @@ class DockerState:
         host = self.host_of(project)
         compose_bin = self.get_remote_compose_bin(host)
         if not compose_bin:
+            # 配置本身有错时（私钥不存在/target 非法）说「没装 compose」会把人带沟里
+            if host.error:
+                raise RuntimeError("主机 %s 配置有问题：%s" % (host.id, host.error))
             if host.is_remote:
                 raise RuntimeError("远端主机 %s 未检测到 docker compose / docker-compose" % host.id)
             raise RuntimeError("未检测到 docker compose / docker-compose 命令")
@@ -386,12 +437,16 @@ class DockerState:
 
     def get_project_services(
         self, work_dir: str, config_files: Sequence[str], host: Optional[DockerHost] = None
-    ) -> list[str]:
-        """获取项目的服务定义（远端项目在远端跑 `config --services`）。"""
+    ) -> Optional[list[str]]:
+        """获取项目的服务定义（远端项目在远端跑 `config --services`）。
+
+        返回 `None` 表示**这次没取到**（compose 不可用/命令失败），与「取到了、就是空列表」
+        区分开：前者不写缓存、下次再试，后者是有效结果。
+        """
         host = host or self.local_host
         compose_bin = self.get_remote_compose_bin(host)
         if not compose_bin:
-            return []
+            return None
         try:
             cmd = list(compose_bin)
             for config_file in config_files:
@@ -406,32 +461,115 @@ class DockerState:
             )
             if result.returncode == 0:
                 return [s.strip() for s in result.stdout.strip().splitlines() if s.strip()]
+            log.warning("获取 %s 服务列表失败：%s", work_dir, explain_exit(result.returncode, result.stderr, host))
         except Exception as exc:
             log.warning("获取 %s 服务列表失败: %s", work_dir, exc)
-        return []
+        return None
+
+    # ---------- 服务列表（按需 + 缓存） ----------
+    def services_key(self, project: Any) -> str:
+        """服务列表的缓存键：同名项目在不同主机/不同 yml 下算不同条目。"""
+        if not isinstance(project, dict):
+            return ""
+        host = self.host_of(project)
+        config_files = ",".join(str(c) for c in (project.get("config_files") or []))
+        return "%s|%s|%s" % (host.id, project.get("name", ""), config_files or project.get("dir", ""))
+
+    def _cached_services(self, key: str) -> Optional[list[str]]:
+        entry = self.services_cache.get(key)
+        if not entry:
+            return None
+        stamp, services = entry
+        if time.monotonic() - stamp >= SERVICES_CACHE_TTL:
+            return None
+        return list(services)
+
+    def _fill_services(self, project: dict) -> None:
+        """取一个项目的服务列表并写回项目 dict（结果同时进缓存，跨扫描复用）。"""
+        services = self.get_project_services(
+            str(project.get("dir") or ""),
+            list(project.get("config_files") or []),
+            self.host_of(project),
+        )
+        if services is None:  # 没取到：保持「未加载」，下次再看这一页时重试
+            return
+        project["services"] = services
+        project["services_loaded"] = True
+        key = self.services_key(project)
+        if key:
+            self.services_cache[key] = (time.monotonic(), list(services))
+
+    def load_services(self, projects: Sequence[dict]) -> int:
+        """给一批项目补齐服务列表（同步，交给 `ensure_services` 的 to_thread 跑）。
+
+        只处理「这一屏真正要渲染的项目」——全量扫描时逐项目跑 `compose config` 是主面板
+        慢到十来秒的元凶（远端更是每个项目一次完整 SSH 握手）。返回本次真正取过的数量。
+        """
+        pending = [p for p in projects if isinstance(p, dict) and self._needs_services(p)]
+        if not pending:
+            return 0
+        workers = max(1, min(SERVICES_PARALLEL, len(pending)))
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="docker-svc") as pool:
+            list(pool.map(self._fill_services, pending))
+        return len(pending)
+
+    async def ensure_services(self, projects: Sequence[dict]) -> None:
+        """按需补齐服务列表（不阻塞事件循环）。已经加载过的项目直接跳过。"""
+        pending = [p for p in projects if self._needs_services(p)]
+        if pending:
+            await asyncio.to_thread(self.load_services, pending)
+
+    @staticmethod
+    def _needs_services(project: Any) -> bool:
+        """这个项目还要不要跑一次 `compose config --services`。
+
+        有 `services_loaded` 标记（扫描时命中缓存）或**已经带着服务列表**（外部塞进来的
+        project dict）就不用；取失败的项目保持「未加载」，下次再看这一页时重试。
+        """
+        return bool(
+            isinstance(project, dict)
+            and not project.get("services_loaded")
+            and not project.get("services")
+            and project.get("dir")
+        )
 
     # ---------- 项目扫描 ----------
     def scan_projects_sync(self) -> list[dict]:
-        """逐主机扫描 `docker compose ls -a --format json`（同步，交给 to_thread 跑）。
+        """扫描各主机 `docker compose ls -a --format json`（同步，交给 to_thread 跑）。
+
+        多主机时**按主机并行**（各台互不依赖，串行等一台连不上的机器纯粹浪费时间）；
+        每台主机的结果由 worker 返回、在主线程合并，所以 worker 里不碰共享属性。
 
         失败不再静默：每台主机的原因写进 `host_errors[host_id]`（本机那份同时写进
         `last_scan_error`，兼容旧的提示路径）；本机「扫到了、但 compose 目录在容器里不存在」
         的项目目录写进 `hidden_dirs`。**远端主机不做本地目录检查**——远端路径本来就不在本机，
         检查了会把它自己的项目全部误判成「没挂载」。
+
+        服务列表（`容器：…`）**不在这里取**：那是对每个项目再跑一条 `compose config --services`
+        （远端=每项目一次 SSH 握手），15+10 个项目就是十来秒。改为 `ensure_services()`
+        只对当前页/详情页按需取。
         """
         started = time.monotonic()
-        projects: list[dict] = []
         self.host_errors = {}
         self.last_scan_error = ""
         self.hidden_dirs = []
         self.skipped_projects = []
         self.roots_filtered = {}
-        for host in self.hosts:
-            try:
-                projects.extend(self._scan_host_sync(host))
-            except Exception as exc:  # 单台主机炸了不能拖垮其它主机
-                self.host_errors[host.id] = str(exc)
-                log.warning("主机 %s 扫描异常：%s", host.id, exc)
+
+        scans = self._scan_hosts(self.hosts)
+        projects: list[dict] = []
+        for scan in scans:
+            projects.extend(scan.projects)
+            if scan.error:
+                self.host_errors[scan.host_id] = scan.error
+            for work_dir in scan.hidden_dirs:
+                if work_dir not in self.hidden_dirs:
+                    self.hidden_dirs.append(work_dir)
+            for label in scan.skipped_projects:
+                if label not in self.skipped_projects:
+                    self.skipped_projects.append(label)
+            if scan.roots_filtered:
+                self.roots_filtered.setdefault(scan.host_id, []).extend(scan.roots_filtered)
         self.last_scan_error = self.host_errors.get(self.local_host.id, "")
         projects.sort(key=lambda x: (str(x.get("host") or ""), x["name"]))
 
@@ -468,20 +606,38 @@ class DockerState:
         self._last_scan_errors = dict(self.host_errors)
         return projects
 
-    def _scan_host_sync(self, host: DockerHost) -> list[dict]:
-        """扫一台主机；失败原因写进 `host_errors`，不抛异常。"""
+    def _scan_hosts(self, hosts: Sequence[DockerHost]) -> list[HostScan]:
+        """并行扫多台主机（单主机时原样直调，省掉线程池的仪式感）。"""
+        if len(hosts) <= 1:
+            return [self._scan_host_safe(host) for host in hosts]
+        workers = max(1, min(HOST_PARALLEL, len(hosts)))
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="docker-scan") as pool:
+            # map 保序：错误与提示的合并顺序稳定，日志/面板不会一次一个样
+            return list(pool.map(self._scan_host_safe, hosts))
+
+    def _scan_host_safe(self, host: DockerHost) -> HostScan:
+        """扫一台主机并兜住异常（单台主机炸了不能拖垮其它主机）。"""
+        try:
+            return self._scan_host_sync(host)
+        except Exception as exc:
+            log.warning("主机 %s 扫描异常：%s", host.id, exc)
+            return HostScan(host_id=host.id, error=str(exc))
+
+    def _scan_host_sync(self, host: DockerHost) -> HostScan:
+        """扫一台主机；失败原因放进返回值，不抛异常。"""
+        scan = HostScan(host_id=host.id)
         if host.error:
-            self.host_errors[host.id] = host.error
-            return []
+            scan.error = host.error
+            return scan
 
         compose_bin = self.get_remote_compose_bin(host)
         if not compose_bin:
-            self.host_errors[host.id] = (
+            scan.error = (
                 "远端未安装 docker compose / docker"
                 if host.is_remote
                 else "未找到 docker compose / docker-compose 命令"
             )
-            return []
+            return scan
 
         try:
             result = subprocess.run(
@@ -491,15 +647,15 @@ class DockerState:
                 timeout=SCAN_TIMEOUT,
             )
         except Exception as exc:
-            self.host_errors[host.id] = str(exc)
+            scan.error = str(exc)
             log.warning("主机 %s 的 docker compose ls 起不来：%s", host.id, exc)
-            return []
+            return scan
 
         if result.returncode != 0:
             detail = (result.stderr or result.stdout or "").strip()
-            self.host_errors[host.id] = explain_exit(result.returncode, detail, host)
-            log.warning("主机 %s 的 docker compose ls 失败：%s", host.id, self.host_errors[host.id])
-            return []
+            scan.error = explain_exit(result.returncode, detail, host)
+            log.warning("主机 %s 的 docker compose ls 失败：%s", host.id, scan.error)
+            return scan
 
         projects: list[dict] = []
         seen_keys: set[str] = set()
@@ -532,12 +688,12 @@ class DockerState:
                 # 远端返回的是它自己的路径：不做本地存在性检查，只按可选白名单过滤
                 if work_dir and not host.allows(work_dir):
                     log.info("主机 %s 的项目 %s 不在 roots 白名单内，跳过", host.id, name)
-                    self.roots_filtered.setdefault(host.id, []).append(name)
+                    scan.roots_filtered.append(name)
                     continue
             elif work_dir and not os.path.isdir(work_dir):
                 # compose 文件在宿主机有、容器里没有 => 没挂载，单独提示
-                if work_dir not in self.hidden_dirs:
-                    self.hidden_dirs.append(work_dir)
+                if work_dir not in scan.hidden_dirs:
+                    scan.hidden_dirs.append(work_dir)
                 continue
 
             unique_key = "%s:%s:%s" % (host.id, name, work_dir)
@@ -545,40 +701,59 @@ class DockerState:
                 # `docker compose ls` 没给 ConfigFiles（`-f -`/stdin 起的项目、label 缺失）：
                 # 以前这里直接 continue，项目在面板上「凭空消失」，用户无从排查
                 label = "%s/%s" % (host.id, name)
-                if label not in self.skipped_projects:
-                    self.skipped_projects.append(label)
-                    log.warning("项目 %s 没有 compose 文件路径（ConfigFiles 为空），无法升级，已跳过", label)
+                scan.skipped_projects.append(label)
+                log.warning("项目 %s 没有 compose 文件路径（ConfigFiles 为空），无法升级，已跳过", label)
                 continue
             if work_dir and unique_key not in seen_keys:
                 seen_keys.add(unique_key)
-                projects.append(
-                    {
-                        "name": name,
-                        "dir": work_dir,
-                        "status": status,
-                        "services": self.get_project_services(work_dir, config_files, host),
-                        "config_files": config_files,
-                        "host": host.id,
-                        "host_label": host.display,
-                    }
-                )
-        return projects
+                project = {
+                    "name": name,
+                    "dir": work_dir,
+                    "status": status,
+                    "config_files": config_files,
+                    "host": host.id,
+                    "host_label": host.display,
+                }
+                cached = self._cached_services(self.services_key(project))
+                project["services"] = list(cached or [])
+                project["services_loaded"] = cached is not None
+                projects.append(project)
+        scan.projects = projects
+        return scan
+
+    def _fresh_enough(self, now: float, ttl: float, *, allow_empty: bool = True) -> bool:
+        if self.projects_cache_time <= 0.0:
+            return False
+        if not allow_empty and not self.projects_cache:
+            return False
+        return (now - self.projects_cache_time) < ttl
 
     async def get_projects(self, force_refresh: bool = False) -> list[dict]:
-        """带 TTL 的项目列表，避免每次点击按钮都全量扫描。"""
+        """带 TTL 的项目列表；并发调用走同一把锁，避免连点触发多次全量扫描。
+
+        **只合并「在飞」的扫描**：等锁期间别人刚好扫完（而且是在我这次调用**到达之后**
+        才扫完的）就复用他的结果。顺序发生的第二次「🔄 强制刷新」照常重扫——
+        用户点刷新就是要新数据，不能悄悄给他 3 秒前的缓存。
+        """
         now = time.monotonic()
-        if (
-            not force_refresh
-            and self.projects_cache
-            and (now - self.projects_cache_time) < self.settings.projects_cache_ttl
-        ):
+        if not force_refresh and self._fresh_enough(now, self.settings.projects_cache_ttl, allow_empty=False):
             return self.projects_cache
 
-        scanner = self.scan_hook or self.scan_projects_sync
-        projects = await asyncio.to_thread(scanner)
-        self.projects_cache = list(projects)
-        self.projects_cache_time = now
-        return self.projects_cache
+        arrived = time.monotonic()
+        async with self.get_scan_lock():
+            if self.projects_cache_time >= arrived:
+                return self.projects_cache  # 我到达之后有人扫完了（并发刷新/连点）
+            if not force_refresh and self._fresh_enough(
+                time.monotonic(), self.settings.projects_cache_ttl, allow_empty=False
+            ):
+                return self.projects_cache
+
+            scanner = self.scan_hook or self.scan_projects_sync
+            projects = await asyncio.to_thread(scanner)
+            self.projects_cache = list(projects)
+            # 记**扫完**的时间：它同时也是「数据有多旧」和上面那个合并判断的依据
+            self.projects_cache_time = time.monotonic()
+            return self.projects_cache
 
     def cached_projects(self) -> list[dict]:
         """只读缓存（summary 用：绝不触发 docker / 阻塞）。"""
@@ -589,8 +764,9 @@ class DockerState:
         return self.projects_cache_time > 0.0
 
     def invalidate_cache(self) -> None:
-        """使项目扫描缓存立即过期（升级/清理操作后调用）。"""
+        """使项目扫描缓存立即过期（升级/清理操作后调用）；服务列表一并作废。"""
         self.projects_cache_time = 0.0
+        self.services_cache.clear()
 
 
 DOCKER_SOCKET = "/var/run/docker.sock"

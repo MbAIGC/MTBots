@@ -36,6 +36,57 @@ DEFAULT_PORT = 22
 #: 只允许这两种：`yes`（配预置 known_hosts）与 `accept-new`（首次自动记录）
 STRICT_VALUES = ("yes", "accept-new")
 
+#: ssh 连接复用（ControlMaster）：一条 TCP 连接上跑多条命令，省掉每次 0.3~1s 的握手。
+#: 面板刷新要按主机/按项目发好几条 ssh，没有复用就是每条都重新握手（实测回环 0.36s/次）。
+#: `%C` 是 (local, remote, port, user) 的哈希，路径长度固定、不会超 ControlPath 的 108 字节上限。
+#: 想关掉（某些老 sshd / 中间设备不吃复用）：容器里设 `SSH_MULTIPLEX=0`。
+DEFAULT_CONTROL_DIR = "/tmp"
+CONTROL_PERSIST = "60"
+FALSE_VALUES = ("0", "false", "no", "off")
+
+
+def multiplex_enabled(env: Optional[Mapping[str, str]] = None) -> bool:
+    """是否启用 ssh 连接复用（默认开；`SSH_MULTIPLEX=0/false/no/off` 关）。"""
+    raw = (os.environ if env is None else env).get("SSH_MULTIPLEX")
+    if raw is None or not str(raw).strip():
+        return True
+    return str(raw).strip().lower() not in FALSE_VALUES
+
+
+def control_dir(env: Optional[Mapping[str, str]] = None) -> str:
+    """复用套接字放哪个目录（`SSH_CONTROL_DIR`，默认 /tmp）。
+
+    `-o` 的值按空白切分解析，所以带空格/引号/逗号的路径会把 ssh 配置解析成两截
+    （整条 ssh 直接报错）——这种值一律退回默认目录，不让一个环境变量把所有远端命令打挂。
+    """
+    source = os.environ if env is None else env
+    raw = str(source.get("SSH_CONTROL_DIR") or "").strip()
+    if not raw:
+        return DEFAULT_CONTROL_DIR
+    if any(ch.isspace() or ch in "\"',=" for ch in raw):
+        log.warning("SSH_CONTROL_DIR=%r 含空白/引号，已忽略并改用 %s", raw, DEFAULT_CONTROL_DIR)
+        return DEFAULT_CONTROL_DIR
+    return raw.rstrip("/") or DEFAULT_CONTROL_DIR
+
+
+def control_path(env: Optional[Mapping[str, str]] = None) -> str:
+    """复用套接字的路径（`%C` = local/remote/port/user 的哈希，长度固定不超 108 字节上限）。"""
+    return os.path.join(control_dir(env), "mtbots-ssh-%C")
+
+
+def control_path_usable(path: str) -> bool:
+    """套接字目录真的能写吗？写不了就整个不复用——否则**所有**远端命令都会起不来。
+
+    （`ControlMaster=auto` 建不出 socket 时 ssh 只是警告，但为了行为可预期，这里自己判。）
+    """
+    directory = os.path.dirname(path) or "."
+    try:
+        if not os.path.isdir(directory):
+            return False
+        return os.access(directory, os.W_OK | os.X_OK)
+    except OSError:
+        return False
+
 #: ssh 自己失败时的退出码 → 面板提示（不是 docker 的错，得分开说）
 SSH_EXIT_HINTS = {
     255: "SSH 连不上或认证失败（检查网络、端口、私钥、known_hosts）",
@@ -86,8 +137,7 @@ class DockerHost:
         cmd = [str(part) for part in cmd]
         if not self.is_remote:
             return cmd
-        return [
-            "ssh",
+        options = [
             "-p",
             str(self.port),
             "-i",
@@ -102,6 +152,25 @@ class DockerHost:
             "StrictHostKeyChecking=%s" % self.strict,
             "-o",
             "UserKnownHostsFile=%s" % self.known_hosts,
+        ]
+        if multiplex_enabled():
+            # 复用连接：同一台主机上的第 2..N 条命令不再握手（扫描+取服务一次能省好几秒）
+            path = control_path()
+            if not control_path_usable(path):
+                # 目录不可写就退回「每次握手」：宁可贵一点，也不能让所有远端命令都起不来
+                log.warning("ssh 复用套接字目录不可写（%s），本次不复用连接", path)
+            else:
+                options += [
+                    "-o",
+                    "ControlMaster=auto",
+                    "-o",
+                    "ControlPath=%s" % path,
+                    "-o",
+                    "ControlPersist=%s" % CONTROL_PERSIST,
+                ]
+        return [
+            "ssh",
+            *options,
             # `--` 放在目标**之前**：选项解析在这里结束，目标即便形似选项也只会被当成主机名
             # （放在目标之后的话，`-oProxyCommand=…` 这种目标会被 ssh 当选项吃掉）
             "--",
@@ -266,11 +335,16 @@ def load_hosts(path: Any = None) -> tuple[list[DockerHost], list[str]]:
 
 
 __all__ = [
+    "CONTROL_PERSIST",
     "DEFAULT_IDENTITY",
     "DEFAULT_KNOWN_HOSTS",
     "DockerHost",
     "LOCAL_HOST",
     "SSH_EXIT_HINTS",
+    "control_dir",
+    "control_path",
+    "control_path_usable",
     "explain_exit",
     "load_hosts",
+    "multiplex_enabled",
 ]

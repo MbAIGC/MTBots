@@ -113,6 +113,11 @@ def nav_help() -> str:
     return cb_simple(PREFIX_NAV, "help")
 
 
+def nav_refresh() -> str:
+    """首页「🔄 刷新」：先把各模块数据刷进缓存，再重画首页。"""
+    return cb_simple(PREFIX_NAV, "refresh")
+
+
 def job_cancel(job_id: str) -> str:
     return cb_simple(PREFIX_JOB, "cancel", job_id)
 
@@ -221,19 +226,23 @@ class PanelManager:
         *,
         force_new: bool = False,
         chat_id: Optional[int] = None,
+        bot: Any = None,
         parse_mode: str = ParseMode.HTML,
         footer: bool = True,
         limit: int = MESSAGE_LIMIT,
     ) -> None:
-        """把 text 渲染成本会话本模块的唯一面板消息。"""
+        """把 text 渲染成本会话本模块的唯一面板消息。
+
+        `update=None` + `chat_id` + `bot` 是给**后台任务**用的（首页刷新跑完再回填面板）：
+        这时一定走原地编辑——用户视线就在那条面板上，而 Update 早已失效、不能再用。
+        """
         chat = update.effective_chat if update is not None else None
         target_chat = chat_id if chat_id is not None else (chat.id if chat else None)
         if target_chat is None:
             log.warning("render 缺少 chat_id，已丢弃：module=%s", module_id)
             return
 
-        bot = None
-        if update is not None:
+        if bot is None and update is not None:
             try:
                 bot = update.get_bot()
             except RuntimeError:
@@ -384,7 +393,7 @@ class PanelManager:
         rows.append(
             [
                 InlineKeyboardButton("🧰 任务中心", callback_data=nav_jobs()),
-                InlineKeyboardButton("❓ 帮助", callback_data=nav_help()),
+                InlineKeyboardButton("🔄 刷新", callback_data=nav_refresh()),
             ]
         )
         return InlineKeyboardMarkup(rows)
@@ -442,6 +451,7 @@ __all__ = [
     "nav_status",
     "nav_jobs",
     "nav_help",
+    "nav_refresh",
     "job_cancel",
     "BACK_LABEL",
     "NEXT_ACTIONS_LIMIT",

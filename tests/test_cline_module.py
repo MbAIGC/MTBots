@@ -21,6 +21,7 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -1162,7 +1163,185 @@ class TestModuleSpecWiring(unittest.TestCase):
         state.snapshots[7] = [
             cli.Snapshot("主账号", "sk_a…aaaa", windows=[cli.Window("本周额度", 57.0)])
         ]
-        self.assertIn("周额度 57%", asyncio.run(MODULE.summary(self.core, 7)))
+        # 单个 Key：压成一行
+        one = asyncio.run(MODULE.summary(self.core, 7))
+        self.assertEqual(one, "🤖 Cline · 1 个 Key · 主账号 周 57%")
+        self.assertNotIn("\n", one)
+
+    def test_summary_lists_every_key_on_its_own_line(self):
+        """多个 Key：首行报总数与正常/失败，再一 Key 一行（首页直接看额度）。"""
+        state = inject_state(self.core, self.tmp.name)
+        for alias in ("k1", "k2", "k3"):
+            state.store.add(7, alias, "sk_" + alias * 8 + "x" * 40)
+        state.snapshots[7] = [
+            cli.Snapshot(
+                "k1",
+                "sk_…1",
+                windows=[cli.Window("5 小时额度", 15.0), cli.Window("本周额度", 30.0), cli.Window("本月额度", 20.0)],
+            ),
+            cli.Snapshot("k2", "sk_…2", windows=[cli.Window("本周额度", 88.0)]),
+            cli.Snapshot("k3", "sk_…3", warnings=["❌ 无权限"]),  # 没有任何可用窗口 = 失败
+        ]
+        lines = asyncio.run(MODULE.summary(self.core, 7)).splitlines()
+        self.assertEqual(lines[0], "🤖 Cline · 3 个 Key（正常 2 · 失败 1）")
+        self.assertEqual(lines[1], "• k1 · 5时 15% / 周 30% / 月 20%")
+        self.assertEqual(lines[2], "• k2 · 周 88%")
+        self.assertEqual(lines[3], "• k3 · ⚠️ 无额度数据")
+
+    def test_summary_never_mixes_counts_with_stale_snapshots(self):
+        """计数来自 store、明细来自快照缓存：两者对不上时必须退回一行，不能自相矛盾。"""
+        state = inject_state(self.core, self.tmp.name)
+        for alias in ("k1", "k2"):
+            state.store.add(7, alias, "sk_" + alias * 4 + "x" * 50)
+        state.snapshots[7] = [
+            cli.Snapshot("k1", "sk_…1", windows=[cli.Window("本周额度", 10.0)]),
+            cli.Snapshot("k2", "sk_…2", windows=[cli.Window("本周额度", 20.0)]),
+            cli.Snapshot("k3", "sk_…3", windows=[cli.Window("本周额度", 30.0)]),  # 已删的 Key
+        ]
+        lines = asyncio.run(MODULE.summary(self.core, 7)).splitlines()
+        self.assertNotIn("k3", "\n".join(lines), "已删的 Key 不能再出现在首页")
+        self.assertEqual(len(lines), 3, "2 个 Key + 1 行标题")
+        self.assertIn("2 个 Key", lines[0])
+
+        # 新加的 Key 还没有快照：只能给一行，不能拿旧的凑数
+        state.store.add(7, "k4", "sk_" + "d" * 60)
+        fresh = asyncio.run(MODULE.summary(self.core, 7))
+        self.assertEqual(fresh, "🤖 Cline · 3 个 Key · 点击进入")
+
+    def test_delkey_drops_cached_snapshots(self):
+        """删掉一个 Key 后不能继续显示它的额度（哪怕 alias 过滤也救不了计数口径）。"""
+        state = inject_state(self.core, self.tmp.name)
+        state.store.add(1, "k1", "sk_" + "a" * 60)
+        state.snapshots[1] = [cli.Snapshot("k1", "sk_…", windows=[cli.Window("本周额度", 10.0)])]
+
+        replies: list[str] = []
+
+        async def reply_text(text, **kwargs):
+            replies.append(text)
+
+        message = SimpleNamespace(reply_text=reply_text)
+        update = SimpleNamespace(
+            effective_user=SimpleNamespace(id=1),
+            effective_message=message,
+            effective_chat=SimpleNamespace(id=1, type="private"),
+            callback_query=None,
+        )
+        context = SimpleNamespace(
+            args=["k1"], application=SimpleNamespace(bot_data={"core": self.core})
+        )
+        asyncio.run(cline_handlers.cmd_delkey(update, context))
+        self.assertTrue(any("已删除别名" in r for r in replies), replies)
+        self.assertNotIn(1, state.snapshots, "删 Key 后旧快照必须作废")
+
+    def test_addkey_drops_cached_snapshots(self):
+        """给同一个别名换 Key 后，旧额度不能顶在新 Key 头上。"""
+        state = inject_state(self.core, self.tmp.name)
+        state.store.add(1, "k1", "sk_" + "a" * 60)
+        state.snapshots[1] = [cli.Snapshot("k1", "sk_…", windows=[cli.Window("本周额度", 10.0)])]
+
+        replies: list[str] = []
+
+        async def reply_text(text, **kwargs):
+            replies.append(text)
+
+        async def delete():
+            return None
+
+        message = SimpleNamespace(reply_text=reply_text, delete=delete)
+        update = SimpleNamespace(
+            effective_user=SimpleNamespace(id=1),
+            effective_message=message,
+            effective_chat=SimpleNamespace(id=1, type="private"),
+            callback_query=None,
+        )
+        sent: list[str] = []
+
+        async def send_message(chat_id, text, **kwargs):
+            sent.append(text)
+
+        context = SimpleNamespace(
+            args=["k1", "sk_" + "b" * 60],
+            bot=SimpleNamespace(send_message=send_message),
+            application=SimpleNamespace(bot_data={"core": self.core}),
+        )
+        asyncio.run(cline_handlers.cmd_addkey(update, context))
+        self.assertTrue(replies or sent, "addkey 至少要有回执")
+        self.assertNotIn(1, state.snapshots, "换 Key 后旧快照必须作废")
+
+    def test_refresh_fetches_and_caches_snapshots(self):
+        """首页刷新会把额度查一遍并缓存；summary 只读这份缓存。"""
+        state = inject_state(self.core, self.tmp.name)
+        state.store.add(7, "主账号", "sk_" + "a" * 64)
+        calls: list[list[tuple[str, str]]] = []
+
+        async def fake_fetch(items):
+            calls.append(list(items))
+            return [cli.Snapshot("主账号", "sk_a…aaaa", windows=[cli.Window("本周额度", 12.0)])]
+
+        with mock.patch.object(state.client, "fetch_all", side_effect=fake_fetch):
+            asyncio.run(MODULE.refresh(self.core, 7))
+        self.assertEqual(calls, [[("主账号", "sk_" + "a" * 64)]])
+        self.assertIn("周 12%", asyncio.run(MODULE.summary(self.core, 7)))
+
+    def test_refresh_without_keys_clears_snapshots(self):
+        state = inject_state(self.core, self.tmp.name)
+        state.snapshots[7] = [cli.Snapshot("旧", "sk_…")]
+        asyncio.run(MODULE.refresh(self.core, 7))
+        self.assertNotIn(7, state.snapshots)
+
+    def test_refresh_skips_when_a_fetch_is_already_running(self):
+        """面板手动刷新正在查时，首页刷新不再叠加一轮（一个 Key 要打 3 个接口）。
+
+        走的是**额度查询锁**（`fetch_lock_for`），不是 Key 存储那把锁。
+        """
+        state = inject_state(self.core, self.tmp.name)
+        state.store.add(7, "主账号", "sk_" + "a" * 64)
+        called: list[int] = []
+
+        async def fake_fetch(items):
+            called.append(1)
+            return []
+
+        async def scenario():
+            async with state.fetch_lock_for(7):
+                with mock.patch.object(state.client, "fetch_all", side_effect=fake_fetch):
+                    await MODULE.refresh(self.core, 7)
+
+        asyncio.run(scenario())
+        self.assertEqual(called, [])
+
+    def test_refresh_does_not_take_the_key_storage_lock(self):
+        """额度查询不能占着 Key 存储的写锁跑网络：否则一轮查询期间 /addkey 全被堵住。"""
+        state = inject_state(self.core, self.tmp.name)
+        state.store.add(7, "主账号", "sk_" + "a" * 64)
+        self.assertIsNot(state.lock_for(7), state.fetch_lock_for(7))
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def slow_fetch(items):
+            started.set()
+            await release.wait()
+            return []
+
+        async def scenario():
+            with mock.patch.object(state.client, "fetch_all", side_effect=slow_fetch):
+                task = asyncio.ensure_future(MODULE.refresh(self.core, 7))
+                await started.wait()
+                # 查询还在飞：此时拿存储锁必须立刻成功（不是等查询结束）
+                async with state.lock_for(7):
+                    await asyncio.to_thread(state.store.add, 7, "第二把", "sk_" + "b" * 64)
+                release.set()
+                await task
+
+        asyncio.run(scenario())
+        self.assertIn("第二把", state.store.keys(7))
+
+    def test_refresh_is_registered_with_a_longer_ttl_than_docker(self):
+        """额度接口比本地扫描金贵：首页刷新的 TTL 必须更长。"""
+        from mtbots.features.docker import MODULE as docker_module
+
+        self.assertIsNotNone(MODULE.refresh)
+        self.assertGreater(MODULE.refresh_ttl, docker_module.refresh_ttl)
 
     def test_summary_reports_broken_storage_without_crashing(self):
         injection_core = self.core

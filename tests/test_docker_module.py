@@ -287,6 +287,7 @@ class DockerStateTest(unittest.TestCase):
         asyncio.run(state.get_projects())  # TTL 内命中缓存
         self.assertEqual(len(calls), 1)
 
+        # 「🔄 强制刷新」必须真扫：用户点刷新就是要新数据，不许悄悄给旧缓存
         asyncio.run(state.get_projects(force_refresh=True))
         self.assertEqual(len(calls), 2)
         self.assertTrue(state.has_scan())
@@ -294,6 +295,33 @@ class DockerStateTest(unittest.TestCase):
         state.invalidate_cache()
         self.assertFalse(state.has_scan())
         self.assertEqual(state.cached_projects()[0]["name"], "a")  # 失效只动时间戳
+        self.assertEqual(state.services_cache, {})  # 服务列表缓存一并作废
+
+    def test_concurrent_refreshes_share_one_scan(self) -> None:
+        """两个会话同时点 🔄：等锁的那个复用先到的结果，只跑一次全量扫描。"""
+        import threading
+
+        state = DockerState(DockerSettings(projects_cache_ttl=15.0))
+        calls: list[int] = []
+        gate = threading.Event()
+
+        def scanner() -> list[dict]:
+            calls.append(1)
+            gate.wait(3)  # 卡住第一个扫描，让第二个确实排在锁上
+            return [_project("a", "running")]
+
+        state.scan_hook = scanner
+
+        async def scenario() -> None:
+            first = asyncio.ensure_future(state.get_projects(force_refresh=True))
+            await asyncio.sleep(0.05)
+            second = asyncio.ensure_future(state.get_projects(force_refresh=True))
+            await asyncio.sleep(0.05)
+            gate.set()
+            await asyncio.gather(first, second)
+
+        asyncio.run(scenario())
+        self.assertEqual(len(calls), 1, "在飞的扫描要被合并，不能两个会话各扫一遍")
 
     def test_zero_ttl_always_rescans(self) -> None:
         state = DockerState(DockerSettings(projects_cache_ttl=0.0))
@@ -469,6 +497,68 @@ class ModuleSpecTest(unittest.TestCase):
 
         state.projects_cache = []
         self.assertEqual(asyncio.run(summary(core, 1)), "🐳 Docker · 暂无项目")
+
+    def test_summary_shows_per_host_counts(self) -> None:
+        """多主机：每台主机摊开计数（NAS（15）、VPS（10）），异常主机挂 ⚠️。"""
+        from mtbots.features.docker import refresh as docker_refresh
+        from mtbots.features.docker.hosts import DockerHost
+
+        core = _FakeCore()
+        state = DockerState(DockerSettings())
+        state.hosts = [
+            DockerHost(id="nas", label="NAS", kind="local"),
+            DockerHost(id="vps", label="VPS", kind="ssh", target="root@10.0.0.5"),
+        ]
+        core.data["docker"] = state
+        state.scan_hook = lambda: (_ for _ in ()).throw(AssertionError("summary 不该跑 docker"))
+
+        self.assertEqual(asyncio.run(summary(core, 1)), "🐳 Docker · 点击进入")
+
+        state.projects_cache = [
+            {**_project("a"), "host": "nas"},
+            {**_project("b"), "host": "nas"},
+            {**_project("c"), "host": "vps"},
+        ]
+        state.projects_cache_time = time.monotonic()
+        self.assertEqual(
+            asyncio.run(summary(core, 1)), "🐳 Docker · 2 台主机，NAS（2）、VPS（1）"
+        )
+
+        state.host_errors = {"vps": "SSH 连不上或认证失败"}
+        self.assertEqual(
+            asyncio.run(summary(core, 1)), "🐳 Docker · 2 台主机，NAS（2）、VPS（1 ⚠️）"
+        )
+
+        # 两台都空且都没有错误时才说「暂无项目」
+        state.projects_cache = []
+        state.host_errors = {}
+        self.assertEqual(asyncio.run(summary(core, 1)), "🐳 Docker · 2 台主机，暂无项目")
+
+        # refresh 钩子走 state.get_projects（会真扫），用 scan_hook 顶掉
+        state.scan_hook = lambda: [{"name": "a", "dir": "/srv/a", "host": "nas"}]
+        state.projects_cache_time = 0.0  # 上面的缓存是手工塞的，别落进「刚扫过」的合并窗口
+        asyncio.run(docker_refresh(core, 1))
+        self.assertEqual(len(state.cached_projects()), 1)
+
+    def test_refresh_forces_scan_when_asked(self) -> None:
+        from mtbots.features.docker import refresh as docker_refresh
+
+        core = _FakeCore()
+        state = DockerState(DockerSettings(projects_cache_ttl=9999.0))
+        core.data["docker"] = state
+        calls: list[int] = []
+
+        def scanner() -> list[dict]:
+            calls.append(1)
+            return [_project("a", "running")]
+
+        state.scan_hook = scanner
+        asyncio.run(docker_refresh(core, 1))
+        self.assertEqual(len(calls), 1)
+        asyncio.run(docker_refresh(core, 1))  # TTL 内
+        self.assertEqual(len(calls), 1)
+        asyncio.run(docker_refresh(core, 1, True))  # 🔄 强制：无视 TTL
+        self.assertEqual(len(calls), 2)
 
     def test_id_lines_are_cheap(self) -> None:
         core = _FakeCore()
@@ -670,9 +760,14 @@ class ScanDiagnosticsTest(unittest.TestCase):
                 "mtbots.features.docker.compose.subprocess.run", side_effect=fake_run
             ):
                 projects = state.scan_projects_sync()
+                # 扫描只跑 compose ls；服务列表按需取（这里模拟「当前页要渲染」）
+                self.assertEqual(projects[0]["services"], [])
+                self.assertFalse(projects[0]["services_loaded"])
+                state.load_services(projects)
 
         self.assertEqual([p["name"] for p in projects], ["media"])
         self.assertEqual(projects[0]["services"], ["emby"])
+        self.assertTrue(projects[0]["services_loaded"])
         self.assertEqual(state.last_scan_error, "")
         self.assertEqual(state.hidden_dirs, [])
         self.assertEqual(scan_hint(state), [])
@@ -1083,6 +1178,7 @@ class MultiHostStateTest(unittest.TestCase):
         state = self._state()
         with mock.patch("mtbots.features.docker.compose.subprocess.run", side_effect=self._fake_run()):
             projects = state.scan_projects_sync()
+            state.load_services(projects)
 
         by_host = {p["name"]: p for p in projects}
         self.assertEqual(sorted(by_host), ["blog", "media"])
@@ -1234,6 +1330,221 @@ class MultiHostStateTest(unittest.TestCase):
         state = make_state(settings)
         self.assertEqual([h.id for h in state.hosts], ["nas", "vps"])
         self.assertTrue(state.multi_host)
+
+
+# ==================== 提速：服务列表懒加载 + 主机并行扫描 ====================
+class LazyServicesTest(unittest.TestCase):
+    """`compose config --services` 是每个项目一条子进程（远端=一次 SSH 握手），
+    全量扫描时逐项目跑就是主面板慢到十来秒的原因——现在只对要渲染的那些项目取。"""
+
+    @staticmethod
+    def _result(returncode: int = 0, stdout: str = "", stderr: str = "") -> mock.Mock:
+        return mock.Mock(returncode=returncode, stdout=stdout, stderr=stderr)
+
+    def _local_state(self) -> tuple[DockerState, str]:
+        base = Path(tempfile.mkdtemp(prefix="mtbots-svc-"))
+        state = DockerState(DockerSettings())
+        state.compose_bin = ["docker", "compose"]
+        return state, str(base)
+
+    def _write_project(self, base: str, name: str) -> str:
+        work = Path(base) / name
+        work.mkdir(parents=True, exist_ok=True)
+        (work / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
+        return str(work)
+
+    def test_scan_does_not_run_config_services(self) -> None:
+        state, base = self._local_state()
+        work = self._write_project(base, "media")
+        payload = json.dumps(
+            [{"Name": "media", "Status": "running(1)", "ConfigFiles": os.path.join(work, "docker-compose.yml")}]
+        )
+        calls: list[list[str]] = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(list(cmd))
+            return self._result(0, payload, "")
+
+        with mock.patch("mtbots.features.docker.compose.subprocess.run", side_effect=fake_run):
+            projects = state.scan_projects_sync()
+
+        self.assertEqual(len(calls), 1, "扫描只该跑 compose ls")
+        self.assertIn("ls", calls[0])
+        self.assertEqual(projects[0]["services"], [])
+        self.assertFalse(projects[0]["services_loaded"])
+
+    def test_services_are_fetched_once_and_reused_across_scans(self) -> None:
+        state, base = self._local_state()
+        work = self._write_project(base, "media")
+        payload = json.dumps(
+            [{"Name": "media", "Status": "running(1)", "ConfigFiles": os.path.join(work, "docker-compose.yml")}]
+        )
+        configs: list[int] = []
+
+        def fake_run(cmd, **kwargs):
+            if "config" in cmd:
+                configs.append(1)
+                return self._result(0, "emby\nweb\n", "")
+            return self._result(0, payload, "")
+
+        with mock.patch("mtbots.features.docker.compose.subprocess.run", side_effect=fake_run):
+            projects = state.scan_projects_sync()
+            asyncio.run(state.ensure_services(projects))
+            self.assertEqual(projects[0]["services"], ["emby", "web"])
+            self.assertTrue(projects[0]["services_loaded"])
+            # 同一份缓存再渲染一次：不再跑 compose config
+            asyncio.run(state.ensure_services(projects))
+            # 缓存过期后重新扫描，服务列表直接从缓存复原
+            state.projects_cache_time = 0.0
+            again = state.scan_projects_sync()
+            self.assertEqual(again[0]["services"], ["emby", "web"])
+            self.assertTrue(again[0]["services_loaded"])
+
+        self.assertEqual(len(configs), 1)
+
+    def test_failed_service_lookup_is_retried_and_not_cached(self) -> None:
+        state, base = self._local_state()
+        work = self._write_project(base, "media")
+        payload = json.dumps(
+            [{"Name": "media", "Status": "running(1)", "ConfigFiles": os.path.join(work, "docker-compose.yml")}]
+        )
+        attempts: list[int] = []
+
+        def fake_run(cmd, **kwargs):
+            if "config" in cmd:
+                attempts.append(1)
+                return self._result(1, "", "no such file")
+            return self._result(0, payload, "")
+
+        with mock.patch("mtbots.features.docker.compose.subprocess.run", side_effect=fake_run):
+            projects = state.scan_projects_sync()
+            asyncio.run(state.ensure_services(projects))
+        self.assertEqual(projects[0]["services"], [])
+        self.assertFalse(projects[0]["services_loaded"], "取失败不能标成已加载")
+        self.assertEqual(state.services_cache, {}, "取失败不能进缓存")
+        self.assertEqual(len(attempts), 1)
+
+    def test_invalidated_cache_drops_services(self) -> None:
+        state, _base = self._local_state()
+        state.services_cache["nas|media|/x/c.yml"] = (time.monotonic(), ["emby"])
+        state.invalidate_cache()
+        self.assertEqual(state.services_cache, {})
+
+    def test_services_for_one_page_are_fetched_in_parallel(self) -> None:
+        """当前页 3 个项目的 `config --services` 必须并发跑（否则一页又是 3 次串行等待）。"""
+        import threading
+
+        state, base = self._local_state()
+        names = ["a", "b", "c"]
+        payload = json.dumps(
+            [
+                {
+                    "Name": name,
+                    "Status": "running(1)",
+                    "ConfigFiles": os.path.join(self._write_project(base, name), "docker-compose.yml"),
+                }
+                for name in names
+            ]
+        )
+        barrier = threading.Barrier(len(names), timeout=3)
+
+        def fake_run(cmd, **kwargs):
+            if "config" in cmd:
+                barrier.wait()  # 串行的话这里超时
+                return self._result(0, "emby\n", "")
+            return self._result(0, payload, "")
+
+        with mock.patch("mtbots.features.docker.compose.subprocess.run", side_effect=fake_run):
+            projects = state.scan_projects_sync()
+            asyncio.run(state.ensure_services(projects))
+        self.assertEqual([p["services"] for p in projects], [["emby"]] * 3)
+
+
+class HostScanParallelismTest(unittest.TestCase):
+    def test_hosts_are_scanned_in_parallel(self) -> None:
+        """两台主机互不依赖：一台慢/连不上不该拖住另一台（串行时 barrier 会超时）。"""
+        import threading
+
+        base = Path(tempfile.mkdtemp(prefix="mtbots-par-"))
+        work = base / "media"
+        work.mkdir()
+        (work / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
+        hosts = [
+            DockerHost(id="nas", kind="local"),
+            DockerHost(id="vps", kind="ssh", target="mtbots@10.0.0.5"),
+        ]
+        state = DockerState(DockerSettings(), hosts=hosts)
+        state.compose_bin = ["docker", "compose"]
+        state.remote_compose["vps"] = ["docker", "compose"]
+        barrier = threading.Barrier(2, timeout=3)
+        payload = json.dumps(
+            [{"Name": "media", "Status": "running(1)", "ConfigFiles": str(work / "docker-compose.yml")}]
+        )
+
+        def fake_run(cmd, **kwargs):
+            barrier.wait()
+            return mock.Mock(returncode=0, stdout=payload, stderr="")
+
+        with mock.patch("mtbots.features.docker.compose.subprocess.run", side_effect=fake_run):
+            projects = state.scan_projects_sync()
+
+        self.assertEqual(state.host_errors, {})
+        self.assertEqual(sorted(p["host"] for p in projects), ["nas", "vps"])
+
+    def test_host_with_config_error_is_never_probed(self) -> None:
+        """配置本身有错（私钥不存在/target 非法）的主机绝不再发一次 ssh 去探测。"""
+        host = DockerHost(id="vps", kind="ssh", target="u@h", error="私钥不存在：/x")
+        state = DockerState(DockerSettings(), hosts=[DockerHost(id="nas", kind="local"), host])
+        with mock.patch(
+            "mtbots.features.docker.compose.subprocess.run",
+            side_effect=AssertionError("配置错的主机不该被探测"),
+        ):
+            self.assertEqual(state.get_remote_compose_bin(host), [])
+
+    def test_ssh_255_gives_up_instead_of_probing_the_second_candidate(self) -> None:
+        """ssh 自己失败（255）时换 `docker-compose` 再试只是白等一个 ConnectTimeout。"""
+        host = DockerHost(id="vps", kind="ssh", target="mtbots@10.0.0.5")
+        state = DockerState(DockerSettings(), hosts=[DockerHost(id="nas", kind="local"), host])
+        calls: list[list[str]] = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(list(cmd))
+            return mock.Mock(returncode=255, stdout="", stderr="Permission denied")
+
+        with mock.patch("mtbots.features.docker.compose.subprocess.run", side_effect=fake_run):
+            self.assertEqual(state.get_remote_compose_bin(host), [])
+        self.assertEqual(len(calls), 1)
+
+
+class SshMultiplexTest(unittest.TestCase):
+    """ssh 连接复用：同一台主机上第 2..N 条命令不该再握手（实测回环 0.36s/次）。"""
+
+    def _host(self) -> DockerHost:
+        return DockerHost(id="vps", kind="ssh", target="mtbots@10.0.0.5", port=2222)
+
+    def test_multiplex_options_are_added_by_default(self) -> None:
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("SSH_MULTIPLEX", None)
+            wrapped = self._host().command(["docker", "compose", "ls"])
+        self.assertIn("ControlMaster=auto", wrapped)
+        self.assertTrue(any(c.startswith("ControlPath=/tmp/mtbots-ssh-") for c in wrapped))
+        self.assertIn("ControlPersist=60", wrapped)
+        self.assertEqual(wrapped[-2], "mtbots@10.0.0.5")  # 目标仍在选项之后、命令之前
+
+    def test_multiplex_can_be_disabled(self) -> None:
+        with mock.patch.dict(os.environ, {"SSH_MULTIPLEX": "0"}):
+            wrapped = self._host().command(["docker", "compose", "ls"])
+        self.assertNotIn("ControlMaster=auto", wrapped)
+
+    def test_control_path_follows_the_env_override(self) -> None:
+        from mtbots.features.docker.hosts import control_path, multiplex_enabled
+
+        self.assertEqual(
+            control_path({"SSH_CONTROL_DIR": "/run/mtbots"}), "/run/mtbots/mtbots-ssh-%C"
+        )
+        self.assertEqual(control_path({"SSH_CONTROL_DIR": "/run/mtbots/"}), "/run/mtbots/mtbots-ssh-%C")
+        self.assertFalse(multiplex_enabled({"SSH_MULTIPLEX": "off"}))
+        self.assertTrue(multiplex_enabled({"SSH_MULTIPLEX": "1"}))
 
 
 if __name__ == "__main__":

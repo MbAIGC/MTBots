@@ -639,6 +639,221 @@ class RouterTests(unittest.TestCase):
         self.assertIn("白名单", self.bot.sent[-1].text)
 
 
+class HomeRefreshTests(unittest.TestCase):
+    """首页自动刷新：先秒开（缓存），再后台刷 + 原地回填。
+
+    `/start`、`/status`、`/list` 都会经过 `home_panel`，所以「打开首页 = 顺手刷一遍数据」；
+    点 🔄 刷新按钮 = 无视 TTL 的强制刷新。
+    """
+
+    def setUp(self):
+        import mtbots.router as router
+
+        self.router = router
+        self.core = make_core()
+        self.calls: dict = {}
+        add_fake_module(self.core, "docker", self.calls)
+        self.bot = FakeBot()
+        self.user = FakeUser(123456789)
+        self.chat = FakeChat(123456789)
+        self.context = FakeContext(self.core, self.bot)
+
+    def _update(self, query=None):
+        return FakeUpdate(self.user, self.chat, bot=self.bot, query=query)
+
+    def _drive_home(self, *, force=False, query=None):
+        """跑一次 home_panel，并把后台刷新任务放完（否则断言会撞上没跑完的任务）。"""
+
+        async def run():
+            await self.router.home_panel(
+                self.core, self._update(query=query), self.context, force=force
+            )
+            await self._settle()
+
+        asyncio.run(run())
+
+    @staticmethod
+    async def _settle(rounds: int = 12) -> None:
+        """把已经安排的协程/任务跑到完成（gather 会再调度一次，两轮 sleep(0) 不够）。"""
+        for _ in range(rounds):
+            await asyncio.sleep(0)
+
+    def test_home_button_row_is_jobs_and_refresh(self):
+        from mtbots.panels import nav_refresh
+
+        markup = self.core.panels.home_keyboard(self.user.id)
+        flat = [b.callback_data for row in markup.inline_keyboard for b in row]
+        self.assertIn(nav_jobs(), flat)
+        self.assertIn(nav_refresh(), flat)
+        self.assertNotIn("nav|help", flat, "帮助按钮已换成刷新（/help 命令仍在）")
+
+    def test_start_refreshes_data_then_updates_the_same_panel(self):
+        self._drive_home()
+        self.assertIn(("docker", False), self.calls.get("refresh", []))
+        # 第二帧是原地编辑，不是又发一条
+        self.assertEqual(len(self.bot.sent), 1)
+        self.assertTrue(self.bot.edits, "刷新完成后要回填同一条面板")
+        self.assertIn("控制台", self.bot.edits[-1].text)
+
+    def test_ttl_keeps_the_second_start_from_refreshing_again(self):
+        self._drive_home()
+        first = len(self.calls.get("refresh", []))
+        self.assertGreater(first, 0)
+        self._drive_home()  # TTL 内：直接用缓存
+        self.assertEqual(len(self.calls.get("refresh", [])), first)
+
+    def test_refresh_button_forces_even_inside_the_ttl(self):
+        """🔄 刷新按钮走真实的回调路由（nav|refresh → home_panel(force=True)）。"""
+        from mtbots.panels import nav_refresh
+
+        self._drive_home()
+        first = len(self.calls.get("refresh", []))
+        self.assertGreater(first, 0)
+
+        query = FakeQuery(nav_refresh(), self.user)
+        update = self._update(query=query)
+
+        async def run():
+            await self.router.callback_router(self.core, update, self.context)
+            await self._settle()
+
+        asyncio.run(run())
+        forced = [entry for entry in self.calls.get("refresh", []) if entry[1] is True]
+        self.assertTrue(forced, "🔄 刷新按钮必须带 force=True")
+        self.assertGreater(len(self.calls.get("refresh", [])), first)
+        self.assertIn("🔄", query.answers[-1][0])
+
+    def test_pending_modules_are_marked_refreshing_in_the_first_frame(self):
+        """第二帧到达前，面板要能看出「数据在刷新」，而不是装作已经是最新的。"""
+        seen: list[bool] = []
+
+        async def slow(core_, uid, force):
+            seen.append(core_.panels.tracked(self.chat.id) is not None)
+            await asyncio.sleep(0)
+
+        add_fake_module(self.core, "slowmod", self.calls, refresh=slow)
+
+        async def run():
+            await self.router.home_panel(self.core, self._update(), self.context)
+            self.assertIn("⏳ 刷新中", self.bot.sent[-1].text)
+            await self._settle()
+
+        asyncio.run(run())
+        self.assertEqual(seen, [True])
+        self.assertNotIn("⏳ 刷新中", self.bot.edits[-1].text, "刷新完就不该再挂着 ⏳")
+
+    def test_background_refresh_does_not_clobber_another_panel(self):
+        """刷新跑完时用户已经翻到 docker 列表：绝不能再改那条消息。"""
+
+        async def run():
+            await self.router.home_panel(self.core, self._update(), self.context)
+            self.core.set_module(self.chat.id, "docker")  # 用户点进了模块
+            await self._settle()
+
+        asyncio.run(run())
+        self.assertEqual(self.bot.edits, [], "不该再改面板")
+
+    def test_panel_opened_during_the_fill_is_not_overwritten(self):
+        """回填前要重新确认「人还在首页」——`_home_text` 里含 await，正是切换的窗口。"""
+        from mtbots.core import ModuleSpec
+
+        async def run():
+            gate = asyncio.Event()
+            armed = {"on": False}
+
+            async def slow_summary(core_, uid):
+                if armed["on"]:
+                    await gate.wait()
+                return "慢摘要"
+
+            async def noop_refresh(core_, uid, force):
+                return None
+
+            self.core.register(
+                ModuleSpec(
+                    id="slow",
+                    icon="🧪",
+                    title="慢模块",
+                    description="",
+                    callback_prefix="x",
+                    register=lambda app, c: None,
+                    summary=slow_summary,
+                    refresh=noop_refresh,
+                    refresh_ttl=0.0,
+                )
+            )
+            await self.router.home_panel(self.core, self._update(), self.context)
+            armed["on"] = True  # 下一帧（回填那帧）会卡在 _home_text 里
+            for _ in range(4):
+                await asyncio.sleep(0)
+            self.core.set_module(self.chat.id, "docker")  # 用户就在这个窗口里翻页
+            gate.set()
+            await self._settle()
+
+        asyncio.run(run())
+        self.assertEqual(self.bot.edits, [], "回填必须重新确认用户还在首页")
+
+    def test_missing_bot_never_claims_a_refresh_slot(self):
+        """拿不到 bot 就起不了后台任务：不能占坑（否则那个模块永远挂 ⏳ 且再也不刷）。"""
+        from mtbots.core import ModuleSpec
+
+        class NoBotContext:
+            pass
+
+        async def run():
+            await self.router.home_panel(self.core, self._update(), NoBotContext())
+
+        asyncio.run(run())
+        self.assertIsNone(self.calls.get("refresh"), "没有 bot 就不该发起刷新")
+        self.assertNotIn("⏳", self.bot.sent[-1].text)
+        self.assertEqual(self.router._refresh_book(self.core), {}, "连坑都不该占")
+
+    def test_busy_module_is_not_marked_or_double_spawned(self):
+        """另一个会话正在刷同一模块时：不重复 spawn，也不给别人看一个永远不落地的 ⏳。"""
+        book = self.router._refresh_book(self.core)
+        book[self.router._refresh_key("docker", self.user.id)] = {"busy": True}
+
+        async def run():
+            await self.router.home_panel(self.core, self._update(), self.context)
+
+        asyncio.run(run())
+        self.assertIsNone(self.calls.get("refresh"), "同一模块同时在飞的刷新只留一个")
+        self.assertNotIn("⏳", self.bot.sent[-1].text)
+
+    def test_failed_refresh_still_renders_home(self):
+        async def boom(core_, uid, force):
+            raise RuntimeError("额度接口 500")
+
+        add_fake_module(self.core, "boom", self.calls, refresh=boom)
+        self._drive_home()
+        self.assertIn("控制台", self.bot.sent[-1].text)
+        # 失败也要记账，否则每次 /start 都会再捶一遍坏掉的主机
+        self._drive_home()
+        boom_calls = [e for e in self.calls.get("refresh", []) if e[0] == "boom"]
+        self.assertEqual(len(boom_calls), 1)
+
+    def test_module_without_refresh_is_skipped(self):
+        from mtbots.core import ModuleSpec
+
+        async def _async_summary(core_, uid):
+            return "无刷新模块"
+
+        self.core.register(
+            ModuleSpec(
+                id="noref",
+                icon="🧪",
+                title="无刷新",
+                description="",
+                callback_prefix="x",
+                register=lambda app, c: None,
+                summary=_async_summary,
+            )
+        )
+        self._drive_home()
+        self.assertNotIn("noref", [entry[0] for entry in self.calls.get("refresh", [])])
+        self.assertIn("无刷新模块", self.bot.sent[-1].text)
+
+
 def _register_module(core, module_id: str, title: str, icon: str) -> None:
     """注册一个只有外观信息的模块，专门用来验「跨模块入口」的取舍。"""
     from mtbots.core import ModuleSpec

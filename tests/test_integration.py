@@ -860,10 +860,17 @@ class MultiHostFlowTests(unittest.TestCase):
             DockerHost(id="local", label="本机", kind="local"),
             DockerHost(id="aaa-remote", label="远端 AAA", kind="ssh", target="mtbots@10.0.0.9"),
         ]
+        # 真实流程里扫描的第一步就是探测并缓存远端 compose（`get_remote_compose_bin`）；
+        # 这里手工换了主机，必须同样预热，否则「按需取服务列表」会真去连这个不存在的 IP
+        state.remote_compose["aaa-remote"] = ["docker", "compose"]
+        # scan_hook 是在**模拟扫描结果**，所以要带上扫描一定会写的 services_loaded，
+        # 否则「按需取服务列表」会真去连这个不存在的 IP（ConnectTimeout 10s）
         state.scan_hook = lambda: [
             {"name": "l1", "dir": "/data/l1", "status": "running(1)", "services": [],
+             "services_loaded": True,
              "config_files": ["/x/c.yml"], "host": "local", "host_label": "本机"},
             {"name": "r1", "dir": "/opt/r1", "status": "running(1)", "services": [],
+             "services_loaded": True,
              "config_files": ["/x/c.yml"], "host": "aaa-remote", "host_label": "远端 AAA"},
         ]
         self._open_all(app, bot)
@@ -896,6 +903,31 @@ class MultiHostFlowTests(unittest.TestCase):
         app, core, bot = self._make_app()
         self._drive(app, real_update(bot, text="/upgrade 02"))
         self.assertIn("升级确认 - [vps/blog]", bot.last_text)
+        assert_html_valid(self, bot.last_text)
+
+    def test_upgrade_command_accepts_a_service_with_a_cold_cache(self):
+        """服务列表是按需取的：命令路径（/upgrade NN svc）必须自己补一次，别误判「不存在」。"""
+        app, core, bot = self._make_app(hosts="single")
+        state = core.data["docker"]
+        state.scan_hook = lambda: [
+            {
+                "name": "media",
+                "dir": "/data/media",
+                "status": "running(1)",
+                "services": [],
+                "services_loaded": False,  # 冷缓存：这一轮扫描没取过服务列表
+                "config_files": ["/data/media/docker-compose.yml"],
+                "host": "local",
+                "host_label": "本机 NAS",
+            }
+        ]
+        with mock.patch(
+            "mtbots.features.docker.compose.subprocess.run",
+            return_value=mock.Mock(returncode=0, stdout="emby\nweb\n", stderr=""),
+        ):
+            self._drive(app, real_update(bot, text="/upgrade 01 emby"))
+        self.assertIn("服务升级确认", bot.last_text)
+        self.assertNotIn("不存在服务", bot.last_text)
         assert_html_valid(self, bot.last_text)
 
     def test_status_renders_one_section_per_host(self):

@@ -67,12 +67,20 @@ class ClineState:
     store: ConfigStore
     client: ClinePassClient
     cooldown: Cooldown
+    #: Key 的增删改锁（`/addkey` `/delkey` `/clear`）：保护本地存储，**不覆盖网络查询**
     locks: dict[int, asyncio.Lock] = field(default_factory=dict)
+    #: 额度查询锁（面板刷新 / 首页自动刷新）：一次查询 = 每个 Key 3 个接口，必须串起来
+    fetch_locks: dict[int, asyncio.Lock] = field(default_factory=dict)
     #: 每个用户最近一次成功查询的快照（首页 summary 只读它，绝不发网络请求）
     snapshots: dict[int, list[Snapshot]] = field(default_factory=dict)
 
     def lock_for(self, user_id: int) -> asyncio.Lock:
+        """Key 存储的写锁（与网络查询无关，别混用）。"""
         return self.locks.setdefault(int(user_id), asyncio.Lock())
+
+    def fetch_lock_for(self, user_id: int) -> asyncio.Lock:
+        """额度查询锁：同一用户同一时间只允许一轮 `fetch_all`。"""
+        return self.fetch_locks.setdefault(int(user_id), asyncio.Lock())
 
 
 def state_of(core: Core) -> ClineState:
@@ -212,7 +220,10 @@ async def _query_and_render(
     failed = False
     try:
         try:
-            snapshots = await state.client.fetch_all(list(user_keys.items()))
+            # 与首页自动刷新共用一把「查询锁」：一轮就是 3×N 个接口，不能两轮并发打
+            # （注意不是 Key 存储那把锁——那个会挡住 /addkey）
+            async with state.fetch_lock_for(user_id):
+                snapshots = await state.client.fetch_all(list(user_keys.items()))
         except Exception as exc:  # ApiError 已在客户端内部转成 warnings，这里兜底
             failed = True
             core.jobs.finish(job, FAILED, str(exc)[:200])
@@ -393,6 +404,8 @@ async def cmd_addkey(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     try:
         async with state.lock_for(user_id):
             total = await asyncio.to_thread(state.store.add, user_id, alias, api_key)
+        # Key 变了，旧快照立刻作废：否则首页会拿上一把 Key 的额度顶在新 Key 头上
+        state.snapshots.pop(int(user_id), None)
     except KeyLimitError as exc:
         log.warning("addkey 超出上限：user=%s，%s", user_id, exc)
         await say(f"⚠️ {esc(str(exc))}")
@@ -436,6 +449,7 @@ async def cmd_delkey(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     try:
         async with state.lock_for(user.id):
             removed = await asyncio.to_thread(state.store.delete, user.id, alias)
+        state.snapshots.pop(int(user.id), None)
     except ConfigError as exc:
         log.error("删除失败：%s", exc)
         await message.reply_text(  # type: ignore[union-attr]
@@ -465,6 +479,7 @@ async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         async with state.lock_for(user.id):
             removed = await asyncio.to_thread(state.store.clear, user.id)
+        state.snapshots.pop(int(user.id), None)
     except ConfigError as exc:
         log.error("清空失败：%s", exc)
         await message.reply_text(  # type: ignore[union-attr]
@@ -583,20 +598,92 @@ def help_text(core: Core, uid: int) -> str:
     )
 
 
+#: 首页摘要里的窗口短名（面板正文里仍是「5 小时额度 / 本周额度 / 本月额度」全称）
+SHORT_WINDOWS: tuple[tuple[str, str], ...] = (("小时", "5时"), ("周", "周"), ("月", "月"))
+
+
+def _short_window(label: str) -> str:
+    """把窗口名压成两三个字：首页一行要塞下 12 个 Key。"""
+    text = str(label or "").strip()
+    for needle, short in SHORT_WINDOWS:
+        if needle in text:
+            return short
+    return (text.replace("额度", "") or text)[:4]
+
+
+def _quota_brief(snapshot: Snapshot) -> str:
+    """一个 Key 的额度摘要：`5时 15% / 周 30% / 月 20%`（已用百分比，与面板一致）。"""
+    parts = [
+        "%s %d%%" % (_short_window(window.label), round(window.percent))
+        for window in snapshot.windows
+        if window.percent is not None
+    ]
+    return " / ".join(parts)
+
+
 async def summary(core: Core, uid: int) -> str:
-    """首页一行总览：只读本地存储与上次快照缓存，**绝不发网络请求**。"""
+    """首页总览：Key 数 + 每个 Key 的额度一行。
+
+    只读本地存储与上次查询的快照缓存，**绝不发网络请求**（首页必须秒开）；
+    快照由 ``refresh()``（点 /start 或 🔄 刷新）在后台拉取。
+
+    **计数与明细必须同源**：`/delkey` 之后 store 少了 Key 而快照还在，若直接并列就会
+    出现「2 个 Key」下面列 3 行。所以这里按**当前还在的别名**过滤快照，凑不齐整份
+    就退回一行「点击进入」（下一轮刷新会补齐）。
+    """
     state = state_of(core)
     try:
-        count = len(await asyncio.to_thread(state.store.keys, uid))
+        keys = await asyncio.to_thread(state.store.keys, uid)
     except ConfigError:
         return "🤖 Cline · ❌ 存储不可用 · 点击进入"
+    count = len(keys)
     if not count:
         return "🤖 Cline · 未绑定 Key · 点击进入"
-    for snapshot in state.snapshots.get(int(uid), []):
-        for window in snapshot.windows:
-            if window.label == "本周额度" and window.percent is not None:
-                return f"🤖 Cline · {count} 个 Key · 周额度 {round(window.percent)}%"
-    return f"🤖 Cline · {count} 个 Key · 点击进入"
+
+    snapshots = [s for s in (state.snapshots.get(int(uid)) or []) if s.alias in keys]
+    if len(snapshots) != count:
+        return f"🤖 Cline · {count} 个 Key · 点击进入"
+
+    briefs = [(snap.alias, _quota_brief(snap)) for snap in snapshots]
+    failed = sum(1 for _, brief in briefs if not brief)
+    # 只有一个 Key：压成一行（用户不用在两行之间来回看）
+    if count == 1:
+        alias, brief = briefs[0]
+        return f"🤖 Cline · 1 个 Key · {esc(alias)} {brief or '⚠️ 无额度数据'}"
+
+    head = f"🤖 Cline · {count} 个 Key"
+    if failed:
+        head += f"（正常 {count - failed} · 失败 {failed}）"
+    lines = [head]
+    for alias, brief in briefs:
+        lines.append(f"• {esc(alias[:12])} · {brief or '⚠️ 无额度数据'}")
+    return "\n".join(lines)
+
+
+async def refresh(core: Core, uid: int, force: bool = False) -> None:
+    """首页自动刷新：重新查一遍所有 Key 的额度并缓存。
+
+    一个 Key 要打 3 个接口，所以这里**必须**收着点：
+
+    * 用 `state.fetch_lock_for()`（额度查询锁，**不是** Key 存储那把锁——拿错锁会挡住
+      `/addkey`）串起同一用户的查询；发现已经在查就直接放弃，不排队、不叠加；
+    * 频率由 router 的 `ModuleSpec.refresh_ttl` 控制（`force` 也由它判断，这里不再重复）。
+    """
+    state = state_of(core)
+    try:
+        keys = await asyncio.to_thread(state.store.keys, uid)
+    except ConfigError as exc:
+        log.error("首页刷新读取 Cline Key 失败：%s", exc)
+        return
+    if not keys:
+        state.snapshots.pop(int(uid), None)
+        return
+
+    lock = state.fetch_lock_for(uid)
+    if lock.locked():  # 同一用户已有额度查询在跑（多半是面板上的手动刷新）
+        return
+    async with lock:
+        state.snapshots[int(uid)] = await state.client.fetch_all(list(keys.items()))
 
 
 async def id_lines(core: Core, uid: int) -> list[str]:

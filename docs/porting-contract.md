@@ -96,9 +96,17 @@ class ModuleSpec:
     show_list: Callable[..., Awaitable[None]] | None = None            # /<prefix>_list
     rescue: dict[str, Callable] = field(default_factory=dict)           # 兜底命令名 -> async handler(core, update, context)
     startup: Callable[[Core, Application], Awaitable[None]] | None = None  # post_init 里 await
+    home_entries: Callable[[Core, int], list[tuple[str, str]]] = 空列表   # 首页额外入口 [(按钮文字, callback_data)]
+    refresh: Callable[[Core, int, bool], Awaitable[None]] | None = None   # 首页自动刷新钩子（第三个参数是 force）
+    refresh_ttl: float = 15.0                                             # 首页刷新最短间隔（秒）
 ```
 
 * `summary` 只能读缓存/已有状态；**不允许发网络请求或跑 docker**（首页必须秒开）。拿不到就返回 `"点击进入"`。
+* `refresh(core, uid, force=False)` 干重活、把数据写进自己的缓存，随后 `summary` 从缓存读。
+  **重活必须自己 `asyncio.to_thread`**（同步 subprocess / ssh / HTTP 会冻住所有人的 update）。
+  它按 `refresh_ttl` 节流（docker 15s、Cline 60s；`force=True` 表示用户点了 `🔄 刷新`），
+  抛异常由 router 记录并照常收尾，模块不用自己兜——但**失败也要记账**，否则坏掉的接口会被每次 `/start` 反复捶。
+* `home_entries` 非空时首页**只画这些入口**，不再重复一个笼统的模块按钮（多主机的 docker 就是这么把每台主机摆上去的）。
 * `rescue` 里的 handler 会由 router 用「参数覆盖」包装后调用，用于兜住全角斜杠/零宽字符（原 ClinePass 的 `_RESCUE_HANDLERS` 机制）。
 
 ## 3. 命令归属（合并后最终菜单）
@@ -143,10 +151,16 @@ class ModuleSpec:
 class PanelManager:
     async def render(self, module_id: str, update: Update, text: str,
                      keyboard: InlineKeyboardMarkup | None = None, *,
-                     force_new: bool = False, chat_id: int | None = None) -> None:
+                     force_new: bool = False, chat_id: int | None = None,
+                     bot: Bot | None = None) -> None:
         """把 text 渲染成「本会话唯一的面板消息」（home / docker / litepan / cline 共用一条）：
         自动加面包屑与时间戳、末尾补 [🏠 返回]；点按钮触发时原地编辑
-        （`BadRequest: Message is not modified` 静默忽略），命令触发或超长时新发一条并删掉旧面板。"""
+        （`BadRequest: Message is not modified` 静默忽略），命令触发或超长时新发一条并删掉旧面板。
+
+        `update=None` + `chat_id` + `bot` 给**后台任务**用（首页刷新跑完回填同一条面板）：
+        这时一律原地编辑——用户视线就在那条消息上，而那个 Update 早已失效、不能再用。
+        调用方要自己确认用户还停在这个面板上（`core.module_of_chat(chat_id) is None`），
+        否则会把人家正在看的 docker 列表改掉。"""
 
     async def send(self, chat_id: int, text: str, keyboard=None,
                    parse_mode: str = "HTML") -> Message: ...
@@ -180,7 +194,15 @@ def cb_parse(data: str) -> tuple[str, str, dict | None]:
 def cb_args(data: str) -> tuple[str, str]:   # ('d','page_turn')
 def nav_home() -> str:  return "nav|home"
 def nav_open(module_id: str) -> str: return f"nav|open|{module_id}"
+def nav_refresh() -> str: return "nav|refresh"   # 首页「🔄 刷新」= 强制刷新各模块数据
 ```
+
+**首页两帧刷新**（`router.home_panel`）：`/start` `/status` `/list` 回到首页时都会
+（1）立刻用缓存渲染第一帧（正在刷的模块标题行挂 `⏳ 刷新中`），
+（2）按 `ModuleSpec.refresh_ttl` 挑出过期的模块，`asyncio.gather` 后台刷新，
+（3）刷完**原地编辑同一条面板**。同一模块同时在飞的刷新只留一个；
+刷新完成时若用户已翻进别的面板（`core.module_of_chat(chat_id) is not None`）则**不回填**。
+首页底部按钮固定为 `[🧰 任务中心] [🔄 刷新]`（帮助是 `/help` 命令，不占按钮位）。
 
 **命名空间**：`d|…` docker、`p|…` litepan、`c|…` cline、`nav|…` router、`job|…` 任务中心。
 模块用 `CallbackQueryHandler(handler, pattern=r"^d\|")` 只吃自己的回调；router 吃 `^nav\|` 与 `^job\|`。
@@ -262,7 +284,7 @@ class MenuManager:
 
 ### 7.1 docker（← LDMG `bot.py`）
 * 保留：compose 探测（`docker compose` → `docker-compose`）、`docker compose ls -a` 扫描 + 15s TTL 缓存、
-  `docker compose config --services` 服务列表、项目按「运行中优先 + 名称」排序（编号命令与面板同序）、
+  `docker compose config --services` 服务列表（v1.5.7 起按需取，见 §7.1.1）、项目按「运行中优先 + 名称」排序（编号命令与面板同序）、
   执行锁（同时只跑一个 compose 任务）、`COMMAND_TIMEOUT`、pull 噪音行过滤、进度原地编辑 +
   `edit_html_safe` 降级、`task_cancel` 取消（杀进程组）、prune 候选扫描 + 两步确认、
   `/upgrade 01 | 01 emby | all` 三种用法、容器状态速览 `/d_status`。
@@ -270,6 +292,27 @@ class MenuManager:
   升级/清理注册 `core.jobs`；`summary()` 用缓存给出「N 个项目可升级」。
 * 权限：`core.acl.can(user_id, "docker")`。
 * 多主机（v1.1.0）：见 §8；没有 `data/docker-hosts.json` 时不得改变上面任何行为（单机契约）。
+
+#### 7.1.1 项目 dict 与「服务列表按需加载」（v1.5.7）
+
+`scan_projects_sync()` **只跑 `compose ls`**，返回的项目 dict 不再预填 `services`：
+
+```python
+{"name": str, "dir": str, "status": str, "config_files": [str],
+ "host": str, "host_label": str,
+ "services": [str],          # 可能是空列表：还没取过
+ "services_loaded": bool}    # 服务列表是否已确定（True 才能拿 services 做判断）
+```
+
+* 服务列表（`compose config --services`）按需取：`await state.ensure_services([项目…])`
+  （只对要渲染的那一页 / 详情页调用；内部 `to_thread` + 最多 `SERVICES_PARALLEL` 并发，
+  结果按 `host|name|config_files` 缓存 `SERVICES_CACHE_TTL`=300s，`invalidate_cache()` 一起清）。
+  取失败（`get_project_services()` 返回 `None`）**不写缓存**，下次再试。
+* **凡是拿 `services` 做判断（例如「项目里有没有这个服务」）的路径，必须自己先
+  `ensure_services()`**——`/upgrade NN <svc>` 这类命令路径不经过面板渲染。已经有非空
+  `services` 的项目（外部塞进来的 project dict）不会被重复取。
+* `state.scan_hook`（测试/嵌入用）必须返回同样形状的 dict；漏了 `services_loaded` 会让
+  渲染路径真的去跑 `compose config`（远端＝一次最多 10s 的 ssh）。
 
 ### 7.2 litepan（← LitePan-TGBot `tgbot.py`）
 * 保留（照搬逻辑，不重写）：`UserProfile` 全部字段与 `users.json` 字段名、单用户 `LITEPAN_*` env 兜底、
@@ -293,7 +336,10 @@ class MenuManager:
   `/clear confirm`、`/quota`、`/c_status`；`_guard` 接 `core.acl`（默认拒绝，替换原来「留空=所有人可用」）；
   额度面板 `core.panels.render("cline", …)`；`STATUS_COOLDOWN` 保留；`_safe_args` 脱敏保留。
 * 贡献 `/id` 的 `id_lines`（容器名、config 路径、存储自检、已绑定数量）与 `help_text`、`summary`（用上次
-  快照，不主动请求；`DEMO_MODE` 保留）。
+  快照，不主动请求；`DEMO_MODE` 保留）。`summary` 的「N 个 Key」来自 store、明细来自快照，**两者必须
+  同源**：按当前别名过滤快照，凑不齐就退回一行；`/addkey` `/delkey` `/clear` 立即作废该用户的快照。
+  `refresh()` 用 `state.fetch_lock_for(uid)`（额度查询锁）去重，**不要**用 `lock_for(uid)`（那是 Key
+  存储写锁，拿错会挡住 `/addkey`）。
 * 兜底救援：把原 `_RESCUE_HANDLERS` 交给 `rescue` 字段（不自己注册 MessageHandler）。
 
 

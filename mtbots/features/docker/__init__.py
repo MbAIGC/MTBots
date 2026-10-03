@@ -16,7 +16,7 @@ from ...panels import cb_simple
 from ...text import esc
 from . import handlers
 from .compose import DockerState, make_state
-from .config import DockerSettings
+from .config import DEFAULT_PROJECTS_CACHE_TTL, DockerSettings
 from .hosts import HOST_ID_RE
 
 log = logging.getLogger("mtbots.docker")
@@ -67,23 +67,41 @@ def home_entries(core: Core, user_id: int) -> list[tuple[str, str]]:
 
 
 async def summary(core: Core, user_id: int) -> str:
-    """首页总览一行：只读缓存，绝不跑 docker / 不阻塞（首页必须秒开）。"""
+    """首页总览：只读缓存，绝不跑 docker / 不阻塞（首页必须秒开）。
+
+    多主机时把每台的计数直接摊开（`NAS（15）、VPS（10）`），一眼能看出哪台少了东西；
+    配置错/扫描失败的主机在计数后面挂 `⚠️`（点进去有详细原因）。
+    """
     state = _state(core)
     if state is None or not state.has_scan():
         return "🐳 Docker · 点击进入"
     projects = state.cached_projects()
+    errors = state.host_errors or {}
+    if state.multi_host:
+        parts = []
+        for host in state.hosts:
+            count = sum(1 for p in projects if p.get("host") == host.id)
+            mark = " ⚠️" if (host.error or errors.get(host.id)) else ""
+            parts.append("%s（%d%s）" % (host.display, count, mark))
+        head = "🐳 Docker · %d 台主机" % len(state.hosts)
+        if not projects and not any(errors.get(h.id) for h in state.hosts):
+            return "%s，暂无项目" % head
+        return "%s，%s" % (head, "、".join(parts))
     if not projects:
-        if state.multi_host:
-            return "🐳 Docker · %d 台主机，暂无项目" % len(state.hosts)
         return "🐳 Docker · 暂无项目"
     running = sum(1 for p in projects if "running" in str(p.get("status", "")).lower())
-    if state.multi_host:
-        return "🐳 Docker · %d 台主机 %d 个项目（%d 个运行中）" % (
-            len(state.hosts),
-            len(projects),
-            running,
-        )
     return "🐳 Docker · %d 个项目（%d 个运行中）" % (len(projects), running)
+
+
+async def refresh(core: Core, user_id: int, force: bool = False) -> None:
+    """首页自动刷新：把项目列表刷进缓存（重活在 to_thread 里，不卡事件循环）。
+
+    `force=True`（点 🔄 刷新）无视 TTL；probe/scan 的并发与连点由 `DockerState` 自己合并。
+    """
+    state = _state(core)
+    if state is None:
+        return
+    await state.get_projects(force_refresh=force)
 
 
 def help_text(core: Core, user_id: int) -> str:
@@ -165,6 +183,9 @@ MODULE = ModuleSpec(
     register=register,
     commands=commands,
     summary=summary,
+    refresh=refresh,
+    # 首页刷新的间隔与扫描缓存 TTL 同步：TTL 内重复点 /start 不再全量扫
+    refresh_ttl=DEFAULT_PROJECTS_CACHE_TTL,
     help_text=help_text,
     id_lines=id_lines,
     open_panel=handlers.open_panel,
@@ -180,6 +201,7 @@ __all__ = [
     "commands",
     "help_text",
     "id_lines",
+    "refresh",
     "register",
     "summary",
 ]

@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 from typing import Any, Callable, Optional
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -96,28 +97,219 @@ async def ensure_allowed(core: Core, update: Update, *, module_id: Optional[str]
 
 
 # ==================== 首页 / 帮助 / ID / 任务中心 ====================
-async def home_panel(core: Core, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+#: 模块没声明 `refresh_ttl` 时首页刷新的兜底间隔（秒）
+DEFAULT_REFRESH_TTL = 15.0
+
+#: 后台刷新任务（持有强引用，避免被 GC 掉导致「刷新跑一半没了」）
+_HOME_TASKS: set[Any] = set()
+
+
+def _refresh_key(module_id: str, user_id: int) -> str:
+    """刷新记账的键：Cline 的额度是**按用户**的，所以模块 id 还要带上用户。"""
+    return "%s|%s" % (module_id, int(user_id))
+
+
+def _refresh_book(core: Core) -> dict[str, dict]:
+    book = core.data.get("home_refresh")
+    if not isinstance(book, dict):
+        book = {}
+        core.data["home_refresh"] = book
+    return book
+
+
+def _refresh_ttl(spec: Any) -> float:
+    ttl = getattr(spec, "refresh_ttl", DEFAULT_REFRESH_TTL)
+    try:
+        ttl = float(ttl)
+    except (TypeError, ValueError):
+        ttl = DEFAULT_REFRESH_TTL
+    return ttl if ttl > 0 else 0.0
+
+
+def _pending_refreshes(core: Core, user_id: int, *, force: bool = False) -> list[Any]:
+    """挑出「该刷新」的模块：有 refresh 钩子 + 本人有权限 + 缓存已过 TTL（或强制）。"""
+    now = time.monotonic()
+    book = _refresh_book(core)
+    pending: list[Any] = []
+    for spec in core.modules.values():
+        if spec.refresh is None or not core.acl.can(user_id, spec.id):
+            continue
+        entry = book.get(_refresh_key(spec.id, user_id)) or {}
+        if force or (now - float(entry.get("at") or 0.0)) >= _refresh_ttl(spec):
+            pending.append(spec)
+    return pending
+
+
+def _mark_refreshing(text: str, mark: str = "⏳ 刷新中") -> str:
+    """把「正在刷新」标在模块那一块的第一行（多行摘要也不会标到奇怪的位置）。"""
+    head, sep, tail = (text or "").partition("\n")
+    return "%s  %s%s%s" % (head, mark, sep, tail)
+
+
+async def _home_text(core: Core, user_id: int, pending: Optional[list[Any]] = None) -> str:
+    """首页正文：每行一个模块；`pending` 里的模块追加「⏳ 刷新中」。"""
+    pending_ids = {spec.id for spec in (pending or [])}
+    lines: list[str] = []
+    for spec in core.modules.values():
+        if not core.acl.can(user_id, spec.id):
+            continue
+        line = None
+        if spec.summary is not None:
+            try:
+                line = await spec.summary(core, user_id)
+            except Exception as exc:  # 首页绝不能因为某个模块出错而打不开
+                log.warning("模块 %s 的首页摘要失败：%s", spec.id, exc)
+        if not line:
+            line = "%s <b>%s</b> · 点击进入" % (spec.icon, esc(spec.title))
+        lines.append(_mark_refreshing(line) if spec.id in pending_ids else line)
+    return "\n".join(lines) if lines else "没有你可用的模块，请联系管理员检查权限配置。"
+
+
+async def _refresh_one(core: Core, spec: Any, user_id: int, force: bool) -> None:
+    await spec.refresh(core, user_id, force)
+
+
+async def _run_home_refresh(
+    core: Core,
+    bot: Any,
+    chat_id: int,
+    user_id: int,
+    specs: list[Any],
+    force: bool,
+    expect_message: Optional[int] = None,
+) -> None:
+    """后台刷新 + 回填面板：先让首页秒开，数据到位后再原地改这一条消息。"""
+    book = _refresh_book(core)
+    try:
+        results = await asyncio.gather(
+            *(_refresh_one(core, spec, user_id, force) for spec in specs),
+            return_exceptions=True,
+        )
+        for spec, result in zip(specs, results):
+            if isinstance(result, BaseException):
+                log.warning("首页刷新 %s 失败：%s", spec.id, result)
+    finally:
+        # 无论成败都记时间：失败的主机/接口不该被每次 /start 反复捶
+        now = time.monotonic()
+        for spec in specs:
+            entry = book.setdefault(_refresh_key(spec.id, user_id), {})
+            entry["busy"] = False
+            entry["at"] = now
+
+    # 刷新期间用户可能已经翻到别的面板：只有「人还停在首页」且「看的还是我发起时那条面板」
+    # 才回填——否则会把人家正在看的 docker 列表原地改回首页。
+    #
+    # 注意顺序：`_home_text()` 里含 await（摘要可能读线程），所以它必须在检查**之前**算完，
+    # 检查到 render 之间不能再有 await（render 读 `_panels` 之前也是纯同步代码）。
+    try:
+        text = await _home_text(core, user_id)
+        if core.module_of_chat(chat_id) is not None:
+            return
+        if expect_message is not None and core.panels.tracked(chat_id) != expect_message:
+            return
+        await core.panels.render(
+            "home", None, text, core.panels.home_keyboard(user_id), chat_id=chat_id, bot=bot
+        )
+    except Exception as exc:  # 回填失败不影响用户（他手上那份只是旧一点）
+        log.warning("首页刷新回填失败：%s", exc)
+
+
+def _task_finished(task: Any) -> None:
+    """收尾后台刷新任务：取走异常（否则 asyncio 会打 "Task exception was never retrieved"）。"""
+    _HOME_TASKS.discard(task)
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        log.warning("首页刷新任务异常：%s", exc)
+
+
+def _claim_refreshes(core: Core, user_id: int, pending: list[Any]) -> list[Any]:
+    """给还没在刷新的模块占上坑（busy），返回真正要刷的那些。
+
+    同一个模块同时在飞的刷新只留一个；跨会话也去重（数据是模块级的，刷一次就够）。
+    """
+    book = _refresh_book(core)
+    todo: list[Any] = []
+    for spec in pending:
+        entry = book.setdefault(_refresh_key(spec.id, user_id), {})
+        if entry.get("busy"):
+            continue
+        entry["busy"] = True
+        todo.append(spec)
+    return todo
+
+
+def _release_refreshes(core: Core, user_id: int, specs: list[Any]) -> None:
+    """起不了后台任务时把占的坑退回去（否则那个模块会永远显示「⏳ 刷新中」）。"""
+    book = _refresh_book(core)
+    for spec in specs:
+        book.setdefault(_refresh_key(spec.id, user_id), {})["busy"] = False
+
+
+def _start_home_refresh(
+    core: Core,
+    bot: Any,
+    chat_id: int,
+    user_id: int,
+    todo: list[Any],
+    force: bool,
+    expect_message: Optional[int] = None,
+) -> bool:
+    """把占好坑的模块交给一个后台任务；起不来就退坑并返回 False。"""
+    if not todo:
+        return False
+    try:
+        task = asyncio.get_running_loop().create_task(
+            _run_home_refresh(core, bot, int(chat_id), int(user_id), todo, force, expect_message)
+        )
+    except RuntimeError as exc:  # 没有事件循环（离线调用）：放弃后台刷新，首页照常显示
+        log.debug("首页刷新无法起后台任务：%s", exc)
+        _release_refreshes(core, user_id, todo)
+        return False
+    _HOME_TASKS.add(task)
+    task.add_done_callback(_task_finished)
+    return True
+
+
+async def home_panel(
+    core: Core, update: Update, context: ContextTypes.DEFAULT_TYPE, *, force: bool = False
+) -> None:
+    """首页：先秒开（读缓存），再后台刷新 + 原地回填。
+
+    `/start`、`/status`（无模块上下文时）都会走到这里，所以「打开首页 = 顺手刷新一遍数据」；
+    `/list` 无模块上下文时按契约直接开 docker 列表，不经过这里。
+    `force=True`（点 🔄 刷新）无视各模块的 `refresh_ttl`，无条件重拉。
+    """
     if not await ensure_allowed(core, update):
         return
     user = update.effective_user
     chat = update.effective_chat
     core.set_module(chat.id, None)
 
-    lines: list[str] = []
-    for spec in core.modules.values():
-        if not core.acl.can(user.id, spec.id):
-            continue
-        line = None
-        if spec.summary is not None:
-            try:
-                line = await spec.summary(core, user.id)
-            except Exception as exc:  # 首页绝不能因为某个模块出错而打不开
-                log.warning("模块 %s 的首页摘要失败：%s", spec.id, exc)
-        if not line:
-            line = "%s <b>%s</b> · 点击进入" % (spec.icon, esc(spec.title))
-        lines.append(line)
-    text = "\n".join(lines) if lines else "没有你可用的模块，请联系管理员检查权限配置。"
-    await core.panels.render("home", update, text, core.panels.home_keyboard(user.id))
+    bot = getattr(context, "bot", None)
+    # 拿不到 bot 就压根不占坑、也不标 ⏳：标记必须只反映「真的在刷」的模块，
+    # 否则占坑没人退（后台任务起不来），那个模块会永远卡在「⏳ 刷新中」。
+    todo = (
+        _claim_refreshes(core, user.id, _pending_refreshes(core, user.id, force=force))
+        if bot is not None
+        else []
+    )
+    await core.panels.render(
+        "home", update, await _home_text(core, user.id, todo), core.panels.home_keyboard(user.id)
+    )
+    if not todo:
+        return
+    # 记下「我发起刷新时用户在看的哪条面板」，回填前要确认还是它
+    _start_home_refresh(
+        core,
+        bot,
+        chat.id,
+        user.id,
+        todo,
+        force,
+        expect_message=core.panels.tracked(chat.id),
+    )
 
 
 async def help_panel(core: Core, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -310,6 +502,10 @@ async def callback_router(core: Core, update: Update, context: ContextTypes.DEFA
         if action == "help":
             await query.answer()
             await help_panel(core, update, context)
+            return
+        if action == "refresh":
+            await query.answer("🔄 正在刷新…")
+            await home_panel(core, update, context, force=True)
             return
         if action in ("open", "status") and len(parts) >= 3:
             module_id = normalize_module(parts[2])

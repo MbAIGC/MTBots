@@ -77,7 +77,7 @@ docker run -d --name mtbots --restart unless-stopped \
 
 | 命令 | 作用 |
 |---|---|
-| `/start` `/home` `/menu` | 🏠 首页总览（模块与任务一屏看全；顶部显示当前版本号 `MTBots vX.Y.Z`） |
+| `/start` `/home` `/menu` | 🏠 首页总览（模块与任务一屏看全；顶部显示当前版本号 `MTBots vX.Y.Z`）。**每次打开都顺手刷新数据**：先秒开缓存，再后台刷完原地更新同一条面板 |
 | `/help` | 合并帮助，**只渲染你有权限的章节** |
 | `/status` | 当前模块状态；无模块上下文时 = 首页总览 |
 | `/list` | 当前模块列表；无模块/在 Cline 中 = Docker 项目列表 |
@@ -119,6 +119,24 @@ docker run -d --name mtbots --restart unless-stopped \
 4. **收尾键盘给「下一步」**。一行只放其他**已启用且有权限**的模块入口（当前模块不重复给，也不放任务中心——首页里就有）；`🔙 返回列表` 会回到**你刚才那页**，不是永远回第 1 页。模块入口超过 3 个就整体不显示，只留 `🏠 返回`。
 5. **跑的时候面板上能中断**。进度面板的键盘是 `[🛑 中断执行] [🧰 任务中心]`——用户视线就在这条消息上，取消不必再去翻那条随时会消失的执行消息。
 6. **失败时把命令尾巴抄进面板**。收尾面板除了 `❌` 结论，还会带 `🔻 最后输出` 的最后 2–3 行（批量升级最多 6 行），不用上滑去找那条执行消息。取消的项目单独记成 `⚠️ 已中断：`，不算「失败」。
+7. **首页先秒开、再自己长好**。`/start`（以及 `/status`、`/list` 回到首页时）会把数据刷进缓存，**但绝不阻塞首帧**：面板立刻用缓存渲染，正在刷的模块挂一行 `⏳ 刷新中`，刷完**原地改这一条消息**（不新发、不刷屏）。同一模块在 `refresh_ttl` 内不重复刷（docker 15s / Cline 60s），点 `🔄 刷新` 则无条件强制刷新。刷新跑完时你如果已经翻进别的面板，它**不会**再去改那条消息。
+8. **首页按钮只有三个动作**：各模块入口 + `[🧰 任务中心] [🔄 刷新]`。帮助是命令（`/help`），不再占按钮位。
+
+首页长这样（正文由各模块自己给，刷新完原地更新）：
+
+```text
+🏠 控制台 · MTBots v1.5.7
+───────────────
+🐳 Docker · 2 台主机，NAS（15）、VPS（10）
+🤖 Cline · 12 个 Key（正常 9 · 失败 2）
+• k1 · 5时 15% / 周 30% / 月 20%
+• k2 · 5时 0% / 周 3% / 月 1%
+   [🧰 任务中心]  [🔄 刷新]
+───────────────
+🔄 11:02:42
+```
+
+（只有一个 Key 时 Cline 那行合成一行：`🤖 Cline · 1 个 Key · 主账号 5时 15% / 周 30% / 月 20%`。）
 
 ## 管理多台服务器（多主机）
 
@@ -163,7 +181,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/MbAIGC/MTBots/main/scripts/s
 
 > URL 里用的是 `main`，所以不用跟着版本号改，**脚本升级也不牵扯镜像**（这两件事现在解耦了：
 > 脚本在仓库里，镜像只是顺带带一份离线副本）。想锁死某个版本：
-> 把 URL 里的 `main` 换成 `v1.5.6`，或加 `--ref v1.5.6`。
+> 把 URL 里的 `main` 换成 `v1.5.7`，或加 `--ref v1.5.7`。
 
 ### 一键接入：远端侧一条命令
 
@@ -203,7 +221,7 @@ cd /mbots && make remote-setup
 cd /mbots && make add-host          # 方式选 1「复用已有账号」，账号填 mtbots
 ```
 
-> 远端脚本里的守卫默认从 `main` 拉（跟脚本同源），所以不用手写守卫 URL；要指定版本就加 `--ref v1.5.6`。
+> 远端脚本里的守卫默认从 `main` 拉（跟脚本同源），所以不用手写守卫 URL；要指定版本就加 `--ref v1.5.7`。
 
 ### 非交互（CI / 批量，可选）
 
@@ -488,6 +506,26 @@ docker compose exec mtbots python -m mtbots --health | grep 🐳
 * **单主机时以上全都不出现**——面板文案、编号、`/jobs` 标题与 1.0.x 一字不差（有回归用例锁死）；
 * 失败不静默：某台主机连不上、或远端没装 compose、或被守卫拒绝，面板会在列表下方给出原因**和一条能直接抄的自测命令**（v1.1.1 起列表非空时也会提示）。
 
+### 8.2 为什么面板是秒开的（v1.5.7 提速）
+
+面板慢的全部原因都在「为了画列表，多跑了 N 条子进程」。实测（本机回环）：
+
+| 命令 | 单次耗时 |
+|---|---|
+| `docker compose ls -a --format json` | 0.10s / 主机（**真正必需的只有这条**） |
+| `docker compose config --services` | 0.14s / 项目 |
+| `ssh` 握手（纯回环，不含远端耗时） | 0.36s / 次 |
+
+15 个本机 + 10 个远端项目按老做法 = 15×0.14 + 10×(0.36+…) ≈ **8~10 秒**，而且每次都跑、还串行。现在：
+
+1. **服务列表（`容器：…`）改成按需 + 缓存**：扫描只跑 `compose ls`；`config --services` 只对**当前这一页**（`PAGE_SIZE`，默认 6 个）和详情页取，取到的结果缓存 `SERVICES_CACHE_TTL`=300s，翻页/换主机/重新扫描都直接复用（升级/清理后自动作废）。取失败**不写缓存**，下次再看那一页会重试。
+2. **多主机并行扫描**：每台主机一条线程（最多 4 台并发），一台连不上不再拖住另一台。
+3. **SSH 连接复用**：同一台主机的第 2..N 条命令走 `ControlMaster` 复用同一条 TCP 连接（`ControlPath=/tmp/mtbots-ssh-%C`，`ControlPersist=60`），省掉每次 0.36s 的握手。老 sshd / 中间设备不接受复用时可以关：`.env` 里 `SSH_MULTIPLEX=0`（目录用 `SSH_CONTROL_DIR` 换，默认 `/tmp`；该目录写不了、或值里带空白/引号时自动退回「每次握手」，不会把远端命令全打挂）。
+4. **远端探测快速失败**：`docker compose version` 返回 255（连不上 / 认证失败 / 守卫拒绝）时不再去试 `docker-compose`，死主机从 20s 上限降到 10s 上限。
+5. **首页刷新不阻塞**：见交互约定第 7 条——首帧永远是缓存。
+
+结果：主面板首屏从 ~8s 降到**亚秒级**（只剩每台主机一条 `compose ls`，并行），服务列表随翻页补齐。
+
 ### 9. 排错
 
 | 现象 | 处理 |
@@ -539,7 +577,7 @@ mtbots/
 ├── scripts/                                          # setup-remote-host.sh：一键接入远端主机（交互向导）
 ├── docs/                                             # 设计稿、施工契约（porting-contract）、合并报告
 │   └── examples/                                     # 多主机：主机清单样例、远端守卫脚本、authorized_keys 样例
-└── tests/                                            # 426 个 stdlib unittest 用例
+└── tests/                                            # 461 个 stdlib unittest 用例
 ```
 
 ## 配置
@@ -553,9 +591,10 @@ mtbots/
 | 模块 | `MTBOTS_MODULES` | 默认 `docker,litepan,cline`，可单独下线某个模块 |
 | 角色 | `MTBOTS_ROLES=123:owner,456:user` | 默认白名单内全部 `owner`；`docker` 默认只给 owner/admin |
 | 数据 | `DATA_DIR`、`CONFIG_FILE`、`LITEPAN_USERS_FILE`、`LOG_DIR` | 默认 `data/`（`config.json` + `litepan-users.json` + `logs/`，均 0600/原子写） |
-| 🐳 | `PAGE_SIZE`、`COMMAND_TIMEOUT`、`PROJECTS_CACHE_TTL` | 面板分页、单命令超时、扫描缓存 |
+| 🐳 | `PAGE_SIZE`、`COMMAND_TIMEOUT`、`PROJECTS_CACHE_TTL` | 面板分页、单命令超时、项目扫描缓存（首页刷新的最短间隔固定 15s，与它无关） |
+| 🐳 多主机 | `DOCKER_HOSTS_FILE`、`SSH_MULTIPLEX`、`SSH_CONTROL_DIR` | 主机清单路径（默认 `data/docker-hosts.json`）、ssh 连接复用开关（默认开，`0` 关）、复用套接字目录（默认 `/tmp`） |
 | 🎬 | `LITEPAN_URL`、`LITEPAN_API_KEY`、`DRIVES`、`LITEPAN_ADMIN_USER/PASSWORD`、`LITEPAN_MENU_BUDGET` | 单用户模式；多用户请用 `data/litepan-users.json`（字段名与旧版一致） |
-| 🤖 | `CLINEPASS_API_BASE`、`MAX_KEYS_PER_USER`、`STATUS_COOLDOWN`、`DEMO_MODE`、`SHOW_IDENTITY` | 与旧版一致 |
+| 🤖 | `CLINEPASS_API_BASE`、`MAX_KEYS_PER_USER`、`STATUS_COOLDOWN`、`DEMO_MODE`、`SHOW_IDENTITY` | 与旧版一致；首页额度刷新的最短间隔固定 60s（`ModuleSpec.refresh_ttl`） |
 
 自检：
 
@@ -603,16 +642,16 @@ make check
 ```
 
 测试全部是 stdlib `unittest`、不联网也不碰真实 Telegram/Docker（Docker 用例还会把
-`subprocess` / `create_subprocess_exec` 换成抛异常的桩做反证）。当前 **426 个用例全绿**：
+`subprocess` / `create_subprocess_exec` 换成抛异常的桩做反证）。当前 **461 个用例全绿**：
 
 | 文件 | 用例 | 覆盖 |
 |---|---|---|
-| `tests/test_core.py` | 72 | 文本分片（HTML 标签闭合）、`safe_html` 出口转义、`SafeBot` 解析失败降级、ACL 默认拒绝、存储原子写/0600/损坏分类、任务中心（运行中显示最后一行输出、终态不再翻转）与收尾卡片文案、跨模块入口按钮的取舍（启用/权限/排不下）、**命令菜单的作用域规则（私聊按权限裁剪 / 群取全量 / 空片段不下发）**、面板唯一与两步确认、菜单去重与作用域、配置兼容、日志脱敏（含 exc_info 的 traceback）、路由消歧与兜底救援 |
-| `tests/test_docker_module.py` | 79 | 项目排序/分页、pull 噪音过滤、清理候选、回调载荷、模块装配、**扫描失败诊断（实测 socket GID、未挂载目录的公共挂载点、缺命令）**、执行消息收尾（成功即删、失败必留、结果回传）、失败尾部输出与进度键盘的中断入口、**多主机（主机清单校验 / ssh 包装与引号 / 逐主机扫描与提示 / 退出码映射 / 只认配置内的 host id）** |
+| `tests/test_core.py` | 83 | 文本分片（HTML 标签闭合）、`safe_html` 出口转义、`SafeBot` 解析失败降级、ACL 默认拒绝、存储原子写/0600/损坏分类、任务中心（运行中显示最后一行输出、终态不再翻转）与收尾卡片文案、跨模块入口按钮的取舍（启用/权限/排不下）、**命令菜单的作用域规则（私聊按权限裁剪 / 群取全量 / 空片段不下发）**、面板唯一与两步确认、菜单去重与作用域、配置兼容、日志脱敏（含 exc_info 的 traceback）、路由消歧与兜底救援、**首页两帧自动刷新（TTL 节流 / 🔄 强制 / busy 去重 / 只在还停在首页时回填）** |
+| `tests/test_docker_module.py` | 93 | 项目排序/分页、pull 噪音过滤、清理候选、回调载荷、模块装配、**扫描失败诊断（实测 socket GID、未挂载目录的公共挂载点、缺命令）**、执行消息收尾（成功即删、失败必留、结果回传）、失败尾部输出与进度键盘的中断入口、**多主机（主机清单校验 / ssh 包装与引号 / 逐主机扫描与提示 / 退出码映射 / 只认配置内的 host id）**、**提速（服务列表按需+缓存+并发取、主机并行扫描、ssh 复用选项、255 快速失败、冷缓存下的服务名校验）** |
 | `tests/test_litepan_module.py` | 59 | slug 构建（拼音/限长/去重）、users.json 校验、发现解析与缓存、菜单预算、触发与回执 |
 | `tests/test_setup_script.py` | 26 | 两个接入脚本：ssh/scp 打桩跑完整向导流程（主机清单幂等合并 / `command=` 守卫行 / create 模式驱动远端脚本 / dry-run 不落地 / 非法 id 被拒），远端准备脚本（dry-run、参数校验、真跑时守卫 0755 + authorized_keys 0600 + 幂等 + 别人的 key 不动）、curl 模式（项目根取当前目录、不读 stdin、按 `--ref` 下载配套脚本）、远端侧交互向导（账号/公钥/守卫三问 + `--pubkey-line`/`--guard-url`）、`bash <(curl …)` 形式（$0=/dev/fd/* 时项目根取当前目录）、公钥被截断时早报错、老 sshd（<7.2）自动改用长格式选项、公钥已装+守卫生效时不被误判成「没装公钥」（先用守卫放行的 `docker compose version` 探连通，再用 `printf $HOME` 探「是不是守卫态」——compose 能跑不等于 key 没被 command= 限制，两者都要判对，且守卫态绝不写远端） |
-| `tests/test_cline_module.py` | 140 | 额度解析/渲染、Key 掩码与指纹、别名校验、存储读写与自愈、默认拒绝 |
-| `tests/test_integration.py` | 50 | 三个真实模块一起装配、命令不重复、菜单合并、`--check` 离线可跑，**真 `telegram.Update` 走 PTB dispatcher 的端到端用例**（不重复执行、全角命令可救援、下线模块的按钮有反馈、点按钮原地改同一条面板、**所有面板文案都过一遍 Telegram HTML 合法性校验**），多主机装配用例（按主机分组、**0 项目/故障/配置错的远端都要有段并写明原因、跨页提示**、单主机无主机标题、伪造 host id 被拒且不执行、`/upgrade` 编号与面板一致、状态与清理按主机），以及**收尾只留一条消息**（批量升级不再推卡片、执行消息带 `delete_on_success`、收尾面板带跨模块入口、`🔙 返回列表` 回原页、失败抄尾部输出、进度面板可中断、最后一步取消判为取消） |
+| `tests/test_cline_module.py` | 149 | 额度解析/渲染、Key 掩码与指纹、别名校验、存储读写与自愈、默认拒绝、**首页摘要（单/多 Key、正常与失败计数、别名转义、计数与快照必须同源）、刷新钩子（查询锁去重、失败记账、Key 变更即作废快照）** |
+| `tests/test_integration.py` | 51 | 三个真实模块一起装配、命令不重复、菜单合并、`--check` 离线可跑，**真 `telegram.Update` 走 PTB dispatcher 的端到端用例**（不重复执行、全角命令可救援、下线模块的按钮有反馈、点按钮原地改同一条面板、**所有面板文案都过一遍 Telegram HTML 合法性校验**），多主机装配用例（按主机分组、**0 项目/故障/配置错的远端都要有段并写明原因、跨页提示**、单主机无主机标题、伪造 host id 被拒且不执行、`/upgrade` 编号与面板一致、状态与清理按主机、**冷缓存下 `/upgrade NN <svc>` 不误判服务不存在**），以及**收尾只留一条消息**（批量升级不再推卡片、执行消息带 `delete_on_success`、收尾面板带跨模块入口、`🔙 返回列表` 回原页、失败抄尾部输出、进度面板可中断、最后一步取消判为取消） |
 
 ## 与原三个 Bot 的差异（有意为之）
 

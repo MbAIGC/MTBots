@@ -19,11 +19,15 @@ from mtbots.features.cline.handlers import (
     help_text,
     id_lines,
     open_panel,
+    refresh,
     register,
     show_list,
     show_status,
     summary,
 )
+
+#: 首页刷新的最短间隔（秒）：一个 Key 要打 3 个额度接口，比 docker 的本地扫描金贵得多
+REFRESH_TTL = 60.0
 
 MODULE = ModuleSpec(
     id="cline",
@@ -34,6 +38,8 @@ MODULE = ModuleSpec(
     register=register,
     commands=commands,
     summary=summary,
+    refresh=refresh,
+    refresh_ttl=REFRESH_TTL,
     help_text=help_text,
     id_lines=id_lines,
     open_panel=open_panel,
@@ -45,10 +51,12 @@ MODULE = ModuleSpec(
 
 __all__ = [
     "MODULE",
+    "REFRESH_TTL",
     "register",
     "show_status",
     "show_list",
     "open_panel",
+    "refresh",
     "summary",
     "help_text",
     "id_lines",

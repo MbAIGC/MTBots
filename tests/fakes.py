@@ -158,7 +158,14 @@ def make_core(*, allowed=(123456789,), page_size: int = 6, tmpdir: Optional[str]
     return core
 
 
-def add_fake_module(core: Core, module_id: str = "docker", calls: Optional[dict] = None) -> None:
+def add_fake_module(
+    core: Core,
+    module_id: str = "docker",
+    calls: Optional[dict] = None,
+    *,
+    refresh=None,
+    refresh_ttl: float = 15.0,
+) -> None:
     """注册一个只记录调用的假模块，用来验证路由消歧。"""
     from mtbots.core import ModuleSpec
 
@@ -176,6 +183,11 @@ def add_fake_module(core: Core, module_id: str = "docker", calls: Optional[dict]
     async def summary(core_, uid):
         return "%s 假模块 · 一切正常" % module_id
 
+    async def do_refresh(core_, uid, force=False):
+        calls.setdefault("refresh", []).append((module_id, force))
+        if refresh is not None:
+            await refresh(core_, uid, force)
+
     core.register(
         ModuleSpec(
             id=module_id,
@@ -186,6 +198,8 @@ def add_fake_module(core: Core, module_id: str = "docker", calls: Optional[dict]
             register=lambda app, c: None,
             commands=lambda c, uid: [("d_list", "假列表")],
             summary=summary,
+            refresh=do_refresh,
+            refresh_ttl=refresh_ttl,
             help_text=lambda c, uid: "假帮助",
             open_panel=open_panel,
             show_status=show_status,

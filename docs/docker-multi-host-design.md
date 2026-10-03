@@ -275,3 +275,37 @@ class DockerHost:
 | 测试 | `tests/test_docker_module.py::Host*`、`MultiHostStateTest`、`tests/test_integration.py::MultiHostFlowTests` | 新增 30 条（总计 377，全绿） |
 
 **未做（有意留白）**：跨主机并行执行（全局仍是一把任务锁）、远端构建 / git / 日志 / `exec`、跨主机迁移容器或卷。
+
+## 17. 性能修订（v1.5.7）
+
+v1.1.0 的实现有个没量化的代价：`scan_projects_sync()` 里**每个项目**都同步跑一次
+`docker compose config --services`，而且**主机之间串行**。实测（回环）：
+`ls` 0.10s/主机、`config --services` 0.14s/项目、ssh 握手 0.36s/次。
+按 15 个本机 + 10 个远端项目算 ≈ 8~10s **每次**打开/刷新面板。
+
+四处修订（对外行为有意保持不变，只是更快。**例外**：服务名单从「扫描时预填」改成按需取，
+命令路径 `/upgrade NN <svc>` 的校验一度因此误判「服务不存在」——已在 §17.1 修掉并加了用例）：
+
+| 修订 | 位置 | 说明 |
+|---|---|---|
+| 服务列表按需加载 + 缓存 | `DockerState.load_services()` / `ensure_services()` / `services_cache` | 扫描只跑 `compose ls`；`config --services` 只对**当前页**（`PAGE_SIZE`）与详情页取，结果缓存 `SERVICES_CACHE_TTL`=300s 跨扫描复用；取失败（返回 `None`）不写缓存、下次重试。`invalidate_cache()` 连服务缓存一起清 |
+| 主机并行扫描 | `DockerState._scan_hosts()` + `HostScan` | 每台主机一条线程（`HOST_PARALLEL`=4，`pool.map` 保序）；worker 只返回 `HostScan`，**不再改共享属性**，主线程合并 `host_errors`/`hidden_dirs`/`skipped_projects`/`roots_filtered` |
+| ssh 连接复用 | `hosts.DockerHost.command()` / `control_path()` / `control_path_usable()` | `ControlMaster=auto` + `ControlPath=/tmp/mtbots-ssh-%C` + `ControlPersist=60`；`SSH_MULTIPLEX=0` 可关，`SSH_CONTROL_DIR` 换目录（带空白/引号的值会被拒并退回默认；目录不可写时本次不复用——宁可贵一点也不能让所有远端命令起不来）。带 `command=` 守卫的强制命令照常工作（每条 channel 仍带 `SSH_ORIGINAL_COMMAND`） |
+| 远端探测快速失败 | `DockerState.get_remote_compose_bin()` | 返回 255（ssh 连不上/认证失败/守卫拒绝）时不再试 `docker-compose`（省掉一个 `ConnectTimeout`）；`host.error` 非空的主机**根本不探测** |
+
+顺带收紧：`get_projects()` 加一把 `_scan_lock`，**只合并「在飞」的扫描**（等锁期间别人刚好
+扫完就复用他的结果；`projects_cache_time` 记的是**扫完**时间）。顺序发生的第二次
+「🔄 强制刷新」照常重扫——用户点刷新就是要新数据，不能被一个固定窗口悄悄换成旧缓存。
+
+### 17.1 独立审查抓出来的回归与修复（同版本内）
+
+| 问题 | 后果 | 修法 |
+|---|---|---|
+| `_do_upgrade_service()` / `_upgrade_command()` 仍用 `service_name not in target["services"]` 校验（P0） | 冷缓存下 `/upgrade 01 emby` 报「不存在服务 emby」（旧版扫描会预填，提速把它挪走了） | 新增 `_service_exists()`：校验前 `await state.ensure_services([target])`；`test_integration` 加冷缓存用例 |
+| `_spawn_home_refresh(bot=None)` 先置 `busy=True` 再 return（P1） | 该模块此后**永远** `⏳ 刷新中` 且再也不刷（占坑没人退） | 先判 bot，再 `_claim_refreshes()` 占坑；起不来任务时 `_release_refreshes()` 退坑 |
+| 回填前的「人还在首页吗」检查与真正回填之间隔着 `_home_text()` 的 await（P1） | 用户在那个窗口点进 docker，会被后台任务把同一条消息改回首页 | 先算 `_home_text()`，再查 `module_of_chat()` + `panels.tracked() == 发起时的 message_id`，检查到 render 之间无 await |
+| Cline `refresh()` 拿的是 Key 存储写锁（P1） | 挡不住重复额度查询（手动刷新不用那把锁），反而会卡住 `/addkey` | 拆出 `fetch_lock_for()`（额度查询锁），`_query_and_render()` 与 `refresh()` 共用；存储锁只保护本地写 |
+| Cline 首页「N 个 Key」来自 store、明细来自快照缓存（P1） | `/delkey` 后出现「2 个 Key」下面列 3 行 | 按当前别名集合过滤快照，凑不齐退回一行；`/addkey` `/delkey` `/clear` 立即作废快照 |
+| `force_refresh=True` 被固定合并窗口吞掉（P1） | 面板「🔄 刷新状态」拿到 3 秒前的数据 | 见上：只合并在飞扫描 |
+
+**仍未做**：服务列表不落盘（容器重启后第一次看那一页会重取）、跨主机并行执行。

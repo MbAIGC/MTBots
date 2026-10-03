@@ -406,6 +406,9 @@ async def _render_list(
     total_projects = len(projects)
     running_cnt = sum(1 for p in projects if "running" in str(p.get("status", "")).lower())
     page_projects, page, total_pages = paginate_projects(visible, page, settings.page_size)
+    # 服务列表只取**这一页**要渲染的项目：全量逐项目跑 `compose config --services`
+    # （远端=每个项目一次 SSH 握手）会把首屏拖到十来秒，见 compose.SERVICES_CACHE_TTL
+    await state.ensure_services(page_projects)
 
     text = "📊 <b>统计：</b>共 %d 个项目 | 🟢 %d 运行中 | 🟡 %d 停止\n" % (
         total_projects,
@@ -579,6 +582,7 @@ async def _show_detail(
     target = await _project_of(core, update, project_name, host)
     if target is None:
         return
+    await state.ensure_services([target])  # 详情页要按服务列按钮：只取这一个项目
 
     is_running = "running" in str(target.get("status", "")).lower()
     text = "📦 <b>项目卡片：%s</b>\n\n" % esc(state.project_label(target))
@@ -910,6 +914,27 @@ async def _do_upgrade_project(
     )
 
 
+async def _service_exists(state: DockerState, project: dict, service_name: str) -> bool:
+    """这个项目里到底有没有这个服务。
+
+    服务列表是**按需**取的（`ensure_services`）：/upgrade 是命令路径，不经过列表渲染，
+    所以这里必须自己补一次——否则冷缓存下 `services` 还是空的，任何服务都会被判成
+    「不存在」（旧版扫描时会预填，这次提速把它挪走了）。
+    """
+    await state.ensure_services([project])
+    return service_name in list(project.get("services") or [])
+
+
+def _compose_missing_reason(state: DockerState, host_id: Optional[str]) -> str:
+    """「没探测到 compose」要说清是哪台主机、到底为什么（配置错 ≠ 没装 docker）。"""
+    host = state.host_by_id(host_id)
+    if host is not None and host.error:
+        return "主机 %s 配置有问题：%s" % (host.id, host.error)
+    if host is not None and host.is_remote:
+        return "远端主机 %s 未检测到 docker compose / docker-compose" % host.id
+    return "未检测到 docker compose / docker-compose 命令"
+
+
 async def _do_upgrade_service(
     core: Core,
     update: Update,
@@ -946,12 +971,12 @@ async def _do_upgrade_service(
 
         if target is None:
             status, detail = FAILED, "未找到项目 %s（/d_list 可刷新）" % project_name
-        elif service_name not in list(target.get("services") or []):
+        elif not await _service_exists(state, target, service_name):
             status, detail = FAILED, "项目 %s 中没有服务 %s" % (project_name, service_name)
         elif not await asyncio.to_thread(
             state.get_remote_compose_bin, state.host_by_id(host)
         ):
-            status, detail = FAILED, "未检测到 docker compose / docker-compose 命令"
+            status, detail = FAILED, _compose_missing_reason(state, host)
         else:
             upgrade_host = state.host_of(target)
             job.title = "升级服务 %s / %s" % (state.project_label(target), service_name)
@@ -1652,7 +1677,7 @@ async def _upgrade_command(core: Core, update: Update, context: Any) -> None:
     target = projects[num - 1]
     target_host = target.get("host")
     if service_name:
-        if service_name not in list(target.get("services") or []):
+        if not await _service_exists(state, target, service_name):
             await core.panels.render(
                 "docker",
                 update,

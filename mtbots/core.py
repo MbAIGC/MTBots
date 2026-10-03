@@ -57,6 +57,15 @@ class ModuleSpec:
     #: （多主机时 Docker 用它把每台主机直接摆到首页，少点一次）
     home_entries: Callable[["Core", int], list[tuple[str, str]]] = lambda core, uid: []
 
+    #: 首页自动刷新：把数据刷进自己的缓存，`summary()` 随后从缓存里读。
+    #: 签名 `refresh(core, user_id, force=False)`；**重活必须自己 to_thread**，
+    #: 否则会卡住整个事件循环（所有人排队等这一台机器）。
+    #: 抛异常由 router 记录并照常收尾，模块不需要自己兜。
+    refresh: Optional[Callable[..., Awaitable[None]]] = None
+    #: 首页刷新最短间隔（秒）：TTL 内重复点 /start / 🏠 直接用缓存，不打外部接口。
+    #: 点 🔄 刷新按钮是强制刷新，无视这个 TTL。
+    refresh_ttl: float = 15.0
+
 
 @dataclass
 class Core:
