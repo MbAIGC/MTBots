@@ -250,6 +250,29 @@ class DockerStateTest(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 state.build_compose_cmd(project, "up", "-d")
 
+    def test_stop_command_shape(self) -> None:
+        """停止：本地是 `compose -f … stop [服务]`，远端被包成 ssh —— 守卫脚本就看这一串。"""
+        state = DockerState(DockerSettings())
+        state.compose_bin = ["docker", "compose"]
+        project = {"config_files": ["/srv/a/docker-compose.yml"]}
+        self.assertEqual(
+            state.build_compose_cmd(project, "stop"),
+            ["docker", "compose", "-f", "/srv/a/docker-compose.yml", "stop"],
+        )
+        self.assertEqual(
+            state.build_compose_cmd(project, "stop", "emby"),
+            ["docker", "compose", "-f", "/srv/a/docker-compose.yml", "stop", "emby"],
+        )
+
+        remote = DockerHost(id="vps", kind="ssh", target="mtbots@10.0.0.5")
+        state.hosts = [DockerHost(id="local", kind="local"), remote]
+        state.remote_compose["vps"] = ["docker", "compose"]
+        wrapped = state.build_compose_cmd({**project, "host": "vps"}, "stop", "emby")
+        self.assertEqual(wrapped[0], "ssh")
+        self.assertEqual(
+            wrapped[-1], "docker compose -f /srv/a/docker-compose.yml stop emby"
+        )
+
     def test_compose_probe_prefers_plugin_then_fallback(self) -> None:
         ok = mock.Mock(returncode=0, stdout="", stderr="")
         bad = mock.Mock(returncode=1, stdout="", stderr="")

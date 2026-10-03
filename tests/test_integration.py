@@ -329,7 +329,7 @@ class FinishFlowTests(unittest.TestCase):
         calls: list[dict] = []
 
         async def fake_run(_state, _message, _cmd, **run_kwargs):
-            calls.append(run_kwargs)
+            calls.append({**run_kwargs, "cmd": list(_cmd)})
             if captured is not None and run_kwargs.get("out") is not None:
                 run_kwargs["out"].append(captured)
             if cancel_on_call is not None and len(calls) == cancel_on_call:
@@ -431,6 +431,32 @@ class FinishFlowTests(unittest.TestCase):
         self.assertIn("🛑 🐳", final, "面板按取消收尾")
         self.assertNotIn("✅ 🐳", final)
         assert_html_valid(self, final)
+
+    # ---------- 停止容器（确认页上的第三个动作） ----------
+    def test_stop_project_runs_compose_stop(self):
+        _core, bot, calls = self._run_flow("_do_stop", project_name="media")
+        self.assertEqual(calls[0]["cmd"][-1], "stop")
+        self.assertNotIn("pull", calls[0]["cmd"], "停止不该 pull")
+        final = self._final(bot)
+        self.assertIn("✅ 🐳 <b>停止项目 media</b>", final)
+        self.assertIn("已停止", final)
+        assert_html_valid(self, final)
+
+    def test_stop_service_passes_the_service_name(self):
+        _core, bot, calls = self._run_flow(
+            "_do_stop", project_name="tools", service_name="uptime-kuma"
+        )
+        self.assertEqual(calls[0]["cmd"][-2:], ["stop", "uptime-kuma"])
+        self.assertIn("停止服务 tools / uptime-kuma", self._final(bot))
+
+    def test_stop_unknown_service_is_rejected_before_running_anything(self):
+        core, bot, calls = self._run_flow(
+            "_do_stop", project_name="media", service_name="nosuch"
+        )
+        self.assertEqual(calls, [], "服务不存在就不该执行任何命令")
+        # 这一步没有进度面板可编辑，收尾是新发一条（所以看 last_text 而不是 _final）
+        self.assertIn("没有服务", bot.last_text)
+        self.assertEqual(core.jobs.all_jobs()[-1].status, "failed")
 
 
 class MultiHostFlowTests(unittest.TestCase):
@@ -903,6 +929,20 @@ class MultiHostFlowTests(unittest.TestCase):
         app, core, bot = self._make_app()
         self._drive(app, real_update(bot, text="/upgrade 02"))
         self.assertIn("升级确认 - [vps/blog]", bot.last_text)
+        assert_html_valid(self, bot.last_text)
+
+    def test_upgrade_confirm_has_four_buttons_in_one_row(self):
+        """点项目后那一页：升级 / 返回列表 / 停止 / 🏠 返回 挤在同一行。"""
+        app, core, bot = self._make_app()
+        self._drive(app, real_update(bot, text="/upgrade 01"))
+        markup = bot.rec["sent"][-1][2]["reply_markup"]
+        self.assertEqual(len(markup.inline_keyboard), 1, "四个按钮必须同一行")
+        row = markup.inline_keyboard[0]
+        self.assertEqual([b.text for b in row], ["✅ 升级", "🔙 返回列表", "🛑 停止", "🏠 返回"])
+        datas = [b.callback_data for b in row]
+        self.assertTrue(datas[2].startswith("d|stop_do|"), datas)
+        self.assertEqual(datas[1], "d|page_turn|1|nas", "返回列表要回到那台主机的列表")
+        self.assertIn("compose stop", bot.last_text, "正文要说清停止会执行什么")
         assert_html_valid(self, bot.last_text)
 
     def test_upgrade_command_accepts_a_service_with_a_cold_cache(self):

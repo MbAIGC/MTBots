@@ -117,6 +117,8 @@ def help_text(core: Core, user_id: int) -> str:
         "• <code>/upgrade 01</code> — 升级列表中第 01 个项目\n"
         "• <code>/upgrade 01 emby</code> — 升级第 01 个项目中的 emby 服务\n"
         "• <code>/upgrade all</code> — 升级全部项目\n\n"
+        "🛑 <b>停止容器</b>：点开项目后的确认页上有 <b>停止</b> 按钮（等价于 <code>compose stop</code>，"
+        "不删容器、不动数据）；要重新起来就点同一页的 <b>升级</b>（执行 <code>up -d</code>）。\n\n"
         "⚙️ 单条命令超时 <code>COMMAND_TIMEOUT</code>=%d 秒；主面板每页 "
         "<code>PAGE_SIZE</code>=%d 个项目；同时只允许一个 compose 任务。"
         % (settings.command_timeout, settings.page_size)

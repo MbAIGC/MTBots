@@ -49,7 +49,7 @@ from .hosts import HOST_ID_RE, explain_exit
 log = logging.getLogger("mtbots.docker")
 
 #: 需要 `panels.cb()` 内存载荷才能还原的回调（载荷被清理 = 菜单已过期）
-_PAYLOAD_ACTIONS = {"p_sel", "up_s_ask", "up_svc_ask", "up_p_do", "up_svc_do"}
+_PAYLOAD_ACTIONS = {"p_sel", "up_s_ask", "up_svc_ask", "up_p_do", "up_svc_do", "stop_do"}
 
 _UPGRADE_GUIDE = (
     "💡 <b>/upgrade 命令行升级指南：</b>\n\n"
@@ -672,11 +672,9 @@ async def _ask_project_upgrade(
     # 否则一台连不上的主机就能把整个 bot 卡住（所有用户的 update 都排队）
     compose_bin = await asyncio.to_thread(state.get_remote_compose_bin, state.host_by_id(host_id))
     compose = " ".join(compose_bin or ["docker", "compose"])
-    confirm_data = cb(
-        "d",
-        "up_p_do",
-        {"name": project_name, "page": back_page, "host": host_id, "list_host": list_host or ""},
-    )
+    payload = {"name": project_name, "page": back_page, "host": host_id, "list_host": list_host or ""}
+    confirm_data = cb("d", "up_p_do", payload)
+    stop_data = cb("d", "stop_do", payload)
 
     text = (
         "🚀 <b>升级确认 - [%s]</b>\n\n"
@@ -684,8 +682,10 @@ async def _ask_project_upgrade(
         "🛠 <b>执行步骤：</b>\n"
         "  1. <code>%s pull</code>\n"
         "  2. <code>%s up -d</code>\n\n"
+        "🛑 <b>停止</b> 只执行 <code>%s stop</code>（容器停掉、数据不动；"
+        "之后点 <b>升级</b> 即可重新起来）。\n"
         "⏱ 确认后立即执行，可在进度消息里中断。"
-        % (safe_name, safe_dir, esc(compose), esc(compose))
+        % (safe_name, safe_dir, esc(compose), esc(compose), esc(compose))
     )
     await core.panels.ask_confirm(
         "docker",
@@ -693,8 +693,10 @@ async def _ask_project_upgrade(
         text,
         confirm_data,
         cancel_data=_list_back_data(core, back_page, list_host or host),
-        confirm_label="✅ 确认升级",
-        cancel_label="🔙 取消返回",
+        confirm_label="✅ 升级",
+        cancel_label="🔙 返回列表",
+        # 一行四个：升级 / 返回列表 / 停止 / 🏠 返回（🏠 返回由 PanelManager 补在行尾）
+        extras=[(InlineKeyboardButton("🛑 停止", callback_data=stop_data), stop_data)],
     )
 
 
@@ -719,17 +721,15 @@ async def _ask_service_upgrade(
     safe_project = esc(state.project_label(target) if target else project_name)
     safe_service = esc(service_name)
     safe_dir = esc(target["dir"]) if target else "未知路径"
-    confirm_data = cb(
-        "d",
-        "up_svc_do",
-        {
-            "name": project_name,
-            "svc": service_name,
-            "page": back_page,
-            "host": host_id,
-            "list_host": list_host or "",
-        },
-    )
+    payload = {
+        "name": project_name,
+        "svc": service_name,
+        "page": back_page,
+        "host": host_id,
+        "list_host": list_host or "",
+    }
+    confirm_data = cb("d", "up_svc_do", payload)
+    stop_data = cb("d", "stop_do", payload)
     cancel_data = cb(
         "d",
         "p_sel",
@@ -740,7 +740,8 @@ async def _ask_service_upgrade(
         "🚀 <b>服务升级确认 - [%s]</b>\n\n"
         "📦 <b>所属项目：</b>%s\n"
         "📂 <b>工作路径：</b><code>%s</code>\n\n"
-        "💡 仅重建并升级 <code>%s</code>，项目内其他容器不受影响。"
+        "💡 仅重建并升级 <code>%s</code>，项目内其他容器不受影响。\n"
+        "🛑 <b>停止</b> 只停这一个服务，之后点 <b>升级</b> 可重新起来。"
         % (safe_service, safe_project, safe_dir, safe_service)
     )
     await core.panels.ask_confirm(
@@ -749,8 +750,9 @@ async def _ask_service_upgrade(
         text,
         confirm_data,
         cancel_data=cancel_data,
-        confirm_label="✅ 确认升级单一服务",
+        confirm_label="✅ 升级",
         cancel_label="🔙 返回",
+        extras=[(InlineKeyboardButton("🛑 停止", callback_data=stop_data), stop_data)],
     )
 
 
@@ -1043,6 +1045,101 @@ async def _do_upgrade_service(
         status, detail = FAILED, "执行异常：%s" % exc
     finally:
         state.invalidate_cache()
+        state.end_task()
+        core.jobs.finish(job, status, detail)
+
+    await core.panels.render(
+        "docker",
+        update,
+        _done_text(job, extra),
+        _finish_keyboard(core, _user_id(update), page, list_host),
+    )
+
+
+async def _do_stop(
+    core: Core,
+    update: Update,
+    context: Any,
+    project_name: str,
+    service_name: Optional[str] = None,
+    page: int = 1,
+    host: Optional[str] = None,
+    list_host: Optional[str] = None,
+) -> None:
+    """停止容器：`compose stop [服务]`（数据和卷都不动，点「升级」就能重新起来）。
+
+    走的是和升级同一套「执行锁 + 任务中心 + 流式进度 + 收尾面板」，
+    所以中断、`🧰 任务中心`、失败输出回抄这些行为完全一致。
+    """
+    state = _state(core)
+    if update.effective_message is None:
+        await _answer(update, "⚠️ 当前会话不可用，请重新用 /d_list 打开面板")
+        return
+    task_id = uuid.uuid4().hex
+    if not await state.begin_task(task_id):
+        await _busy(core, update)
+        return
+
+    title = (
+        "停止服务 %s / %s" % (project_name, service_name) if service_name else "停止项目 %s" % project_name
+    )
+    job = core.jobs.add("docker", title, cancel=state.request_cancel, chat_id=_chat_id(update))
+    status, detail, extra = FAILED, "未执行", ""
+
+    try:
+        await _answer(update)
+        projects = await state.get_projects()
+        target = _find_project(projects, project_name, host, multi_host=state.multi_host)
+
+        if target is None:
+            status, detail = FAILED, "未找到项目 %s（/d_list 可刷新）" % project_name
+        elif service_name and not await _service_exists(state, target, service_name):
+            status, detail = FAILED, "项目 %s 中没有服务 %s" % (project_name, service_name)
+        elif not await asyncio.to_thread(state.get_remote_compose_bin, state.host_by_id(host)):
+            status, detail = FAILED, _compose_missing_reason(state, host)
+        else:
+            target_host = state.host_of(target)
+            label = state.project_label(target)
+            job.title = "停止服务 %s / %s" % (label, service_name) if service_name else "停止项目 %s" % label
+            scope = "服务 <b>%s</b>" % esc(service_name) if service_name else "项目 <b>%s</b>" % esc(label)
+            await core.panels.render(
+                "docker",
+                update,
+                "⏳ <b>正在停止%s</b>\n执行 <code>compose stop</code>（不删容器、不动数据）" % scope,
+                _progress_keyboard(task_id),
+            )
+            log.info("停止 %s%s", project_name, " / %s" % service_name if service_name else "")
+
+            captured: list[str] = []
+            cmd = state.build_compose_cmd(
+                target, "stop", *([service_name] if service_name else [])
+            )
+            stopped = await run_command_with_feedback(
+                state,
+                update.effective_message,
+                cmd,
+                cwd=state.cwd_for(target),
+                title="停止 - %s" % (service_name or label),
+                progress_pct=90,
+                task_id=task_id,
+                on_progress=_progress(core, job),
+                delete_on_success=True,
+                out=captured,
+                host=target_host,
+            )
+
+            if state.cancel_requested:
+                status, detail = CANCELLED, "已按用户请求取消"
+            elif stopped:
+                status, detail = DONE, "已停止（点「升级」可重新起来）"
+            else:
+                status, detail = FAILED, "停止失败"
+                extra = _failure_block(captured)
+    except Exception as exc:
+        log.exception("停止 %s 异常", project_name)
+        status, detail = FAILED, "执行异常：%s" % exc
+    finally:
+        state.invalidate_cache()  # 状态变了，列表/摘要下次读到的是新的
         state.end_task()
         core.jobs.finish(job, status, detail)
 
@@ -1601,6 +1698,22 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             context,
             payload["name"],
             payload["svc"],
+            _to_int(payload.get("page"), 1),
+            payload.get("host"),
+            payload.get("list_host") or None,
+        )
+    elif action == "stop_do":
+        # 升级页上的「🛑 停止」：令牌与升级同一个确认页发放，同样绑定发起人与 60s TTL
+        ok, why = core.panels.validate_confirm(query, data)
+        if not ok:
+            await _answer(update, why, alert=True)
+            return
+        await _do_stop(
+            core,
+            update,
+            context,
+            payload["name"],
+            payload.get("svc") or None,
             _to_int(payload.get("page"), 1),
             payload.get("host"),
             payload.get("list_host") or None,

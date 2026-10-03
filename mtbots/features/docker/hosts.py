@@ -90,7 +90,7 @@ def control_path_usable(path: str) -> bool:
 #: ssh 自己失败时的退出码 → 面板提示（不是 docker 的错，得分开说）
 SSH_EXIT_HINTS = {
     255: "SSH 连不上或认证失败（检查网络、端口、私钥、known_hosts）",
-    126: "远端授权只允许 compose 操作（守卫脚本拒绝了这条命令）",
+    126: "远端授权只允许 compose 操作（守卫脚本拒绝了这条命令；刚升级 MTBots 的话把远端守卫也更新一遍，见 README「管理多台服务器」第 4 节）",
     127: "远端未安装 docker compose / docker",
 }
 

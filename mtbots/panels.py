@@ -19,7 +19,7 @@ from __future__ import annotations
 import logging
 import time
 import uuid
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
@@ -315,22 +315,31 @@ class PanelManager:
         cancel_data: Optional[str] = None,
         confirm_label: str = "✅ 确认",
         cancel_label: str = "❌ 取消",
+        extras: Sequence[tuple[InlineKeyboardButton, str]] = (),
         ttl: float = CONFIRM_TTL,
         owner_id: Optional[int] = None,
     ) -> None:
+        """两步确认面板：`[确认] [取消] [(额外动作…)]` 一行 + 🏠 返回（由 render 补在行尾）。
+
+        `extras` 是「同一个确认页上的另一个破坏性动作」（例如升级页上的 🛑 停止）：
+        给 `(按钮, 该按钮自己的确认令牌)`，令牌和主确认一样绑定发起人与 TTL——
+        这样误点的防护、过期提示都走同一套逻辑，模块侧只要 `validate_confirm` 它自己的令牌。
+        """
         user = update.effective_user if update is not None else None
         owner = owner_id if owner_id is not None else (user.id if user else 0)
         self.expire_pending()
-        self._pending[confirm_data] = (int(owner), time.monotonic() + ttl)
-        keyboard = InlineKeyboardMarkup(
-            [
-                [
-                    InlineKeyboardButton(confirm_label, callback_data=confirm_data),
-                    InlineKeyboardButton(cancel_label, callback_data=cancel_data or nav_home()),
-                ]
-            ]
-        )
-        await self.render(module_id, update, text, keyboard)
+        deadline = time.monotonic() + ttl
+        self._pending[confirm_data] = (int(owner), deadline)
+        buttons = [
+            InlineKeyboardButton(confirm_label, callback_data=confirm_data),
+            InlineKeyboardButton(cancel_label, callback_data=cancel_data or nav_home()),
+        ]
+        for button, token in extras or ():
+            if not token:
+                continue
+            self._pending[str(token)] = (int(owner), deadline)
+            buttons.append(button)
+        await self.render(module_id, update, text, InlineKeyboardMarkup([buttons]))
 
     def validate_confirm(self, query, data: str, *, consume: bool = True) -> tuple[bool, str]:
         """校验确认回调：本人 + 未过期。返回 (ok, 失败提示)。"""

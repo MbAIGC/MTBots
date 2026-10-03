@@ -166,9 +166,13 @@ class PanelManager:
                    parse_mode: str = "HTML") -> Message: ...
 
     async def ask_confirm(self, module_id: str, update: Update, text: str,
-                          confirm_data: str, *, cancel_data: str | None = None) -> None:
-        """两步确认面板：[✅ 确认]=confirm_data、[❌ 取消]=cancel_data|'nav|home'；
-        登记 (confirm_data -> (发起人 uid, 截止 monotonic))。"""
+                          confirm_data: str, *, cancel_data: str | None = None,
+                          confirm_label="✅ 确认", cancel_label="❌ 取消",
+                          extras: Sequence[tuple[InlineKeyboardButton, str]] = ()) -> None:
+        """两步确认面板：一行 [确认] [取消] [extras…]（render 再把 🏠 返回 补在行尾）。
+        `extras` 是**同一个确认页上的另一个破坏性动作**（如升级页上的 🛑 停止）：
+        每个 (按钮, 令牌) 都像主确认一样登记 (令牌 -> (发起人 uid, 截止))，
+        模块侧照样用 validate_confirm() 校验它自己的令牌。"""
 
 def next_actions_keyboard(core: Core, user_id: int | None, current: str | None = None, *,
                           limit: int = NEXT_ACTIONS_LIMIT) -> InlineKeyboardMarkup | None:

