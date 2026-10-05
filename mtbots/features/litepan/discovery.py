@@ -84,6 +84,9 @@ class Discovery:
         self.organize_tasks: dict[int, dict] = {}  # organize task_id -> {name, account_id}
         self.rules: list[dict] = []               # webhook 规则：{id,name,event,tasks,accounts,slug}
         self.by_account: dict[int, set] = {}      # account_id -> set(event)（仅单账号规则）
+        #: account_id -> set(rule_id)：**完整解析成功**的单盘规则索引。
+        #: `/refresh <盘名>` 只能按它选规则，不能回头重扫 self.rules。
+        self.safe_by_account: dict[int, set[int]] = {}
         self.slugs: dict[str, str] = {}           # slug（如 gy01） -> 账号名（如 GY01）
         self.rule_by_slug: dict[str, dict] = {}   # slug -> 规则 {id,name,event,tasks}
 
@@ -161,7 +164,12 @@ class Discovery:
             # 只把「全部动作解析成功、且所有任务都属于同一账号」的规则算作单盘规则，
             # 避免 /refresh <盘名> 误触发挂未知任务、其他动作或多账号任务的规则。
             if parse_ok and len(task_accounts) == 1:
-                self.by_account.setdefault(next(iter(task_accounts)), set()).add(ev)
+                account = next(iter(task_accounts))
+                self.by_account.setdefault(account, set()).add(ev)
+                # 同时记下「这个账号的这条规则完整解析成功」。account_rules() 必须读这份
+                # 索引：只按 rules 里的 accounts 字段重扫，会把挂未知动作 / task 已失效的
+                # 规则也算成单盘规则，`/refresh A` 就会执行超出按盘确认范围的动作。
+                self.safe_by_account.setdefault(account, set()).add(rid)
         self._build_rule_slugs()
         self._build_slugs()
 
@@ -192,7 +200,7 @@ class Discovery:
 
     # ---------- 查询 ----------
     def account_rules(self, name: str) -> list[dict]:
-        """按账号名查该账号的单盘规则：先精确匹配，再唯一子串匹配。"""
+        """按账号名查该账号的**完整解析成功**的单盘规则：先精确匹配，再唯一子串匹配。"""
         target = (name or "").strip().lower()
         exact = [aid for aid, n in self.accounts.items() if n.lower() == target]
         ids = set(exact)
@@ -205,7 +213,8 @@ class Discovery:
             if len(subs) != 1:
                 return []
             ids = set(subs)
-        return [r for r in self.rules if len(r["accounts"]) == 1 and r["accounts"][0] in ids]
+        safe_ids = {rid for aid in ids for rid in self.safe_by_account.get(aid, ())}
+        return [r for r in self.rules if r["id"] in safe_ids]
 
     def account_events(self, name: str) -> list[str]:
         return sorted(set(r["event"] for r in self.account_rules(name)))

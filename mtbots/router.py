@@ -295,9 +295,16 @@ async def home_panel(
         if bot is not None
         else []
     )
-    await core.panels.render(
-        "home", update, await _home_text(core, user.id, todo), core.panels.home_keyboard(user.id)
-    )
+    try:
+        await core.panels.render(
+            "home", update, await _home_text(core, user.id, todo), core.panels.home_keyboard(user.id)
+        )
+    except Exception:
+        # 渲染失败 / 发送失败时后台刷新还没起来，_run_home_refresh 的 finally 不会执行：
+        # 这里必须自己退坑，否则该 (模块, 用户) 的 busy 永远是 True，之后每次刷新都被
+        # 去重逻辑跳过，重启前再也刷新不了。
+        _release_refreshes(core, user.id, todo)
+        raise
     if not todo:
         return
     # 记下「我发起刷新时用户在看的哪条面板」，回填前要确认还是它
@@ -385,11 +392,31 @@ async def id_panel(core: Core, update: Update, context: ContextTypes.DEFAULT_TYP
     )
 
 
+def _job_visible(core: Core, user_id: int) -> Callable[[Any], bool]:
+    """任务中心的可见性：模块权限 + 发起人归属。
+
+    owner/admin 看得到全部；普通用户只看得到「自己发起 且 自己有模块权限」的任务——
+    没有 docker 权限的人连项目名和运行输出摘要都不该看到。无归属任务（后台/系统）
+    只对管理员可见。
+    """
+    is_admin = core.acl.is_admin(user_id)
+
+    def visible(job: Any) -> bool:
+        if not core.acl.can(user_id, job.module):
+            return False
+        return True if is_admin else job.user_id == user_id
+
+    return visible
+
+
 async def jobs_panel(core: Core, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await ensure_allowed(core, update):
         return
+    visible = _job_visible(core, update.effective_user.id)
     rows: list[list[InlineKeyboardButton]] = []
     for job in core.jobs.running():
+        if not visible(job):
+            continue
         rows.append(
             [
                 InlineKeyboardButton(
@@ -405,7 +432,7 @@ async def jobs_panel(core: Core, update: Update, context: ContextTypes.DEFAULT_T
         ]
     )
     await core.panels.render(
-        "home", update, core.jobs.render(core.icons()), InlineKeyboardMarkup(rows)
+        "home", update, core.jobs.render(core.icons(), visible=visible), InlineKeyboardMarkup(rows)
     )
 
 
@@ -537,7 +564,13 @@ async def callback_router(core: Core, update: Update, context: ContextTypes.DEFA
             if job is None:
                 await query.answer("⚠️ 任务不存在或已结束", show_alert=True)
                 return
-            if job.chat_id is not None and job.chat_id != update.effective_chat.id:
+            # 原来只比 chat_id：同一群里别的白名单用户能取消管理员发起的 Docker 任务，
+            # 而且 chat_id 为空的任务等于完全不校验。改成按「模块权限 + 发起人」判。
+            user = update.effective_user
+            if not core.acl.can(user.id, job.module):
+                await query.answer("⛔️ 没有该模块权限", show_alert=True)
+                return
+            if not core.acl.is_admin(user.id) and job.user_id != user.id:
                 await query.answer("⛔️ 只能取消自己发起的任务", show_alert=True)
                 return
             done = core.jobs.cancel(job_id)

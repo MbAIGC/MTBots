@@ -261,6 +261,14 @@ ssh_run() {
         "$TARGET" "$@"
 }
 
+# 把参数安全地引用成「远端 shell 再解析一次也原样还原」的形式。
+# 不能用 bash 的 printf %q（本脚本是 #!/bin/sh）：POSIX 做法是单引号包裹，
+# 内部的单引号写成 '\''（结束单引号 + 转义单引号 + 重新开始单引号）。
+shell_quote_arg() {
+    printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
+
 # 用「登录账号」连远端做初始化：允许交互（sudo 密码、密码登录）
 ssh_admin() {
     _remote_cmd=$1
@@ -462,7 +470,7 @@ if [ "$MODE" = "create" ]; then
     ssh_admin_pipe 'rm -rf /tmp/mtbots-setup && mkdir -p /tmp/mtbots-setup && tar xzf - -C /tmp/mtbots-setup && chmod 755 /tmp/mtbots-setup/mtbots-remote-setup.sh' < "$STAGE_DIR/bundle.tgz" \
         || die "上传失败（检查 $LOGIN_TARGET 能不能登录，或换 --login-key）"
 
-    SETUP_ARGS="--user '$SSH_USER' --pubkey /tmp/mtbots-setup/id_ed25519.pub --guard-dest '$GUARD_DEST'"
+    SETUP_ARGS="--user $(shell_quote_arg "$SSH_USER") --pubkey /tmp/mtbots-setup/id_ed25519.pub --guard-dest $(shell_quote_arg "$GUARD_DEST")"
     if [ "$USE_GUARD" = 1 ]; then
         SETUP_ARGS="$SETUP_ARGS --guard /tmp/mtbots-setup/mtbots-compose-guard.sh"
     fi
@@ -559,10 +567,10 @@ else
         say "→ 安装守卫脚本 ..."
         mkdir -p "$STAGE_DIR"
         scp_run "$GUARD_SRC" "$TARGET:/tmp/mtbots-compose-guard.sh" >/dev/null
-        if ssh_run "sudo -n install -m 755 /tmp/mtbots-compose-guard.sh '$GUARD_DEST/mtbots-compose-guard'" >/dev/null 2>&1; then
+        if ssh_run "sudo -n install -m 755 /tmp/mtbots-compose-guard.sh $(shell_quote_arg "$GUARD_DEST/mtbots-compose-guard")" >/dev/null 2>&1; then
             GUARD_REMOTE=$GUARD_DEST/mtbots-compose-guard
         else
-            ssh_run "mkdir -p '$REMOTE_HOME/.local/bin' && cp /tmp/mtbots-compose-guard.sh '$REMOTE_HOME/.local/bin/mtbots-compose-guard' && chmod 755 '$REMOTE_HOME/.local/bin/mtbots-compose-guard'"
+            ssh_run "mkdir -p $(shell_quote_arg "$REMOTE_HOME/.local/bin") && cp /tmp/mtbots-compose-guard.sh $(shell_quote_arg "$REMOTE_HOME/.local/bin/mtbots-compose-guard") && chmod 755 $(shell_quote_arg "$REMOTE_HOME/.local/bin/mtbots-compose-guard")"
             GUARD_REMOTE=$REMOTE_HOME/.local/bin/mtbots-compose-guard
         fi
         say "  已安装：$GUARD_REMOTE"
@@ -610,7 +618,7 @@ APPLY
     scp_run "$STAGE_DIR/ak-line" "$TARGET:/tmp/mtbots-ak-line" >/dev/null
     scp_run "$STAGE_DIR/ak-blob" "$TARGET:/tmp/mtbots-ak-blob" >/dev/null
     scp_run "$STAGE_DIR/apply-ak.sh" "$TARGET:/tmp/mtbots-apply-ak.sh" >/dev/null
-    AK_RESULT=$(ssh_run "sh /tmp/mtbots-apply-ak.sh '$REMOTE_HOME' /tmp/mtbots-ak-line /tmp/mtbots-ak-blob")
+    AK_RESULT=$(ssh_run "sh /tmp/mtbots-apply-ak.sh $(shell_quote_arg "$REMOTE_HOME") /tmp/mtbots-ak-line /tmp/mtbots-ak-blob")
     say "  authorized_keys：$AK_RESULT"
     ssh_run 'rm -f /tmp/mtbots-ak-line /tmp/mtbots-ak-blob /tmp/mtbots-apply-ak.sh /tmp/mtbots-compose-guard.sh' >/dev/null 2>&1 || true
     fi

@@ -23,6 +23,7 @@ from typing import Any, Callable, Iterable, Optional, Sequence
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
+from ...logging_setup import redact
 from ...panels import cb_simple
 from ...text import esc, progress_bar
 
@@ -160,8 +161,8 @@ def select_unused_images(image_lines: Iterable[str], referenced_ids: Iterable[st
 
 
 def format_prune_snapshot(text: str, limit: int = 3000) -> str:
-    """清理快照：只保留尾部 limit 个字符并做 HTML 转义（长快照不撑爆消息）。"""
-    return esc((text or "")[-limit:])
+    """清理快照：只保留尾部 limit 个字符，脱敏 + HTML 转义（长快照不撑爆消息）。"""
+    return esc(redact((text or "")[-limit:]))
 
 
 async def edit_html_safe(message: Any, html_text: str, fallback: Optional[str] = None) -> bool:
@@ -1172,7 +1173,7 @@ async def run_command_with_feedback(
                     preview_lines = list(output_lines)[-PREVIEW_LINES:]
                     if partial.strip():
                         preview_lines.append(partial.strip())
-                    preview = "\n".join(preview_lines)
+                    preview = redact("\n".join(preview_lines))
                     edited = await edit_html_safe(
                         status_msg,
                         "⚙️ <b>%s</b> [%s]\n⏱ <b>已用时：</b>%ss\n<code>%s</code>"
@@ -1202,7 +1203,9 @@ async def run_command_with_feedback(
         full_output = "\n".join(filter_pull_noise(list(output_lines)[-FINAL_LINES:]))
         if out is not None:
             out.append(full_output)
-        safe_full_output = esc(full_output[-PREVIEW_CHARS:])
+        # 进聊天 / 任务详情的命令输出先脱敏再转义：esc() 只挡 HTML，挡不住密码、
+        # Token、带认证信息的 URL 或镜像引用（日志过滤器管不到这些消息出口）。
+        safe_full_output = esc(redact(full_output)[-PREVIEW_CHARS:])
 
         if state.cancel_requested:
             await edit_html_safe(
@@ -1224,7 +1227,7 @@ async def run_command_with_feedback(
 
         hint = ""
         if host is not None and host.is_remote:
-            hint = "\n💡 %s" % esc(explain_exit(int(returncode), full_output, host))
+            hint = "\n💡 %s" % esc(redact(explain_exit(int(returncode), full_output, host)))
         await edit_html_safe(
             status_msg,
             "❌ <b>%s 失败 (Code %s)</b>%s\n⏱ <b>耗时：</b>%ss\n<code>%s</code>"
@@ -1248,7 +1251,7 @@ async def run_command_with_feedback(
     except Exception as exc:
         if process is not None:
             stop_process_tree(process)
-        await edit_html_safe(status_msg, "❌ 执行发生异常: %s" % esc(str(exc)))
+        await edit_html_safe(status_msg, "❌ 执行发生异常: %s" % esc(redact(str(exc))))
         return False
 
     finally:

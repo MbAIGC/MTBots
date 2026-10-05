@@ -71,6 +71,8 @@ class Job:
     finished_at: Optional[float] = None
     cancel: Optional[Callable[[], None]] = None
     chat_id: Optional[int] = None
+    #: 发起人。`/jobs` 的展示与取消按它做归属判断；后台/系统任务没有发起人则为 None。
+    user_id: Optional[int] = None
 
     @property
     def running(self) -> bool:
@@ -121,6 +123,7 @@ class JobCenter:
         progress: Optional[int] = None,
         cancel: Optional[Callable[[], None]] = None,
         chat_id: Optional[int] = None,
+        user_id: Optional[int] = None,
     ) -> Job:
         job = Job(
             module=module,
@@ -129,6 +132,7 @@ class JobCenter:
             progress=progress,
             cancel=cancel,
             chat_id=chat_id,
+            user_id=user_id,
         )
         self._jobs[job.id] = job
         self._order.append(job.id)
@@ -198,10 +202,23 @@ class JobCenter:
         return bool(self.running())
 
     # ---------- 渲染 ----------
-    def render(self, icons: Optional[dict[str, str]] = None) -> str:
+    def render(
+        self,
+        icons: Optional[dict[str, str]] = None,
+        *,
+        visible: Optional[Callable[["Job"], bool]] = None,
+    ) -> str:
+        """`visible` 是调用方给的可见性谓词（模块权限 + 发起人归属）。
+
+        默认 None = 不过滤，仅供内部/测试使用；对外面板必须传，否则任务中心会跨用户、
+        跨会话泄露——没有 docker 权限的人也能看到 Docker 项目名和运行输出摘要。
+        """
         icons = icons or {}
-        running = self.running()
-        recent = self.recent(5)
+        running = [j for j in self.running() if visible is None or visible(j)]
+        # 先过滤再取最近 5 条：不然「最近 5 条都不是我的」会让本人任务凭空消失
+        recent = [
+            j for j in self.recent(len(self._order)) if visible is None or visible(j)
+        ][:5]
         if not running and not recent:
             return "暂时没有任务。\n长任务（升级 / 清理 / LitePan 触发回执）会自动出现在这里。"
         lines: list[str] = []

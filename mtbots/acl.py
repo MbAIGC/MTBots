@@ -57,19 +57,27 @@ class ACL:
         default_deny: bool = True,
     ):
         self.allowed_user_ids = frozenset(int(uid) for uid in allowed_user_ids)
-        self.default_role = default_role if default_role in ROLE_ORDER else "owner"
+        role = (default_role or "").strip().lower()
+        if role not in ROLE_ORDER:
+            # 原来是 `default_role if ... else "owner"`：把默认角色写成 admn/usr 这类笔误，
+            # 结果是**静默拿到最高权限**。宁可起不来，也不要带着错误权限跑。
+            raise ValueError(
+                "非法的默认角色 %r；可选值：%s" % (default_role, "、".join(ROLE_ORDER))
+            )
+        self.default_role = role
         self.default_deny = default_deny
         self.roles: dict[int, str] = {}
         for key, role in (roles or {}).items():
             try:
                 uid = int(key)
             except (TypeError, ValueError):
-                log.warning("忽略无法解析的角色配置：%r -> %r", key, role)
-                continue
+                raise ValueError("无法解析的角色配置用户 ID：%r -> %r" % (key, role)) from None
             role = (role or "").strip().lower()
             if role not in ROLE_ORDER:
-                log.warning("忽略未知角色：%r -> %r", key, role)
-                continue
+                # 原来只 warning + continue：写错的用户会静默落到 default_role（常是 owner）。
+                raise ValueError(
+                    "非法的角色配置 %r -> %r；可选值：%s" % (key, role, "、".join(ROLE_ORDER))
+                )
             self.roles[uid] = role
 
         self.module_roles: dict[str, set[str]] = {

@@ -22,6 +22,7 @@ from telegram.ext import Application, CallbackQueryHandler, CommandHandler, Cont
 
 from ...core import Core, core_of
 from ...jobs import CANCELLED, DONE, FAILED, Job, card_text
+from ...logging_setup import redact
 from ...panels import (
     cb,
     cb_args,
@@ -323,7 +324,7 @@ def _failure_block(captured: Sequence[str], limit: int = FAIL_TAIL_LINES) -> str
     lines = _tail_lines(captured, limit)
     if not lines:
         return ""
-    return "🔻 <b>最后输出：</b>\n<code>%s</code>" % esc("\n".join(lines))
+    return "🔻 <b>最后输出：</b>\n<code>%s</code>" % esc(redact("\n".join(lines)))
 
 
 async def _busy(core: Core, update: Update) -> None:
@@ -827,6 +828,7 @@ async def _do_upgrade_project(
         "升级项目 %s" % project_name,
         cancel=state.request_cancel,
         chat_id=_chat_id(update),
+        user_id=_user_id(update),
     )
     status, detail = FAILED, "未执行"
     extra = ""
@@ -962,6 +964,7 @@ async def _do_upgrade_service(
         "升级服务 %s / %s" % (project_name, service_name),
         cancel=state.request_cancel,
         chat_id=_chat_id(update),
+        user_id=_user_id(update),
     )
     status, detail = FAILED, "未执行"
     extra = ""
@@ -1083,7 +1086,10 @@ async def _do_stop(
     title = (
         "停止服务 %s / %s" % (project_name, service_name) if service_name else "停止项目 %s" % project_name
     )
-    job = core.jobs.add("docker", title, cancel=state.request_cancel, chat_id=_chat_id(update))
+    job = core.jobs.add(
+        "docker", title, cancel=state.request_cancel, chat_id=_chat_id(update),
+        user_id=_user_id(update),
+    )
     status, detail, extra = FAILED, "未执行", ""
 
     try:
@@ -1176,6 +1182,7 @@ async def _do_upgrade_all(
         ),
         cancel=state.request_cancel,
         chat_id=_chat_id(update),
+        user_id=_user_id(update),
     )
     status, detail = FAILED, "未执行"
     extra = ""
@@ -1186,17 +1193,24 @@ async def _do_upgrade_all(
         if target_host is not None:
             all_projects = [p for p in all_projects if p.get("host") == target_host.id]
         projects = state.order(all_projects)
-        # 预热各主机的 compose 探测（同步 subprocess），别在循环里卡事件循环
-        for host_id in {str(p.get("host") or "") for p in projects}:
-            await asyncio.to_thread(state.get_remote_compose_bin, state.host_by_id(host_id))
+        # 预热各主机的 compose 探测（同步 subprocess），别在循环里卡事件循环。
+        # 结果按主机记下来：预检必须**逐台**做——全量升级时 target_host 为 None，
+        # 只看本机（原来的 `target_host or state.local_host`）会把「本机没装 compose、
+        # 远端都能升」误判成整批不可用。
+        compose_ok: dict[str, bool] = {}
+        for host_id in dict.fromkeys(str(p.get("host") or "") for p in projects):
+            try:
+                compose_ok[host_id] = bool(
+                    await asyncio.to_thread(state.get_remote_compose_bin, state.host_by_id(host_id))
+                )
+            except Exception as exc:  # 单台探测失败只影响这台，不中断整批
+                log.warning("主机 %s 的 compose 探测失败：%s", host_id or "(本机)", exc)
+                compose_ok[host_id] = False
 
         if not projects:
             status, detail = FAILED, "未检测到可升级的项目"
-        elif not await asyncio.to_thread(
-            state.get_remote_compose_bin, target_host or state.local_host
-        ):
-            # 只看**目标主机**：以前看所有主机，于是「目标主机没装 compose」会绕过预检、
-            # 在循环里抛 RuntimeError，被收成「执行异常」，提示误导
+        elif not any(compose_ok.values()):
+            # 所有目标主机都没有 compose：整批确实没法做
             status, detail = FAILED, "未检测到 docker compose / docker-compose 命令"
         else:
             await core.panels.render(
@@ -1220,6 +1234,14 @@ async def _do_upgrade_all(
                 pct = int((i / len(projects)) * 100)
                 label = state.project_label(project)
                 loop_host = state.host_of(project)
+                if not compose_ok.get(str(project.get("host") or ""), True):
+                    # 这台主机没有 compose：记成失败继续下一台。原来的写法会在这里
+                    # build_compose_cmd 抛 RuntimeError，被外层 except 收成「执行异常」，
+                    # 连已经跑完的项目的成功/失败清单一起丢掉。
+                    fail_list.append(label)
+                    if len(fail_lines) < BATCH_FAIL_LINES:
+                        fail_lines.append("❌ %s：该主机不可用（未装 compose 或探测失败）" % label)
+                    continue
                 pull_out: list[str] = []
                 up_out: list[str] = []
                 pull_ok = await run_command_with_feedback(
@@ -1272,7 +1294,7 @@ async def _do_upgrade_all(
             extra = "\n".join(lines)
             if fail_lines:
                 extra += "\n🔻 <b>最后输出：</b>\n<code>%s</code>" % esc(
-                    "\n".join(fail_lines[:BATCH_FAIL_LINES])
+                    redact("\n".join(fail_lines[:BATCH_FAIL_LINES]))
                 )
             if state.cancel_requested:
                 # 取消可能发生在最后一个项目的命令里（循环顶部那次检查看不到），
@@ -1463,6 +1485,7 @@ async def _do_prune(
         "清理%s镜像%s" % (label, "（%s）" % target.display if state.multi_host else ""),
         cancel=state.request_cancel,
         chat_id=_chat_id(update),
+        user_id=_user_id(update),
     )
     status, detail = FAILED, "未执行"
     extra = ""
@@ -1506,7 +1529,7 @@ async def _do_prune(
                 "",
             )
             if reclaimed:
-                extra = esc(reclaimed)
+                extra = esc(redact(reclaimed))
         elif state.cancel_requested:
             status, detail = CANCELLED, "已按用户请求取消"
         else:
@@ -1548,13 +1571,13 @@ async def _show_status(core: Core, update: Update) -> None:
         if not ok:
             sections.append(
                 "🖥 <b>%s</b>\n❌ %s"
-                % (esc(host.display), esc(explain_exit(1, output[-600:], host)))
+                % (esc(host.display), esc(redact(explain_exit(1, output[-600:], host))))
             )
             continue
         if not output:
             sections.append("🖥 <b>%s</b>\n⚠️ 未找到正在运行或已停止的容器。" % esc(host.display))
             continue
-        sections.append("🖥 <b>%s</b>\n<code>%s</code>" % (esc(host.display), esc(output[-3000:])))
+        sections.append("🖥 <b>%s</b>\n<code>%s</code>" % (esc(host.display), esc(redact(output[-3000:]))))
 
     if not state.multi_host:
         # 单主机：保持老文案（每台主机的标题/失败细节都省略）

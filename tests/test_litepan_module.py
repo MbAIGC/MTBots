@@ -211,6 +211,21 @@ class UserProfileTests(unittest.TestCase):
         self.assertEqual(profile.chat_ids, [42])
         self.assertFalse(profile.receipt_enabled)
 
+    def test_non_mapping_entry_and_drives_are_config_errors(self):
+        """R11 回归：条目 / drives 形状不对必须转成 ConfigError。
+
+        不能让 AttributeError 逃出 load()——litepan 的 register() 第一行就取 state，
+        初始化失败会让整个模块（含全部命令）在本进程彻底不可用。
+        """
+        for bad in (None, "oops", [1, 2], 7):
+            with self.assertRaises(ConfigError):
+                UserProfile.from_dict(bad)
+        base = {"chat_ids": [1], "litepan_url": "http://x", "api_key": "k"}
+        # 注意 False 等价于「没配 drives」（`raw.get("drives") or {}`），不算形状错误
+        for bad_drives in (True, ["a"], "剧集"):
+            with self.assertRaises(ConfigError):
+                UserProfile.from_dict({**base, "drives": bad_drives})
+
     def test_from_env_same_variable_names(self):
         env = {
             "LITEPAN_URL": "http://lite:8000/",
@@ -253,6 +268,35 @@ class UserProfileTests(unittest.TestCase):
 
 
 # ==================== drives ====================
+class LitePanConfigShapeTests(unittest.TestCase):
+    """R11 回归：坏条目必须逐条跳过，后面的合法条目照常加载（模块不能整体下线）。"""
+
+    def test_bad_entries_are_skipped_and_rest_still_loads(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "users.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "users": [
+                            None,
+                            {
+                                "chat_ids": [7],
+                                "litepan_url": "http://x",
+                                "api_key": "k",
+                                "drives": True,
+                            },
+                            {"chat_ids": [8], "litepan_url": "http://x", "api_key": "k"},
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            cfg = LitePanConfig(env={}, users_file=path)
+            self.assertTrue(cfg.enabled, "坏条目不能把整个模块拖下线")
+            self.assertEqual(sorted(cfg.profiles), [8])
+            self.assertTrue(cfg.error, "坏条目要留下错误信息")
+
+
 class DrivesTests(unittest.TestCase):
     def test_lookup_is_case_insensitive_and_stripped(self):
         profile = make_profile(drives={"剧集": "juji", "Movie": "movie_ev"})
@@ -316,6 +360,32 @@ class DiscoveryTests(unittest.TestCase):
         self.assertEqual(self.d.account_rules("GY0"), [])  # 子串命中两个账号 -> 不猜
         self.assertEqual(self.d.account_events("GY01"), ["dup_all", "gy01_refresh", "gy_all"])
         self.assertEqual(self.d.account_events("GY02"), ["gy02_org"])
+
+    def test_account_rules_skip_partially_parsed_rules(self):
+        """R05 回归：规则里混了未知动作 / 失效任务时，`/refresh <盘>` 不能选中它。
+
+        报告场景：一条规则同时有「属于 GY01 的有效 STRM」和「不存在的 organize」。
+        `by_account` 正确地排除了它，但 `account_rules()` 以前会重扫全部规则又捞回来。
+        """
+        rules = [
+            {"id": 101, "name": "mixed", "trigger_type": "webhook",
+             "trigger_config": {"event": "mixed_ev"},
+             "actions": [{"type": "strm", "params": {"task_id": 11}},
+                         {"type": "unknown_action", "params": {}}]},
+            {"id": 102, "name": "stale", "trigger_type": "webhook",
+             "trigger_config": {"event": "stale_ev"},
+             "actions": [{"type": "strm", "params": {"task_id": 11}},
+                         {"type": "organize", "params": {"task_id": 999}}]},
+            {"id": 103, "name": "safe", "trigger_type": "webhook",
+             "trigger_config": {"event": "safe_ev"},
+             "actions": [{"type": "strm", "params": {"task_id": 11}}]},
+        ]
+        client = FakeAdminClient(CANNED_ACCOUNTS, CANNED_OPTIONS, rules)
+        d = Discovery(make_profile(), client=client)
+        d.fetch()
+        self.assertEqual(d.by_account.get(1), {"safe_ev"})
+        self.assertEqual([r["id"] for r in d.account_rules("GY01")], [103])
+        self.assertEqual(d.account_events("GY01"), ["safe_ev"])
 
     def test_fetch_parses_without_pinyin_for_chinese_names(self):
         self.d.accounts[3] = "光鸭"

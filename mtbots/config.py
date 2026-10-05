@@ -75,15 +75,23 @@ def _env_ids(env: Mapping[str, str], *names: str) -> frozenset[int]:
 
 
 def _env_roles(env: Mapping[str, str], name: str = "MTBOTS_ROLES") -> dict[int, str]:
+    """解析 `uid:role` 列表；格式写错直接报错，不静默丢弃。
+
+    ACL 已经把「非法角色」改成拒绝启动，但如果这里把写错的条目悄悄丢掉，ACL 根本
+    看不到它——那个用户会落到 `MTBOTS_DEFAULT_ROLE`（默认 owner），等于绕过那道闸。
+    """
     roles: dict[int, str] = {}
     for part in _env(env, name).replace("，", ",").split(","):
-        if not part.strip() or ":" not in part:
+        if not part.strip():
             continue
-        uid, _, role = part.partition(":")
+        uid, sep, role = part.partition(":")
+        if not sep:
+            raise ValueError("%s 条目缺少 ':'：%r（格式：uid:role）" % (name, part.strip()))
         try:
-            roles[int(uid.strip())] = role.strip().lower()
+            key = int(uid.strip())
         except ValueError:
-            continue
+            raise ValueError("%s 的用户 ID 不是整数：%r" % (name, part.strip())) from None
+        roles[key] = role.strip().lower()
     return roles
 
 

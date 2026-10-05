@@ -47,6 +47,7 @@ from mtbots.features.cline.core import (
     mask_key,
     normalize_api_key,
     render_panel,
+    sanitize_alias,
     split_alias_and_key,
     split_message,
 )
@@ -73,6 +74,22 @@ class ClineState:
     fetch_locks: dict[int, asyncio.Lock] = field(default_factory=dict)
     #: 每个用户最近一次成功查询的快照（首页 summary 只读它，绝不发网络请求）
     snapshots: dict[int, list[Snapshot]] = field(default_factory=dict)
+    #: Key 集合的版本号：每次增删改 +1，用来丢弃「Key 变更前发起、变更后才回来」的查询
+    key_versions: dict[int, int] = field(default_factory=dict)
+
+    def snapshot_version(self, user_id: int) -> int:
+        """当前 Key 集合版本；查询发起时记下，回写快照前比对。"""
+        return self.key_versions.get(int(user_id), 0)
+
+    def invalidate_snapshot(self, user_id: int) -> None:
+        """Key 集合变了：作废快照**并推进版本号**。
+
+        只 pop 快照不够——在飞的旧查询回来时会无条件写回，首页就会拿旧 Key 的额度
+        顶在新 Key 头上。版本号让那次回写在提交之前自己发现「我已经过期了」。
+        """
+        uid = int(user_id)
+        self.snapshots.pop(uid, None)
+        self.key_versions[uid] = self.key_versions.get(uid, 0) + 1
 
     def lock_for(self, user_id: int) -> asyncio.Lock:
         """Key 存储的写锁（与网络查询无关，别混用）。"""
@@ -216,8 +233,12 @@ async def _query_and_render(
     except TelegramError as exc:  # 占位消息发不出去不影响结果
         log.warning("占位消息发送失败：%s", exc)
 
-    job = core.jobs.add(MODULE_ID, f"查询 {len(user_keys)} 个账号额度", chat_id=chat_id)
+    job = core.jobs.add(
+        MODULE_ID, f"查询 {len(user_keys)} 个账号额度", chat_id=chat_id, user_id=user_id
+    )
     failed = False
+    # 记下查询发起时的 Key 版本：Key 在查询期间被换掉/删掉时，这份结果属于旧 Key
+    version = state.snapshot_version(user_id)
     try:
         try:
             # 与首页自动刷新共用一把「查询锁」：一轮就是 3×N 个接口，不能两轮并发打
@@ -236,6 +257,15 @@ async def _query_and_render(
                     pass
             else:
                 await context.bot.send_message(chat_id, text)
+            return
+
+        if state.snapshot_version(user_id) != version:
+            # 查询期间 Key 变了：回写会把旧 Key 的额度顶在新 Key 头上
+            log.info("丢弃过期的额度快照：user=%s", user_id)
+            core.jobs.finish(job, FAILED, "Key 已变更，本次查询结果作废")
+            await context.bot.send_message(
+                chat_id, "⚠️ 查询期间 Key 已变更，本次结果已作废，请重新查询。"
+            )
             return
 
         core.jobs.finish(job, DONE, f"共 {len(snapshots)} 个账号")
@@ -405,7 +435,7 @@ async def cmd_addkey(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         async with state.lock_for(user_id):
             total = await asyncio.to_thread(state.store.add, user_id, alias, api_key)
         # Key 变了，旧快照立刻作废：否则首页会拿上一把 Key 的额度顶在新 Key 头上
-        state.snapshots.pop(int(user_id), None)
+        state.invalidate_snapshot(user_id)
     except KeyLimitError as exc:
         log.warning("addkey 超出上限：user=%s，%s", user_id, exc)
         await say(f"⚠️ {esc(str(exc))}")
@@ -445,11 +475,19 @@ async def cmd_delkey(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             parse_mode=ParseMode.HTML,
         )
         return
-    alias = context.args[0].strip()
+    # 别名允许带空格（`/addkey` 侧用 split_alias_and_key 把多个 token 拼回别名），
+    # 删除侧只取 args[0] 会把 "Cline 01" 当成 "Cline"，两个别名并存时就删错了。
+    alias = sanitize_alias(" ".join(a.strip() for a in context.args if a.strip()))
+    if not alias:
+        await message.reply_text(  # type: ignore[union-attr]
+            "⚠️ 别名不合法：1–24 个字符，且不能含 <code># / :</code> 或 emoji。",
+            parse_mode=ParseMode.HTML,
+        )
+        return
     try:
         async with state.lock_for(user.id):
             removed = await asyncio.to_thread(state.store.delete, user.id, alias)
-        state.snapshots.pop(int(user.id), None)
+        state.invalidate_snapshot(user.id)
     except ConfigError as exc:
         log.error("删除失败：%s", exc)
         await message.reply_text(  # type: ignore[union-attr]
@@ -479,7 +517,7 @@ async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         async with state.lock_for(user.id):
             removed = await asyncio.to_thread(state.store.clear, user.id)
-        state.snapshots.pop(int(user.id), None)
+        state.invalidate_snapshot(user.id)
     except ConfigError as exc:
         log.error("清空失败：%s", exc)
         await message.reply_text(  # type: ignore[union-attr]
@@ -682,8 +720,14 @@ async def refresh(core: Core, uid: int, force: bool = False) -> None:
     lock = state.fetch_lock_for(uid)
     if lock.locked():  # 同一用户已有额度查询在跑（多半是面板上的手动刷新）
         return
+    version = state.snapshot_version(uid)
     async with lock:
-        state.snapshots[int(uid)] = await state.client.fetch_all(list(keys.items()))
+        snapshots = await state.client.fetch_all(list(keys.items()))
+    if state.snapshot_version(uid) != version:
+        # 查询期间 Key 变了：这份快照是旧 Key 的，写回会让首页显示错误额度
+        log.info("丢弃过期的额度快照：user=%s", uid)
+        return
+    state.snapshots[int(uid)] = snapshots
 
 
 async def id_lines(core: Core, uid: int) -> list[str]:

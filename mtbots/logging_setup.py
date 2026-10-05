@@ -75,17 +75,14 @@ class RedactingFilter(logging.Filter):
             if record.exc_info and not record.exc_text:
                 record.exc_text = redact(logging.Formatter().formatException(record.exc_info))
                 record.exc_info = None
-            if isinstance(record.msg, str):
-                record.msg = redact(record.msg)
-            if record.args:
-                if isinstance(record.args, tuple):
-                    record.args = tuple(
-                        redact(a) if isinstance(a, str) else a for a in record.args
-                    )
-                elif isinstance(record.args, dict):
-                    record.args = {
-                        k: (redact(v) if isinstance(v, str) else v) for k, v in record.args.items()
-                    }
+            # 先按 %-格式化出完整文本再整串脱敏。原来只对 str 参数脱敏，
+            # `log.info("user=%s chat=%s", uid, cid)` 的数字 ID 和
+            # `log.warning("请求失败：%s", exc)` 里异常对象携带的文本都会原样落盘——
+            # 正则只认字符串，非 str 参数等于整条旁路。写回 msg 并清空 args 后，
+            # 任何 handler / Formatter 拿到的都是已脱敏的完整文本。
+            if record.msg is not None or record.args:
+                record.msg = redact(record.getMessage())
+                record.args = ()
             if record.exc_text:
                 record.exc_text = redact(record.exc_text)
         except Exception:  # pragma: no cover - 脱敏绝不能让日志本身崩掉
@@ -108,19 +105,13 @@ class TokenMaskFilter(logging.Filter):
             if record.exc_info and not record.exc_text:
                 record.exc_text = logging.Formatter().formatException(record.exc_info)
                 record.exc_info = None
-            if isinstance(record.msg, str) and self.token in record.msg:
-                record.msg = record.msg.replace(self.token, self.placeholder)
-            if record.args:
-                if isinstance(record.args, tuple):
-                    record.args = tuple(
-                        a.replace(self.token, self.placeholder) if isinstance(a, str) else a
-                        for a in record.args
-                    )
-                elif isinstance(record.args, dict):
-                    record.args = {
-                        k: (v.replace(self.token, self.placeholder) if isinstance(v, str) else v)
-                        for k, v in record.args.items()
-                    }
+            # 与 RedactingFilter 同口径：先定型成完整文本，再替换确切 Token。
+            # 数字参数、异常对象参数里夹带的 Token 以前同样会漏。
+            if record.msg is not None or record.args:
+                text = record.getMessage()
+                if self.token in text:
+                    record.msg = text.replace(self.token, self.placeholder)
+                    record.args = ()
             if record.exc_text and self.token in record.exc_text:
                 record.exc_text = record.exc_text.replace(self.token, self.placeholder)
         except Exception:  # pragma: no cover

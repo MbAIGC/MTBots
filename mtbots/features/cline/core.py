@@ -348,8 +348,7 @@ class ConfigStore:
     def _apply(self, data: dict) -> None:
         """通过 JsonStore 原子落盘；把 OSError/PermissionError 翻译成 ConfigError。"""
         def _replace(current: dict) -> None:
-            if current is data:  # 已经是同一份内存对象，直接触发 save 即可
-                return
+            # `mutate` 给的是 self._data 的深拷贝副本，直接整体覆盖即可
             current.clear()
             current.update(data)
 

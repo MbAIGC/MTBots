@@ -205,6 +205,11 @@ class UserProfile:
     @staticmethod
     def from_dict(raw: Mapping[str, Any]) -> "UserProfile":
         """从 `users.json` 的一个条目构造；非法值抛 ConfigError。"""
+        if not isinstance(raw, Mapping):
+            # 条目可能是 null / 字符串 / 数组。不在这里挡住就会在 raw.get() 上抛
+            # AttributeError，穿透 load() 的 except ConfigError——而 litepan 的
+            # register() 首行就 get_state()，初始化一旦失败整个模块（含全部命令）都不可用。
+            raise ConfigError("users.json 条目必须是对象，实际为 %s" % type(raw).__name__)
         chat_ids = raw.get("chat_ids") or raw.get("chat_id") or []
         if isinstance(chat_ids, str):
             chat_ids = re.split(r"[,，\s]+", chat_ids)
@@ -221,6 +226,14 @@ class UserProfile:
         if len(set(parsed)) != len(parsed):
             raise ConfigError("users.json 条目 chat_ids 不能重复: %r" % (parsed,))
         chat_ids = parsed
+        drives = raw.get("drives") or {}
+        if not isinstance(drives, Mapping):
+            # 布尔 / 列表 / 字符串都会在 UserProfile.__init__ 的 .items() 上炸成
+            # AttributeError，同样逃出 load() 的 ConfigError 捕获。
+            raise ConfigError(
+                "users.json 条目 drives 必须是对象（盘名 → 事件），实际为 %s"
+                % type(drives).__name__
+            )
         lite_url = str(raw.get("litepan_url") or "").strip()
         api_key = str(raw.get("api_key") or "").strip()
         if not lite_url or not api_key:
@@ -233,7 +246,7 @@ class UserProfile:
             source=str(raw.get("source") or "telegram").strip(),
             default_path=str(raw.get("default_path") or "/").strip(),
             message=str(raw.get("message") or "").strip(),
-            drives=raw.get("drives") or {},
+            drives=drives,
             admin_user=str(raw.get("admin_user") or "").strip(),
             admin_password=str(raw.get("admin_password") or "").strip(),
             lite_timeout=_parse_int(_raw_value(raw, "lite_timeout", 15), "lite_timeout", minimum=1),
@@ -334,6 +347,15 @@ class LitePanConfig:
                         except ConfigError as exc:
                             self.error = str(exc)
                             log.error("LitePan 用户条目非法，已跳过：%s", exc)
+                            continue
+                        except (AttributeError, TypeError) as exc:
+                            # 兜底：形状校验漏网时也不许异常逃出 load()——否则
+                            # LitePanConfig.__init__ 直接失败，整个 litepan 模块下线。
+                            self.error = "users.json 条目形状非法（%s）：%s" % (
+                                type(exc).__name__,
+                                exc,
+                            )
+                            log.error("LitePan 用户条目形状非法，已跳过：%s", exc)
                             continue
                         for cid in profile.chat_ids:
                             self.profiles[cid] = profile

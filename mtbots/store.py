@@ -7,6 +7,7 @@ ClinePass 写 config.json（含用户 API Key）。合并后统一走这一层�
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import os
@@ -120,11 +121,23 @@ class JsonStore:
             self._loaded = True
 
     def mutate(self, mutator: Callable[[dict], Any]) -> Any:
-        """读改写一步完成并落盘；mutator 抛异常时不写盘（保持原内容）。"""
+        """读改写一步完成并落盘；mutator 抛异常或写盘失败都不动内存（在副本上改）。
+
+        直接在 `self._data` 上跑 mutator 有两个坑：写盘失败（磁盘满/只读/权限变更）后
+        内存已变成新值，以及 mutator 改了一半抛异常留下半成品。改成深拷贝副本 →
+        落盘 → 成功才提交，失败时内存保持原内容，也不会出现「用户被告知失败、内存却已生效」。
+        """
         with self._lock:
-            data = self.ensure_loaded()
+            data = copy.deepcopy(self.ensure_loaded())
             result = mutator(data)
-            self.save()
+            try:
+                atomic_write_json(self.path, data, self.mode)
+            except OSError as exc:
+                raise StoreError(
+                    "写入失败（%s）：%s" % (self.path, exc), kind="io"
+                ) from exc
+            self._data = data
+            self._loaded = True
             return result
 
     def self_check(self) -> tuple[bool, str]:

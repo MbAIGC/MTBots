@@ -57,6 +57,10 @@ _DISCOVERY_UNBOUND_HINT = (
 )
 
 
+#: 回执去重表的容量上限：超过就淘汰最旧的记录，避免长跑进程无界增长
+RECEIPTED_MAX = 500
+
+
 # ==================== 模块状态 ====================
 class LitePanState:
     """挂在 `core.data["litepan"]["state"]` 上的模块私有状态。
@@ -71,7 +75,11 @@ class LitePanState:
         self.discovery_ttl = discovery_ttl
         self.discovery_cache: dict[int, tuple[float, Optional[Discovery], bool]] = {}
         self.discovery_fetch_lock = threading.Lock()
-        self.receipted_runs: set[tuple[Any, int]] = set()
+        #: 已回执的运行：(实例 lite_url, 接收会话, rule_id, run_id) -> 认领时间。
+        #: 旧键只有 (rule_id, run_id)：两个实例的运行 ID 各自独立编号、撞号很自然，
+        #: 撞上时后一个 watcher 会一直 continue 到 receipt_timeout；同实例多个接收
+        #: 会话也会互相吞回执。用 dict（而非 set）是为了有插入序，可按容量淘汰最旧的。
+        self.receipted_runs: dict[tuple[Any, ...], float] = {}
         self.receipt_lock = threading.Lock()
         #: slug -> 使用次数（菜单预算排序用：常用在前、其余按规则 ID 稳定排序）
         self.usage: dict[str, int] = {}
@@ -561,6 +569,7 @@ async def watch_run(
         "%s执行中" % base_title,
         cancel=stop.set,
         chat_id=chat_id,
+        user_id=user_id,
     )
 
     def _finish(status: str, detail: str = "") -> None:
@@ -599,11 +608,13 @@ async def watch_run(
                 status = (r.get("status") or "").strip().lower()
                 if status not in TERMINAL_STATUSES:
                     continue
-                key = (rule_id, rid)
+                key = (profile.lite_url, chat_id, rule_id, rid)
                 with state.receipt_lock:
                     if key in state.receipted_runs:
                         continue
-                    state.receipted_runs.add(key)
+                    state.receipted_runs[key] = time.time()
+                    while len(state.receipted_runs) > RECEIPTED_MAX:
+                        state.receipted_runs.pop(next(iter(state.receipted_runs)))
                 detail = render_result(rule_name, r)
                 if job.running:
                     _finish(DONE if status == "success" else FAILED, detail)
@@ -1000,10 +1011,19 @@ def help_text(core: Core, uid: int) -> str:
 
 
 async def summary(core: Core, uid: int) -> str:
-    """首页一行总览：只读任务中心缓存，绝不发网络请求。"""
+    """首页一行总览：只读任务中心缓存，绝不发网络请求。
+
+    归属过滤与 `/jobs` 同口径：普通用户只算自己发起的任务，管理员算全部。否则
+    「执行中 N 条」会把别人正在跑的任务暴露给任何有 litepan 权限的人。
+    """
     try:
-        running = core.jobs.running("litepan")
-        recent = core.jobs.recent(1, module="litepan")
+        is_admin = core.acl.is_admin(uid)
+
+        def _mine(job: Any) -> bool:
+            return is_admin or job.user_id == uid
+
+        running = [j for j in core.jobs.running("litepan") if _mine(j)]
+        recent = [j for j in core.jobs.recent(20, module="litepan") if _mine(j)]
     except Exception:
         return "🎬 LitePan · 点击进入"
     if running:

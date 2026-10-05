@@ -166,6 +166,23 @@ class StoreTests(unittest.TestCase):
                 store.mutate(boom)
             self.assertEqual(JsonStore(path).load(), {"n": 1})
 
+    def test_mutate_save_failure_keeps_memory(self):
+        """R12 回归：写盘失败时内存不能已经变成新值（原来先改 _data 再 save）。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.json"
+            atomic_write_json(path, {"n": 1})
+            store = JsonStore(path)
+            store.load()
+
+            def bump(data):
+                data["n"] = 2
+
+            with mock.patch("mtbots.store.atomic_write_json", side_effect=OSError("disk full")):
+                with self.assertRaises(StoreError):
+                    store.mutate(bump)
+            self.assertEqual(store.data, {"n": 1}, "内存必须保持原值")
+            self.assertEqual(JsonStore(path).load(), {"n": 1}, "盘上也不能变")
+
 
 class JobsTests(unittest.TestCase):
     def test_lifecycle_and_render(self):
@@ -217,6 +234,17 @@ class JobsTests(unittest.TestCase):
         # 同状态允许补明细（批量升级被取消时要写清剩余几个项目）
         center.finish(job, "cancelled", "已中止（剩余 2 个项目）")
         self.assertEqual(job.detail, "已中止（剩余 2 个项目）")
+
+    def test_render_respects_visibility(self):
+        """R01 回归：/jobs 的正文也要按可见性谓词过滤（模块权限 + 发起人归属）。"""
+        center = JobCenter()
+        center.add("docker", "我的升级", user_id=1)
+        center.add("docker", "别人的升级", user_id=2)
+        text = center.render({"docker": "🐳"}, visible=lambda job: job.user_id == 1)
+        self.assertIn("我的升级", text)
+        self.assertNotIn("别人的升级", text)
+        # 不传 visible 时保持原语义（内部/测试路径）
+        self.assertIn("别人的升级", center.render({"docker": "🐳"}))
 
 
 class PanelTests(unittest.TestCase):
@@ -516,7 +544,36 @@ class LoggingTests(unittest.TestCase):
         token = "123456:AAFabcdefghijklmnopqrstuvwxyz012345"
         record = logging.LogRecord("x", logging.INFO, __file__, 1, "url %s", (token,), None)
         self.assertTrue(TokenMaskFilter(token).filter(record))
-        self.assertIn("[REDACTED_BOT_TOKEN]", record.args[0])
+        # 断言最终文本而不是 record.args：过滤器现在把格式化后的完整消息写回 msg 并清空
+        # args，只测 args 会漏掉「数字参数 / 异常对象参数」这条旁路（见 R02）。
+        text = record.getMessage()
+        self.assertIn("[REDACTED_BOT_TOKEN]", text)
+        self.assertNotIn(token, text)
+
+    def test_redacting_filter_covers_non_string_args(self):
+        """R02 回归：数字参数与异常对象参数也必须脱敏（原来只处理 str 参数）。"""
+        import logging
+
+        from mtbots.logging_setup import RedactingFilter
+
+        filt = RedactingFilter()
+        record = logging.LogRecord(
+            "mtbots.test", logging.INFO, __file__, 1,
+            "user=%s chat=%s", (432423432, 987654321), None,
+        )
+        self.assertTrue(filt.filter(record))
+        text = record.getMessage()
+        self.assertNotIn("432423432", text)
+        self.assertNotIn("987654321", text)
+        self.assertIn("user=***", text)
+
+        secret = "123456:AAFabcdefghijklmnopqrstuvwxyz012345"
+        record = logging.LogRecord(
+            "mtbots.test", logging.WARNING, __file__, 1,
+            "请求失败：%s", (RuntimeError("bad token %s" % secret),), None,
+        )
+        self.assertTrue(filt.filter(record))
+        self.assertNotIn(secret, record.getMessage())
 
 
 class StoreKindTests(unittest.TestCase):
@@ -625,6 +682,53 @@ class RouterTests(unittest.TestCase):
         asyncio.run(self.router.callback_router(self.core, update, self.context))
         self.assertEqual(job.status, "cancelled")
 
+    def _cancel(self, job):
+        query = FakeQuery("job|cancel|%s" % job.id, self.user)
+        update = FakeUpdate(self.user, self.chat, bot=self.bot, query=query)
+        asyncio.run(self.router.callback_router(self.core, update, self.context))
+
+    def test_jobs_cancel_denies_other_users(self):
+        """R01 回归：取消按「模块权限 + 发起人」判，不再只看 chat_id。"""
+        self.core.acl = ACL(
+            [self.user.id, 999],
+            roles={self.user.id: "user", 999: "user"},
+            module_roles={"docker": {"owner", "admin", "user"}},
+        )
+        other = self.core.jobs.add("docker", "别人的升级", chat_id=self.chat.id, user_id=999)
+        self._cancel(other)
+        self.assertEqual(other.status, "running", "同群其他白名单用户不能取消别人的任务")
+
+        mine = self.core.jobs.add("docker", "我的升级", chat_id=self.chat.id, user_id=self.user.id)
+        self._cancel(mine)
+        self.assertEqual(mine.status, "cancelled")
+
+    def test_jobs_cancel_denies_module_without_permission(self):
+        self.core.acl = ACL([self.user.id], roles={self.user.id: "user"})
+        job = self.core.jobs.add("docker", "升级", chat_id=self.chat.id, user_id=self.user.id)
+        self._cancel(job)
+        self.assertEqual(job.status, "running", "没有 docker 权限就不能取消 docker 任务")
+
+    def test_jobs_panel_hides_tasks_without_module_permission(self):
+        """R01 回归：没有 docker 权限的用户连 docker 任务的标题都不该看到。"""
+        self.core.acl = ACL(
+            [self.user.id],
+            roles={self.user.id: "user"},
+            module_roles={"docker": {"owner", "admin"}, "litepan": {"owner", "admin", "user"}},
+        )
+        hidden = self.core.jobs.add("docker", "升级 emby", chat_id=self.chat.id, user_id=999)
+        shown = self.core.jobs.add("litepan", "刮削", chat_id=self.chat.id, user_id=self.user.id)
+        asyncio.run(self.router.jobs_panel(self.core, self._update(), self.context))
+        body = self.bot.sent[-1].text
+        self.assertNotIn("升级 emby", body)
+        self.assertIn("刮削", body)
+        flat = [
+            b.callback_data
+            for row in self.bot.sent[-1].kwargs["reply_markup"].inline_keyboard
+            for b in row
+        ]
+        self.assertNotIn("job|cancel|%s" % hidden.id, flat)
+        self.assertIn("job|cancel|%s" % shown.id, flat)
+
     def test_unknown_command_rescues_fullwidth_slash(self):
         update = self._update("／status")
         asyncio.run(self.router.unknown_command(update, self.context))
@@ -707,6 +811,19 @@ class HomeRefreshTests(unittest.TestCase):
         """把已经安排的协程/任务跑到完成（gather 会再调度一次，两轮 sleep(0) 不够）。"""
         for _ in range(rounds):
             await asyncio.sleep(0)
+
+    def test_render_failure_releases_refresh_slot(self):
+        """R09 回归：首页渲染/发送失败时必须退回 busy 槽位，否则该模块永远不再刷新。"""
+        book = self.router._refresh_book(self.core)
+        key = self.router._refresh_key("docker", self.user.id)
+
+        async def boom(*args, **kwargs):
+            raise RuntimeError("send failed")
+
+        self.core.panels.render = boom
+        with self.assertRaises(RuntimeError):
+            asyncio.run(self.router.home_panel(self.core, self._update(), self.context))
+        self.assertFalse(book.get(key, {}).get("busy", False), "渲染失败必须退坑")
 
     def test_home_button_row_is_jobs_and_refresh(self):
         from mtbots.panels import nav_refresh
