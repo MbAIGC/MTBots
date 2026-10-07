@@ -39,7 +39,7 @@ SSH 执行把这些全部消掉：yml 留在远端，由**远端的 CLI** 解析
 ## 3. 形态总览
 
 ```
-   ┌────────────────── bot 容器（非 root, 只读根）──────────────────┐
+   ┌────────────────── bot 容器（root, 只读根）────────────────────┐
    │  mtbots                                                       │
    │   └ 🐳 docker 模块 ── DockerState ── DockerHost ──┬─ local: docker compose …（走 /var/run/docker.sock，今天的方式）
    │                                                   └─ ssh  : ssh -i … mtbots@host docker compose …（yml 在远端）
@@ -68,7 +68,7 @@ cd /mbots
 mkdir -p ./data/ssh && chmod 700 ./data/ssh
 ssh-keygen -t ed25519 -N '' -C mtbots@bot -f ./data/ssh/id_ed25519
 chmod 600 ./data/ssh/id_ed25519
-sudo chown -R 10001:10001 ./data/ssh                  # 容器用户是 uid 10001，不 chown 私钥读不到
+sudo chown -R 10001:10001 ./data/ssh                  # 建议保留（容器现以 root 跑，root 也能读；chown 便于随时切回非 root）
 ssh-keyscan -p 22 10.0.0.5 >> ./data/ssh/known_hosts  # 可选：预置 known_hosts（之后同样 chown）
 ```
 

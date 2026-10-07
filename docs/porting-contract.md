@@ -316,7 +316,7 @@ class MenuManager:
 * **来源分两级**（自本次改动起）：
   1. `compose config --services`（`get_project_services()`，返回 `(services, error)`）——
      能列出配置文件里定义的全部服务（含从未启动过的）。但它**必须能读项目目录下的 `.env`**：
-     `.env` 归 root、容器用户（uid 10001）读不到时，`${VAR:?}` 插值会直接失败，这条命令
+     `.env` 归 root、容器用户读不到时，`${VAR:?}` 插值会直接失败，这条命令
      表现为「0 行 stdout + 非 0 退出」。
   2. 容器 label 兜底（`get_project_services_from_containers()`）——跑
      `docker ps -a --filter label=com.docker.compose.project=<name> --format '{{.Label

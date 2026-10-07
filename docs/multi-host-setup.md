@@ -22,14 +22,16 @@ README 的 [多主机](../README.md#多主机) 一节是主推路径（`make add
 | 宿主机（项目根下） | 容器内 | 作用 | 权限 |
 |---|---|---|---|
 | `data/docker-hosts.json` | `/app/data/docker-hosts.json` | 主机清单 | 容器用户（uid **10001**）**可读** |
-| `data/ssh/id_ed25519` | `/app/data/ssh/id_ed25519` | 远端私钥 | **0600，属主必须是 10001** |
+| `data/ssh/id_ed25519` | `/app/data/ssh/id_ed25519` | 远端私钥 | 0600；属主建议 10001（容器以 root 跑后 root 也能读，但保持 10001 便于随时切回非 root） |
 | `data/ssh/id_ed25519.pub` | 同路径 | 公钥，贴到远端 | 无所谓 |
 | `data/ssh/known_hosts` | `/app/data/ssh/known_hosts` | 远端主机指纹 | 0600；`strict=accept-new` 时还要**可写** |
 | `data/config.json`、`data/logs/` | `/app/data/…` | 原有内容 | 已有约定 |
 
 `data/` 在 `.gitignore` 里，密钥不会被提交。
 
-**最容易踩的一条**：容器不是 root，是 **uid 10001**（Dockerfile 里 `useradd --uid 10001`）。宿主机上 root 生成的 `root:root 600` 密钥，容器里连 `head -c1` 都读不到（`NOT_READABLE`），`chown -R 10001:10001` 之后才 `READABLE`。读不到私钥时 ssh 只回一句含糊的 `Permission denied (publickey)`（前面可能带 `Identity file ... not accessible`），很容易误判成「远端公钥没装对」。所以 [1.3](#13-在-mtbots-这边生成密钥) 的 `chown` 不能省。
+**最容易踩的一条（历史坑）**：容器**曾经**以 uid 10001 运行（Dockerfile 里的 `useradd --uid 10001`）。宿主机上 root 生成的 `root:root 600` 密钥，容器里连 `head -c1` 都读不到（`NOT_READABLE`）；读不到私钥时 ssh 只回一句含糊的 `Permission denied (publickey)`（前面可能带 `Identity file ... not accessible`），很容易误判成「远端公钥没装对」。
+
+现在 compose 默认 `user: "0:0"`（原因见[安全红线](../README.md#安全红线)第 6 条：`docker compose` 必须能读项目的 `.env`），root 读任何属主的私钥都没问题，所以 [1.3](#13-在-mtbots-这边生成密钥) 的 `chown` **不再是必须的**；仍然建议执行，这样从 root 切回非 root 时不用重新收拾权限。
 
 ### 1.2 远端准备
 
@@ -186,7 +188,7 @@ ssh -p 22 -i /app/data/ssh/id_ed25519 \
 15 个本机 + 10 个远端项目按老做法 = 15×0.14 + 10×(0.36+…) ≈ **8–10 秒**，每次都要跑，还串行。现在：
 
 1. **服务列表（`容器：…`）按需 + 缓存**：扫描只跑 `compose ls`；`config --services` 只对当前这一页（`PAGE_SIZE`）和详情页取，结果缓存 `SERVICES_CACHE_TTL` = 300s，翻页 / 换主机 / 重新扫描直接复用（升级或清理后作废）。取失败**不写缓存**，但会进入 `SERVICES_FAIL_TTL` = 60s 的退避窗口：窗口内不重跑命令、面板继续显示上次的原因，窗口过后自动重试；🔄 强制刷新或升级 / 清理会立刻清掉退避。
-   解析失败时（典型：项目目录的 `.env` 归 root、容器用户 uid 10001 读不到，`${VAR:?}` 插值直接失败）自动退回**容器 label** 读服务名（`docker ps -a --filter label=com.docker.compose.project=…`，不读任何文件），面板会标「来自容器」；两级都失败才显示 `⚠️ 未获取：<原因>`。**不需要为了能检测到服务去改 `.env` 的属主或权限。**
+   解析失败时（典型：项目目录的 `.env` 归 root、容器用户 uid 10001 读不到，`${VAR:?}` 插值直接失败）自动退回**容器 label** 读服务名（`docker ps -a --filter label=com.docker.compose.project=…`，不读任何文件），面板会标「来自容器」；两级都失败才显示 `⚠️ 未获取：<原因>`。**不需要为了能检测到服务去改 `.env` 的属主或权限**；执行类操作（`pull` / `up -d` / `stop`）也不受 `.env` 属主影响——容器默认以 root 运行（[安全红线](../README.md#安全红线)第 6 条）。
 2. **多主机并行扫描**：每台一条线程，最多 4 台并发。
 3. **SSH 连接复用**：同一台主机的第 2..N 条命令走 `ControlMaster` 复用同一条 TCP（`ControlPath=/tmp/mtbots-ssh-%C`、`ControlPersist=60`），省掉每次 0.36s 的握手。老 sshd 或中间设备不接受复用时 `.env` 里设 `SSH_MULTIPLEX=0`（目录用 `SSH_CONTROL_DIR` 换；目录不可写、或值里带空白引号时自动退回每次握手，不会把远端命令全打挂）。
 4. **远端探测快速失败**：`docker compose version` 返回 255（连不上 / 认证失败 / 守卫拒绝）就不再试 `docker-compose`，死主机上限从 20s 降到 10s。

