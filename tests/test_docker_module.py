@@ -19,7 +19,7 @@ from unittest import mock
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler
 
 from mtbots.config import Settings
-from mtbots.features.docker import MODULE, commands, help_text, id_lines, register, summary
+from mtbots.features.docker import MODULE, commands, help_text, id_lines, refresh, register, summary
 from mtbots.features.docker import handlers as docker_handlers
 from mtbots.features.docker.compose import (
     DockerState,
@@ -1425,7 +1425,7 @@ class LazyServicesTest(unittest.TestCase):
 
         self.assertEqual(len(configs), 1)
 
-    def test_failed_service_lookup_is_retried_and_not_cached(self) -> None:
+    def test_failed_service_lookup_is_not_cached_and_reports_error(self) -> None:
         state, base = self._local_state()
         work = self._write_project(base, "media")
         payload = json.dumps(
@@ -1491,6 +1491,93 @@ class LazyServicesTest(unittest.TestCase):
         self.assertTrue(projects[0]["services_loaded"])
         self.assertNotIn("services_error", projects[0])
         self.assertTrue(state.services_cache, "兜底结果同样进缓存")
+
+    def test_failed_service_lookup_backs_off_then_retries(self) -> None:
+        """取失败要退避（别每次渲染都重跑两条命令），窗口过后必须重试，且原因一直可见。"""
+        state, base = self._local_state()
+        work = self._write_project(base, "media")
+        payload = json.dumps(
+            [{"Name": "media", "Status": "running(1)", "ConfigFiles": os.path.join(work, "docker-compose.yml")}]
+        )
+        attempts: list[int] = []
+
+        def fake_run(cmd, **kwargs):
+            if "config" in cmd:
+                attempts.append(1)
+                return self._result(1, "", "no such file")
+            if "ps" in cmd:
+                return self._result(1, "", "docker: not found")
+            return self._result(0, payload, "")
+
+        with mock.patch("mtbots.features.docker.compose.subprocess.run", side_effect=fake_run):
+            first = state.scan_projects_sync()
+            asyncio.run(state.ensure_services(first))
+            self.assertEqual(len(attempts), 1)
+            self.assertTrue(first[0]["services_error"])
+
+            # 退避窗口内：第二次渲染不再重查，但上次的原因要继续显示
+            second = state.scan_projects_sync()
+            asyncio.run(state.ensure_services(second))
+            self.assertEqual(len(attempts), 1, "退避窗口内不该重查")
+            self.assertTrue(second[0]["services_error"], "退避期间原因仍要可见")
+
+            # 窗口过期后：必须重试
+            with mock.patch("mtbots.features.docker.compose.SERVICES_FAIL_TTL", 0):
+                third = state.scan_projects_sync()
+                asyncio.run(state.ensure_services(third))
+            self.assertEqual(len(attempts), 2, "窗口过后要重试")
+
+    def test_service_backoff_is_cleared_by_refresh_and_invalidate(self) -> None:
+        """🔄 强制刷新与升级/清理都要立刻清掉失败退避，否则修好权限还得干等窗口。"""
+        state, _base = self._local_state()
+        state.services_failed["x|media|/p/docker-compose.yml"] = (time.monotonic(), "boom")
+        state.retry_failed_services()
+        self.assertEqual(state.services_failed, {})
+
+        state.services_failed["x|media|/p/docker-compose.yml"] = (time.monotonic(), "boom")
+        state.invalidate_cache()
+        self.assertEqual(state.services_failed, {})
+
+    def test_force_refresh_clears_service_backoff(self) -> None:
+        """首页 🔄（`docker.refresh(force=True)`）清退避；非 force 的 TTL 刷新不能清。"""
+        from types import SimpleNamespace
+
+        state, _base = self._local_state()
+        core = SimpleNamespace(data={MODULE.id: state})
+        calls: list[bool] = []
+
+        async def fake_get_projects(*, force_refresh=False):
+            calls.append(force_refresh)
+            return []
+
+        state.services_failed["x|media|/p/c.yml"] = (time.monotonic(), "boom")
+        with mock.patch.object(state, "get_projects", new=fake_get_projects):
+            asyncio.run(refresh(core, 1, force=False))
+            self.assertTrue(state.services_failed, "非 force 不该清退避")
+            asyncio.run(refresh(core, 1, force=True))
+        self.assertEqual(state.services_failed, {})
+        self.assertEqual(calls, [False, True])
+
+    def test_command_path_ignores_service_backoff(self) -> None:
+        """命令路径是明确操作：退避窗口内也要强取一次，否则修好 `.env` 后会被误报「没有服务」。"""
+        state, base = self._local_state()
+        work = self._write_project(base, "media")
+        project = {
+            "name": "media",
+            "dir": work,
+            "host": state.local_host.id,
+            "config_files": [os.path.join(work, "docker-compose.yml")],
+            "services": [],
+            "services_loaded": False,
+        }
+        state.services_failed[state.services_key(project)] = (time.monotonic(), "boom")
+
+        with mock.patch.object(state, "get_project_services", return_value=(["emby"], "")), \
+                mock.patch.object(state, "get_project_services_from_containers", return_value=None):
+            self.assertTrue(
+                asyncio.run(docker_handlers._service_exists(state, project, "emby")),
+                "退避窗口内也必须重取，而不是把空列表当成「没有这个服务」",
+            )
 
     def test_invalidated_cache_drops_services(self) -> None:
         state, _base = self._local_state()

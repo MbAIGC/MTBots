@@ -40,6 +40,9 @@ SCAN_TIMEOUT = 30
 #: 服务列表（`compose config --services`）缓存秒数：compose 文件很少改，缓存久一点没关系；
 #: 升级/清理之后 `invalidate_cache()` 会连它一起清掉。
 SERVICES_CACHE_TTL = 300.0
+#: 服务列表取失败后的退避秒数：失败不写缓存（为了尽快恢复），但也不能每次渲染都重跑
+#: 两条命令（远端就是两次 ssh）。窗口内沿用上次的失败原因，🔄 强制刷新 / 升级清理会立刻清掉。
+SERVICES_FAIL_TTL = 60.0
 #: 服务列表并发获取的最大线程数（每个项目一条子进程/一次 ssh）
 SERVICES_PARALLEL = 6
 #: 主机并发扫描的最大线程数（每台主机一条 `compose ls`）
@@ -230,6 +233,8 @@ class DockerState:
         #: 只对当前页/详情页按需取，取过一次就长期复用（这是主面板从秒级回到亚秒级的关键）。
         #: `来源` = "compose"（解析配置文件）或 "containers"（容器 label 兜底），面板据此标注。
         self.services_cache: dict[str, tuple[float, list[str], str]] = {}
+        #: 服务列表取失败的退避：`key -> (时间, 原因)`。窗口内不重查，但把原因继续显示在面板上。
+        self.services_failed: dict[str, tuple[float, str]] = {}
         #: 测试/嵌入用：替换真实扫描（返回项目列表）
         self.scan_hook: Optional[Callable[[], list[dict]]] = None
         #: 最近一次扫描的失败原因（空 = 成功）。以前这里失败是静默的，
@@ -563,16 +568,20 @@ class DockerState:
                 str(project.get("name") or ""), host
             )
             source = "containers"
-        if services is None:  # 两个来源都没取到：不写缓存，下次再看这一页时重试
-            project["services_error"] = error or "未获取到服务列表"
+        key = self.services_key(project)
+        if services is None:  # 两个来源都没取到：不写缓存，记下原因并进入退避窗口
+            reason = error or "未获取到服务列表"
+            project["services_error"] = reason
+            if key:
+                self.services_failed[key] = (time.monotonic(), reason)
             return
         project["services"] = services
         project["services_loaded"] = True
         project["services_source"] = source
         project.pop("services_error", None)
-        key = self.services_key(project)
         if key:
             self.services_cache[key] = (time.monotonic(), list(services), source)
+            self.services_failed.pop(key, None)
 
     def load_services(self, projects: Sequence[dict]) -> int:
         """给一批项目补齐服务列表（同步，交给 `ensure_services` 的 to_thread 跑）。
@@ -580,7 +589,16 @@ class DockerState:
         只处理「这一屏真正要渲染的项目」——全量扫描时逐项目跑 `compose config` 是主面板
         慢到十来秒的元凶（远端更是每个项目一次完整 SSH 握手）。返回本次真正取过的数量。
         """
-        pending = [p for p in projects if isinstance(p, dict) and self._needs_services(p)]
+        pending: list[dict] = []
+        for project in projects:
+            if not isinstance(project, dict) or not self._needs_services(project):
+                continue
+            reason = self._backoff_reason(project)
+            if reason is not None:
+                # 退避窗口内不重查，但把上次的原因继续挂在项目上，面板才不会只剩一个「-」
+                project["services_error"] = reason
+                continue
+            pending.append(project)
         if not pending:
             return 0
         workers = max(1, min(SERVICES_PARALLEL, len(pending)))
@@ -593,6 +611,20 @@ class DockerState:
         pending = [p for p in projects if self._needs_services(p)]
         if pending:
             await asyncio.to_thread(self.load_services, pending)
+
+    def _backoff_reason(self, project: Any) -> Optional[str]:
+        """服务列表还在失败退避窗口内时返回上次的原因（顺手清掉过期记录），否则 None。"""
+        key = self.services_key(project)
+        if not key:
+            return None
+        entry = self.services_failed.get(key)
+        if entry is None:
+            return None
+        stamp, reason = entry
+        if time.monotonic() - stamp >= SERVICES_FAIL_TTL:
+            self.services_failed.pop(key, None)
+            return None
+        return reason
 
     @staticmethod
     def _needs_services(project: Any) -> bool:
@@ -842,10 +874,19 @@ class DockerState:
         """是否已经完成过一次扫描（用于区分「没扫过」和「扫到 0 个项目」）。"""
         return self.projects_cache_time > 0.0
 
+    def retry_failed_services(self) -> None:
+        """清掉服务列表的失败退避，让下次渲染立刻重查。
+
+        🔄 强制刷新是用户明确要求「重来一次」；升级/清理后配置也可能已经变了。
+        没有这一步，修好 `.env` / 权限之后还得干等 `SERVICES_FAIL_TTL`。
+        """
+        self.services_failed.clear()
+
     def invalidate_cache(self) -> None:
-        """使项目扫描缓存立即过期（升级/清理操作后调用）；服务列表一并作废。"""
+        """使项目扫描缓存立即过期（升级/清理操作后调用）；服务列表与失败退避一并作废。"""
         self.projects_cache_time = 0.0
         self.services_cache.clear()
+        self.retry_failed_services()
 
 
 DOCKER_SOCKET = "/var/run/docker.sock"

@@ -348,6 +348,10 @@ async def _render_list(
     await _answer(update)
     state = _state(core)
     settings = state.settings
+    if force_refresh:
+        # 面板上的 🔄 和首页那个一样，是「用户明确要求重来一次」：服务列表的失败退避
+        # 也要清掉，否则刚修好 .env / 权限的人点它还得干等 SERVICES_FAIL_TTL
+        state.retry_failed_services()
     projects = await state.get_projects(force_refresh=force_refresh)
     if await _reject_unknown_host(core, update, host if host != "all" else None):
         return
@@ -611,6 +615,11 @@ async def _show_detail(
         "🟢" if is_running else "🟡",
         esc(target.get("status", "")),
     )
+    if not (target.get("services") or []) and target.get("services_error"):
+        # 列表页已经说了原因，详情页也得说——否则点进来只剩「升级全部服务容器」一个按钮
+        text += "⚠️ <b>服务列表未获取：</b><code>%s</code>\n\n" % esc(
+            redact(str(target["services_error"]))[:120] or "原因未知"
+        )
     text += "⚙️ <b>请选择操作控制范围：</b>\n"
 
     host_id = target.get("host")
@@ -941,9 +950,24 @@ async def _service_exists(state: DockerState, project: dict, service_name: str) 
     服务列表是**按需**取的（`ensure_services`）：/upgrade 是命令路径，不经过列表渲染，
     所以这里必须自己补一次——否则冷缓存下 `services` 还是空的，任何服务都会被判成
     「不存在」（旧版扫描时会预填，这次提速把它挪走了）。
+
+    失败退避在这里必须让路：命令路径是用户对某个服务的明确操作，拿「上次没取到」当
+    「没有这个服务」是假阴性——修好 `.env` 之后 `/upgrade 01 emby` 反而会被误报。
     """
+    if not project.get("services"):
+        state.services_failed.pop(state.services_key(project), None)
     await state.ensure_services([project])
     return service_name in list(project.get("services") or [])
+
+
+def _service_missing_detail(state: DockerState, project: dict, service_name: str) -> str:
+    """「没找到这个服务」的确切原因：是真的没有，还是服务列表压根没取到。"""
+    if not (project.get("services") or []) and project.get("services_error"):
+        return "服务列表未获取，无法确认服务 %s：%s" % (
+            service_name,
+            redact(str(project["services_error"]))[:120],
+        )
+    return "项目 %s 中没有服务 %s" % (state.project_label(project), service_name)
 
 
 def _compose_missing_reason(state: DockerState, host_id: Optional[str]) -> str:
@@ -994,7 +1018,7 @@ async def _do_upgrade_service(
         if target is None:
             status, detail = FAILED, "未找到项目 %s（/d_list 可刷新）" % project_name
         elif not await _service_exists(state, target, service_name):
-            status, detail = FAILED, "项目 %s 中没有服务 %s" % (project_name, service_name)
+            status, detail = FAILED, _service_missing_detail(state, target, service_name)
         elif not await asyncio.to_thread(
             state.get_remote_compose_bin, state.host_by_id(host)
         ):
@@ -1117,7 +1141,7 @@ async def _do_stop(
         if target is None:
             status, detail = FAILED, "未找到项目 %s（/d_list 可刷新）" % project_name
         elif service_name and not await _service_exists(state, target, service_name):
-            status, detail = FAILED, "项目 %s 中没有服务 %s" % (project_name, service_name)
+            status, detail = FAILED, _service_missing_detail(state, target, service_name)
         elif not await asyncio.to_thread(state.get_remote_compose_bin, state.host_by_id(host)):
             status, detail = FAILED, _compose_missing_reason(state, host)
         else:
@@ -1834,8 +1858,7 @@ async def _upgrade_command(core: Core, update: Update, context: Any) -> None:
             await core.panels.render(
                 "docker",
                 update,
-                "❌ 项目 <b>%s</b> 中不存在服务 <code>%s</code>"
-                % (esc(state.project_label(target)), esc(service_name)),
+                "❌ %s" % esc(_service_missing_detail(state, target, service_name)),
                 _back_keyboard(),
             )
             return

@@ -101,6 +101,9 @@ async def refresh(core: Core, user_id: int, force: bool = False) -> None:
     state = _state(core)
     if state is None:
         return
+    if force:
+        # 🔄 是用户明确要求重来一次：别让服务列表的失败退避把人拦住
+        state.retry_failed_services()
     await state.get_projects(force_refresh=force)
 
 
