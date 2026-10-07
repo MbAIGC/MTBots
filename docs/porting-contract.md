@@ -323,8 +323,13 @@ class MenuManager:
      "com.docker.compose.service"}}'`，**不读任何文件**（用的是已挂载的 docker.sock）。
      它只认创建过容器的服务，所以只在第 1 级失败时使用；结果同样进缓存，并标
      `services_source="containers"` 供面板标注「来自容器」。
-  3. 两级都失败：**不写缓存**、下次再试，失败摘要写进 `services_error` 供面板显示
-     （上屏前过 `redact()` 并截断，只带路径 / 变量名 / 退出码这类诊断信息）。
+  3. 两级都失败：**不写缓存**，进入 `SERVICES_FAIL_TTL`=60s 的退避窗口——窗口内不重查、
+     但把上次的失败摘要继续挂在 `services_error` 上供面板显示（上屏前过 `redact()` 并截断，
+     只带路径 / 变量名 / 退出码这类诊断信息）；窗口过后自动重试。
+     `retry_failed_services()`（🔄 强制刷新、`invalidate_cache()`）会立刻清掉退避。
+* 命令路径（`/upgrade NN <svc>`、停止服务）**无视失败退避**：它先清掉该项目的失败记录再强取一次；
+  仍取不到时也不会说「服务不存在」，而是报「服务列表未获取：<原因>」——用户明确要操作某个服务时，
+  把「上次没取到」当成「没有这个服务」是假阴性。
 * **凡是拿 `services` 做判断（例如「项目里有没有这个服务」）的路径，必须自己先
   `ensure_services()`**——`/upgrade NN <svc>` 这类命令路径不经过面板渲染。已经有非空
   `services` 的项目（外部塞进来的 project dict）不会被重复取。

@@ -289,7 +289,7 @@ v1.1.0 的实现有个没量化的代价：`scan_projects_sync()` 里**每个项
 
 | 修订 | 位置 | 说明 |
 |---|---|---|
-| 服务列表按需加载 + 缓存 | `DockerState.load_services()` / `ensure_services()` / `services_cache` | 扫描只跑 `compose ls`；`config --services` 只对**当前页**（`PAGE_SIZE`）与详情页取，结果缓存 `SERVICES_CACHE_TTL`=300s 跨扫描复用；取失败（返回 `None`）不写缓存、下次重试。`invalidate_cache()` 连服务缓存一起清。**解析失败时退回容器 label 取服务名**（`get_project_services_from_containers()`：`docker ps -a --filter label=com.docker.compose.project=…`，不读文件、不需要 `.env` 权限），结果标 `services_source="containers"` |
+| 服务列表按需加载 + 缓存 | `DockerState.load_services()` / `ensure_services()` / `services_cache` | 扫描只跑 `compose ls`；`config --services` 只对**当前页**（`PAGE_SIZE`）与详情页取，结果缓存 `SERVICES_CACHE_TTL`=300s 跨扫描复用；取失败（返回 `None`）不写缓存，进入 `SERVICES_FAIL_TTL`=60s 退避（窗口内不重跑命令、沿用上次原因），🔄 强制刷新与 `invalidate_cache()` 立即清退避。`invalidate_cache()` 连服务缓存一起清。**解析失败时退回容器 label 取服务名**（`get_project_services_from_containers()`：`docker ps -a --filter label=com.docker.compose.project=…`，不读文件、不需要 `.env` 权限），结果标 `services_source="containers"` |
 | 主机并行扫描 | `DockerState._scan_hosts()` + `HostScan` | 每台主机一条线程（`HOST_PARALLEL`=4，`pool.map` 保序）；worker 只返回 `HostScan`，**不再改共享属性**，主线程合并 `host_errors`/`hidden_dirs`/`skipped_projects`/`roots_filtered` |
 | ssh 连接复用 | `hosts.DockerHost.command()` / `control_path()` / `control_path_usable()` | `ControlMaster=auto` + `ControlPath=/tmp/mtbots-ssh-%C` + `ControlPersist=60`；`SSH_MULTIPLEX=0` 可关，`SSH_CONTROL_DIR` 换目录（带空白/引号的值会被拒并退回默认；目录不可写时本次不复用——宁可贵一点也不能让所有远端命令起不来）。带 `command=` 守卫的强制命令照常工作（每条 channel 仍带 `SSH_ORIGINAL_COMMAND`） |
 | 远端探测快速失败 | `DockerState.get_remote_compose_bin()` | 返回 255（ssh 连不上/认证失败/守卫拒绝）时不再试 `docker-compose`（省掉一个 `ConnectTimeout`）；`host.error` 非空的主机**根本不探测** |
