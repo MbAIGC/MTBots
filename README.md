@@ -338,13 +338,13 @@ make test          # = PYTHONPATH=./.vendor:. python3 -m unittest discover -s te
 make check
 ```
 
-全部是 stdlib `unittest`，不联网、不碰真实 Telegram 与 Docker（Docker 用例还会把 `subprocess` / `create_subprocess_exec` 换成抛异常的桩做反证）。当前 **469 个用例全绿**：
+全部是 stdlib `unittest`，不联网、不碰真实 Telegram 与 Docker（Docker 用例还会把 `subprocess` / `create_subprocess_exec` 换成抛异常的桩做反证）。当前 **480 个用例全绿**：
 
 | 文件 | 用例 | 覆盖重点 |
 |---|---|---|
-| `tests/test_core.py` | 84 | 文本分片与 HTML 出口转义、`SafeBot` 降级、ACL 默认拒绝、存储原子写 / 0600、任务中心与收尾文案、跨模块入口取舍、菜单作用域、面板唯一与两步确认、配置兼容、日志脱敏、路由消歧、首页两帧刷新（TTL / 🔄 强制 / busy 去重 / 只在还停在首页时回填） |
-| `tests/test_docker_module.py` | 94 | 排序分页、pull 噪音过滤、清理候选、回调载荷、扫描失败诊断（socket GID / 未挂载目录 / 缺命令）、执行消息收尾、多主机（清单校验 / ssh 包装 / 逐主机扫描 / 退出码 / 只认配置内 host id）、提速（服务列表缓存与并发、主机并行、ssh 复用、255 快速失败、冷缓存服务名校验）、停止容器 |
-| `tests/test_litepan_module.py` | 59 | slug 构建（拼音 / 限长 / 去重）、users.json 校验、发现解析与缓存、菜单预算、触发与回执 |
+| `tests/test_core.py` | 91 | 文本分片与 HTML 出口转义、`SafeBot` 降级、ACL 默认拒绝（含非法角色 fail-fast）、存储原子写 / 0600 与写盘失败不回滚内存、任务中心可见性与取消权限、跨模块入口取舍、菜单作用域、面板唯一与两步确认、配置兼容、日志脱敏（含数字 / 异常对象参数）、路由消歧、首页两帧刷新（TTL / 🔄 强制 / busy 去重 / 渲染失败退坑 / 只在还停在首页时回填） |
+| `tests/test_docker_module.py` | 95 | 排序分页、pull 噪音过滤、清理候选、回调载荷、扫描失败诊断（socket GID / 未挂载目录 / 缺命令）、执行消息收尾、多主机（清单校验 / ssh 包装 / 逐主机扫描 / 退出码 / 只认配置内 host id）、提速（服务列表缓存与并发、主机并行、ssh 复用、255 快速失败、冷缓存服务名校验、解析失败退回容器 label）、停止容器 |
+| `tests/test_litepan_module.py` | 62 | slug 构建（拼音 / 限长 / 去重）、users.json 校验（含条目 / `drives` 形状与坏条目跳过）、发现解析与缓存（含 `parse_ok` 索引）、菜单预算、触发与回执 |
 | `tests/test_cline_module.py` | 149 | 额度解析与渲染、Key 掩码与指纹、别名校验、存储读写与自愈、默认拒绝、首页摘要（单 / 多 Key、正常与失败计数、别名转义、计数与快照同源）、刷新钩子（查询锁去重、失败记账、Key 变更即作废快照） |
 | `tests/test_setup_script.py` | 28 | 两个接入脚本：ssh / scp 打桩跑完整向导（清单幂等合并 / `command=` 守卫行 / create 模式 / dry-run 不落地 / 非法 id 被拒）、远端准备脚本（参数校验、守卫 0755 + authorized_keys 0600 + 幂等 + 别人的 key 不动）、curl 模式与 `bash <(curl …)`（项目根取当前目录、不读 stdin、按 `--ref` 下载配套脚本）、老 sshd（<7.2）改用长格式选项、公钥已装 + 守卫生效不被误判、**守卫真的用 `sh` 跑一遍**（放行含 `stop`，拒绝 `bash -i` / `docker run` / `docker exec` / `compose down` / 命令链） |
 | `tests/test_integration.py` | 55 | 三个真实模块一起装配、命令不重复、菜单合并、`--check` 离线可跑；真 `telegram.Update` 走 PTB dispatcher 的端到端用例（不重复执行、全角命令可救援、下线模块的按钮有反馈、点按钮原地改同一条面板、所有面板文案过 Telegram HTML 合法性校验）；多主机装配（按主机分组、故障 / 配置错的远端要有段并写明原因、单主机无主机标题、伪造 host id 被拒、`/upgrade` 编号与面板一致、冷缓存下不误判服务不存在）；收尾只留一条消息（批量升级不推卡片、执行成功即删、失败抄尾部输出、进度面板可中断） |
@@ -364,6 +364,7 @@ make check
 | 「远端授权只允许 compose 操作」 | 守卫拦下了这条命令：要么命令不在白名单，要么没走守卫但命令拼错了。**升级 MTBots 后新功能（例如 v1.5.8 的「停止」）报这个，说明远端那份守卫还是旧的**——重跑一次远端那一条命令（[手动步骤 1.4](docs/multi-host-setup.md#14-装公钥--强制命令守卫)）即可，守卫是普通脚本，更新它不用重建容器 |
 | 远端项目一个都看不到 | 检查 `roots` 白名单；在容器里手跑 `ssh … docker compose ls -a --format json` 看远端到底返回什么 |
 | 面板少了几个项目 | 若提示「没有 compose 文件路径（ConfigFiles 为空）」或「被 roots 挡掉」，照提示处理；`python -m mtbots --health` 会把这两类无条件列出来 |
+| 面板「容器：⚠️ 未获取：…」 | 服务列表两级来源都没取到，冒号后面就是原因。第一级 `docker compose -f … config --services` 的常见失败是项目目录的 `.env` 归 root、容器用户（uid 10001）读不到，于是 `${VAR:?}` 插值直接失败（`permission denied` / `required variable … is missing`）；这种情况下 bot 会自动退回第二级——从容器的 `com.docker.compose.service` label 读服务名（面板标「来自容器」，含已停止的容器），**所以不需要为了能检测到服务去改 `.env` 的属主或权限**。两级都失败还意味着这个项目可能连容器都没建过，或 docker 命令不可用 |
 | 中断了但远端还在跑 | 取消 = 断开 ssh（远端通常被 SIGHUP 带走，但不保证）；`pull` / `up -d` 幂等，重跑一次即可 |
 | 想临时关掉某台主机 | 清单里给它加 `"enabled": false`，重建容器 |
 
@@ -399,6 +400,8 @@ make check
 ```
 
 改完 `docker compose up -d`（加 `--force-recreate` 更保险）。项目散在不同根下时面板不给公共 `-v`，逐个挂。
+
+**情况三：项目看得见、服务列表却是 `⚠️ 未获取：…`。** 这是第三类"读不到"，原因通常不在挂载，而在**项目目录下 `.env` 的属主**：`docker compose -f <文件> config --services` 必须能读同目录的 `.env`，而 `.env` 一般归 root（`600`），容器用户（uid 10001）读不到；一旦 compose 文件里用了 `${VAR:?}`，插值失败会让这条命令整体失败（0 行输出）。bot 会自动退回**容器 label** 读服务名（`docker ps -a --filter label=com.docker.compose.project=…`，不读任何文件），面板标「来自容器」（含已停止的容器），因此**不必也不建议**把 `.env` 交给容器用户——那会把它里面的密钥暴露给 bot 里运行的所有代码。只有在项目连容器都没建过时，兜底才会没结果。
 
 ## 已知限制
 

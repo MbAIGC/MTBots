@@ -305,13 +305,26 @@ class MenuManager:
 {"name": str, "dir": str, "status": str, "config_files": [str],
  "host": str, "host_label": str,
  "services": [str],          # 可能是空列表：还没取过
- "services_loaded": bool}    # 服务列表是否已确定（True 才能拿 services 做判断）
+ "services_loaded": bool,    # 服务列表是否已确定（True 才能拿 services 做判断）
+ "services_source": str,     # "compose"=解析配置文件 / "containers"=容器 label 兜底
+ "services_error": str}      # 两个来源都失败时的摘要；成功时该键不存在
 ```
 
-* 服务列表（`compose config --services`）按需取：`await state.ensure_services([项目…])`
+* 服务列表按需取：`await state.ensure_services([项目…])`
   （只对要渲染的那一页 / 详情页调用；内部 `to_thread` + 最多 `SERVICES_PARALLEL` 并发，
   结果按 `host|name|config_files` 缓存 `SERVICES_CACHE_TTL`=300s，`invalidate_cache()` 一起清）。
-  取失败（`get_project_services()` 返回 `None`）**不写缓存**，下次再试。
+* **来源分两级**（自本次改动起）：
+  1. `compose config --services`（`get_project_services()`，返回 `(services, error)`）——
+     能列出配置文件里定义的全部服务（含从未启动过的）。但它**必须能读项目目录下的 `.env`**：
+     `.env` 归 root、容器用户（uid 10001）读不到时，`${VAR:?}` 插值会直接失败，这条命令
+     表现为「0 行 stdout + 非 0 退出」。
+  2. 容器 label 兜底（`get_project_services_from_containers()`）——跑
+     `docker ps -a --filter label=com.docker.compose.project=<name> --format '{{.Label
+     "com.docker.compose.service"}}'`，**不读任何文件**（用的是已挂载的 docker.sock）。
+     它只认创建过容器的服务，所以只在第 1 级失败时使用；结果同样进缓存，并标
+     `services_source="containers"` 供面板标注「来自容器」。
+  3. 两级都失败：**不写缓存**、下次再试，失败摘要写进 `services_error` 供面板显示
+     （上屏前过 `redact()` 并截断，只带路径 / 变量名 / 退出码这类诊断信息）。
 * **凡是拿 `services` 做判断（例如「项目里有没有这个服务」）的路径，必须自己先
   `ensure_services()`**——`/upgrade NN <svc>` 这类命令路径不经过面板渲染。已经有非空
   `services` 的项目（外部塞进来的 project dict）不会被重复取。
