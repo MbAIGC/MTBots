@@ -31,6 +31,14 @@ services:
     #   查到 0（socket 属 root:root）时 group_add 救不了 → 换 user: "0:0" 或 docker-socket-proxy
     group_add:
       - "${DOCKER_GID:-999}"
+    # 以 root 运行（覆盖 Dockerfile 里的 USER mtbots）：
+    #   `docker compose` 解析项目时**必须**能读项目目录下的 `.env`（`${VAR:?}` 插值 + 传给容器）。
+    #   项目 `.env` 通常是 root:600，容器里的 mtbots(10001) 读不到 → pull / up -d / stop 全部报
+    #   `open …/.env: permission denied`。保持 10001 就得给每个项目的 `.env` 单独放权限，新项目还得再来一次。
+    # 代价：容器内进程有 root 能力，`data/` 下新写的文件会归 root（要切回 10001 得 chown -R）。
+    # 注意：本容器已挂 docker.sock，能碰它的代码本来就能 `docker run -u 0 -v /:/host` 读走宿主机文件，
+    #       所以这一步并没有扩大实际权限边界；要真正收敛请上 docker-socket-proxy（见 README 安全红线）。
+    user: "0:0"
     # 只读根文件系统 + 禁止提权（沿用 LitePan / ClinePass 的做法）
     read_only: true
     tmpfs:
