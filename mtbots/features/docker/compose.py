@@ -1202,7 +1202,7 @@ async def run_command_with_feedback(
     progress_pct: int = 50,
     task_id: Optional[str] = None,
     on_progress: Optional[ProgressCallback] = None,
-    delete_on_success: bool = False,
+    cleanup_message: bool = False,
     out: Optional[list[str]] = None,
     host: Optional[DockerHost] = None,
 ) -> bool:
@@ -1210,9 +1210,11 @@ async def run_command_with_feedback(
 
     最终消息只保留关键结果行（过滤 pull 的逐层噪音），HTML 编辑失败自动降级纯文本。
 
-    `delete_on_success=True` 时，命令**成功**后把这条执行消息删掉：多步任务里每一步的
-    「✅ 拉取新镜像 - mt 完成」只是过程，留一串会盖住面板的结论。失败/取消/超时一律保留，
-    因为那几条输出就是排错依据（先改成「❌ 失败」再删，删不掉也不会留个假进度）。
+    `cleanup_message=True` 时，这条过程消息在命令收尾后**一律删掉**——成功、失败、取消、
+    超时都一样：多步任务里每一步的「✅ 拉取新镜像 - mt 完成」只是过程，留一串会盖住面板的
+    结论。失败输出不靠它保留：调用方会把 `out` 里的尾部输出抄进收尾面板的「🔻 最后输出」
+    （见 handlers 的 `_failure_block`）。一律**先编辑成结果态、再删**，这样删不掉时也不会
+    留个假进度。
 
     `out` 是可选的结果回传（列表尾插一条过滤后的输出），给「删掉执行消息但结论还得留着」
     的场景用，例如镜像清理要把 `Total reclaimed space` 抄进收尾面板。
@@ -1247,6 +1249,12 @@ async def run_command_with_feedback(
 
     output_lines: "deque[str]" = deque(maxlen=OUTPUT_BUFFER)
     process: Optional[asyncio.subprocess.Process] = None
+
+    async def _finish(text: str) -> None:
+        """把过程消息落成结果态；`cleanup_message` 打开时再删掉它。"""
+        await edit_html_safe(status_msg, text)
+        if cleanup_message:
+            await delete_message_quietly(status_msg)
 
     try:
         process = await asyncio.create_subprocess_exec(
@@ -1327,30 +1335,25 @@ async def run_command_with_feedback(
         safe_full_output = esc(redact(full_output)[-PREVIEW_CHARS:])
 
         if state.cancel_requested:
-            await edit_html_safe(
-                status_msg,
+            await _finish(
                 "🛑 <b>%s 已取消</b>\n⏱ <b>已用时：</b>%ss\n<code>%s</code>"
-                % (safe_title, elapsed, safe_full_output),
+                % (safe_title, elapsed, safe_full_output)
             )
             return False
 
         if returncode == 0:
-            await edit_html_safe(
-                status_msg,
+            await _finish(
                 "✅ <b>%s 完成</b> [%s]\n⏱ <b>总耗时：</b>%ss\n<code>%s</code>"
-                % (safe_title, progress_bar(100), elapsed, safe_full_output),
+                % (safe_title, progress_bar(100), elapsed, safe_full_output)
             )
-            if delete_on_success:
-                await delete_message_quietly(status_msg)
             return True
 
         hint = ""
         if host is not None and host.is_remote:
             hint = "\n💡 %s" % esc(redact(explain_exit(int(returncode), full_output, host)))
-        await edit_html_safe(
-            status_msg,
+        await _finish(
             "❌ <b>%s 失败 (Code %s)</b>%s\n⏱ <b>耗时：</b>%ss\n<code>%s</code>"
-            % (safe_title, returncode, hint, elapsed, safe_full_output),
+            % (safe_title, returncode, hint, elapsed, safe_full_output)
         )
         return False
 
@@ -1361,16 +1364,15 @@ async def run_command_with_feedback(
                 await asyncio.wait_for(process.wait(), timeout=10)
             except Exception:
                 pass
-        await edit_html_safe(
-            status_msg,
-            "⏰ <b>%s 超时中断</b>\n单条指令耗时超过 %d 秒，已强行终止。" % (safe_title, timeout),
+        await _finish(
+            "⏰ <b>%s 超时中断</b>\n单条指令耗时超过 %d 秒，已强行终止。" % (safe_title, timeout)
         )
         return False
 
     except Exception as exc:
         if process is not None:
             stop_process_tree(process)
-        await edit_html_safe(status_msg, "❌ 执行发生异常: %s" % esc(redact(str(exc))))
+        await _finish("❌ 执行发生异常: %s" % esc(redact(str(exc))))
         return False
 
     finally:

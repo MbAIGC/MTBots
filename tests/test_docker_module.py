@@ -835,9 +835,9 @@ class _FakeStatusMessage:
 
 
 class CommandFeedbackTest(unittest.TestCase):
-    """`run_command_with_feedback` 的收尾策略：成功可删、失败必留。"""
+    """`run_command_with_feedback` 的收尾策略：默认留过程消息，`cleanup_message=True` 时一律清掉。"""
 
-    def _run(self, returncode: int, *, delete_on_success: bool):
+    def _run(self, returncode: int, *, cleanup_message: bool):
         state = DockerState(DockerSettings())
         msg = _FakeStatusMessage()
         proc = _FakeProcess(b"Total reclaimed space: 1.2GB\n", returncode)
@@ -852,30 +852,32 @@ class CommandFeedbackTest(unittest.TestCase):
                     msg,
                     ["docker", "image", "prune", "-f"],
                     title="清理系统镜像",
-                    delete_on_success=delete_on_success,
+                    cleanup_message=cleanup_message,
                     out=out,
                 )
             )
         return ok, msg, out
 
     def test_success_deletes_the_step_message(self):
-        ok, msg, out = self._run(0, delete_on_success=True)
+        ok, msg, out = self._run(0, cleanup_message=True)
         self.assertTrue(ok)
         self.assertEqual(msg.deleted, 1)
         self.assertTrue(any("完成" in e for e in msg.edits), "先落成完成态，删不掉也不会留假进度")
         self.assertIn("Total reclaimed space", "".join(out))
 
     def test_success_keeps_the_step_message_by_default(self):
-        ok, msg, _out = self._run(0, delete_on_success=False)
+        ok, msg, _out = self._run(0, cleanup_message=False)
         self.assertTrue(ok)
         self.assertEqual(msg.deleted, 0)
         self.assertTrue(any("完成" in e for e in msg.edits))
 
-    def test_failure_never_deletes_the_step_message(self):
-        ok, msg, _out = self._run(1, delete_on_success=True)
+    def test_failure_also_cleans_up_the_step_message(self):
+        """失败也要清掉过程消息：失败输出由调用方的收尾面板「🔻 最后输出」承载。"""
+        ok, msg, out = self._run(1, cleanup_message=True)
         self.assertFalse(ok)
-        self.assertEqual(msg.deleted, 0, "失败输出就是排错依据，必须留着")
-        self.assertTrue(any("失败" in e for e in msg.edits))
+        self.assertEqual(msg.deleted, 1, "失败消息不再残留")
+        self.assertTrue(any("失败" in e for e in msg.edits), "仍然先落成失败态再删")
+        self.assertIn("Total reclaimed space", "".join(out), "输出照旧回传给调用方")
 
     def test_delete_message_quietly_swallows_errors(self):
         class _Boom:

@@ -369,7 +369,7 @@ class FinishFlowTests(unittest.TestCase):
         assert_html_valid(self, final)
 
         self.assertTrue(calls, "两条命令都跑过")
-        self.assertTrue(all(c.get("delete_on_success") for c in calls), "执行消息成功即删")
+        self.assertTrue(all(c.get("cleanup_message") for c in calls), "过程消息一律清理")
 
         labels = [b.text for row in self._final_markup(bot).inline_keyboard for b in row]
         self.assertIn("🔙 返回列表", labels)

@@ -895,7 +895,7 @@ async def _do_upgrade_project(
                 progress_pct=30,
                 task_id=task_id,
                 on_progress=_progress(core, job),
-                delete_on_success=True,
+                cleanup_message=True,
                 out=pull_out,
                 host=upgrade_host,
             )
@@ -916,7 +916,7 @@ async def _do_upgrade_project(
                     progress_pct=80,
                     task_id=task_id,
                     on_progress=_progress(core, job),
-                    delete_on_success=True,
+                    cleanup_message=True,
                     out=up_out,
                     host=upgrade_host,
                 )
@@ -1050,7 +1050,7 @@ async def _do_upgrade_service(
                 progress_pct=30,
                 task_id=task_id,
                 on_progress=_progress(core, job),
-                delete_on_success=True,
+                cleanup_message=True,
                 out=pull_out,
                 host=upgrade_host,
             )
@@ -1072,7 +1072,7 @@ async def _do_upgrade_service(
                     progress_pct=80,
                     task_id=task_id,
                     on_progress=_progress(core, job),
-                    delete_on_success=True,
+                    cleanup_message=True,
                     out=up_out,
                     host=upgrade_host,
                 )
@@ -1170,7 +1170,7 @@ async def _do_stop(
                 progress_pct=90,
                 task_id=task_id,
                 on_progress=_progress(core, job),
-                delete_on_success=True,
+                cleanup_message=True,
                 out=captured,
                 host=target_host,
             )
@@ -1294,7 +1294,7 @@ async def _do_upgrade_all(
                     progress_pct=pct,
                     task_id=task_id,
                     on_progress=_progress(core, job),
-                    delete_on_success=True,
+                    cleanup_message=True,
                     out=pull_out,
                     host=loop_host,
                 )
@@ -1309,7 +1309,7 @@ async def _do_upgrade_all(
                         progress_pct=pct,
                         task_id=task_id,
                         on_progress=_progress(core, job),
-                        delete_on_success=True,
+                        cleanup_message=True,
                         out=up_out,
                         host=loop_host,
                     )
@@ -1553,7 +1553,7 @@ async def _do_prune(
             progress_pct=90,
             task_id=task_id,
             on_progress=_progress(core, job),
-            delete_on_success=True,
+            cleanup_message=True,
             out=captured,
             host=target,
         )
