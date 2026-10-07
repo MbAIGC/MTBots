@@ -445,12 +445,29 @@ async def _render_list(
         status_icon = "🟢" if "running" in status.lower() else "🟡"
         disp_name = label[:26] + ".." if len(label) > 28 else label
         services = list(p.get("services") or [])
-        services_str = ", ".join(services) if services else "-"
+        if services:
+            services_str = ", ".join(services)
+            if p.get("services_source") == "containers":
+                services_str += "（来自容器）"
+        elif p.get("services_error"):
+            # 失败摘要来自 compose/docker 的 stderr：只含路径、变量名、退出码这类诊断信息，
+            # 上屏前再过一次脱敏并截断，避免把项目里的隐私内容带出来。
+            services_str = "⚠️ 未获取：%s" % (redact(str(p["services_error"]))[:120] or "原因未知")
+        else:
+            services_str = "-"
+
+        # 多配置文件时把实际用的文件都列出来：只显示目录的话，用户没法判断 bot 读的是哪份。
+        # 但要限长——深目录 + 多个 -f 很容易把整帧顶过分片阈值，一旦分片就不止一条消息，
+        # 破坏「一条会话一个面板」这个不变量。
+        config_files = [str(c) for c in (p.get("config_files") or [])]
+        path_str = "、".join(config_files) if config_files else str(p.get("dir", ""))
+        if len(path_str) > 160:
+            path_str = path_str[:157] + "…"
 
         out = "<b>%s.</b> %s %s <code>[%s]</code>\n" % (num, esc(label), status_icon, esc(status))
         if state.multi_host and target_host is None:
             out += "     主机：%s\n" % esc(str(p.get("host_label") or p.get("host") or ""))
-        out += "     路径：<code>%s</code>\n" % esc(p.get("dir", ""))
+        out += "     路径：<code>%s</code>\n" % esc(path_str)
         out += "     容器：%s\n\n" % esc(services_str)
 
         payload = {"name": name, "page": page, "host": p.get("host"), "list_host": host or ""}

@@ -226,9 +226,10 @@ class DockerState:
         self.projects_cache_time: float = 0.0
         #: 项目扫描互斥：并发的面板刷新/后台刷新只跑一次全量扫描
         self._scan_lock: Optional[asyncio.Lock] = None
-        #: 服务列表缓存 `key -> (时间, [服务…])`：扫描**不再**逐项目跑 `compose config`，
+        #: 服务列表缓存 `key -> (时间, [服务…], 来源)`：扫描**不再**逐项目跑 `compose config`，
         #: 只对当前页/详情页按需取，取过一次就长期复用（这是主面板从秒级回到亚秒级的关键）。
-        self.services_cache: dict[str, tuple[float, list[str]]] = {}
+        #: `来源` = "compose"（解析配置文件）或 "containers"（容器 label 兜底），面板据此标注。
+        self.services_cache: dict[str, tuple[float, list[str], str]] = {}
         #: 测试/嵌入用：替换真实扫描（返回项目列表）
         self.scan_hook: Optional[Callable[[], list[dict]]] = None
         #: 最近一次扫描的失败原因（空 = 成功）。以前这里失败是静默的，
@@ -438,16 +439,24 @@ class DockerState:
 
     def get_project_services(
         self, work_dir: str, config_files: Sequence[str], host: Optional[DockerHost] = None
-    ) -> Optional[list[str]]:
+    ) -> tuple[Optional[list[str]], str]:
         """获取项目的服务定义（远端项目在远端跑 `config --services`）。
 
-        返回 `None` 表示**这次没取到**（compose 不可用/命令失败），与「取到了、就是空列表」
-        区分开：前者不写缓存、下次再试，后者是有效结果。
+        返回 `(services, error)`：
+
+        * `services is None` 表示**这次没取到**（compose 不可用/命令失败），与「取到了、
+          就是空列表」区分开：前者不写缓存、下次再试，后者是有效结果；
+        * `error` 是给面板看的失败摘要（成功时为空串）。它只会带路径、变量名、退出码
+          这类诊断信息，上屏前仍会再走一次 `redact()`。
+
+        注意 compose 解析**必须能读项目目录下的 `.env`**：`.env` 归 root、容器用户
+        （uid 10001）读不到时，`${VAR:?}` 插值会直接失败，这条命令会返回「0 行 + 非 0 退出」。
+        这种情况由 :meth:`get_project_services_from_containers` 兜底。
         """
         host = host or self.local_host
         compose_bin = self.get_remote_compose_bin(host)
         if not compose_bin:
-            return None
+            return None, "未检测到 docker compose / docker-compose 命令"
         try:
             cmd = list(compose_bin)
             for config_file in config_files:
@@ -461,11 +470,58 @@ class DockerState:
                 timeout=SERVICES_TIMEOUT,
             )
             if result.returncode == 0:
-                return [s.strip() for s in result.stdout.strip().splitlines() if s.strip()]
-            log.warning("获取 %s 服务列表失败：%s", work_dir, explain_exit(result.returncode, result.stderr, host))
+                return [s.strip() for s in result.stdout.strip().splitlines() if s.strip()], ""
+            # 先脱敏再交给 explain_exit：它内部按行截断（`[:200]`），先截断的话可能把敏感串
+            # 切掉一半，后面的 redact 正则就匹配不上了。面板出口还会再过一次脱敏。
+            detail = redact((result.stderr or result.stdout or "").strip())
+            reason = explain_exit(result.returncode, detail, host)
+            log.warning("获取 %s 服务列表失败：%s", work_dir, reason)
+            return None, reason
         except Exception as exc:
             log.warning("获取 %s 服务列表失败: %s", work_dir, exc)
-        return None
+            # 压成一行 + 截断：这类异常可能带换行，直接上屏会把面板行数撑乱
+            return None, " ".join(str(exc).split())[:200]
+
+    def get_project_services_from_containers(
+        self, project_name: str, host: Optional[DockerHost] = None
+    ) -> Optional[list[str]]:
+        """从容器 label 读项目实际的服务名——**不读任何文件，不需要 `.env` 权限**。
+
+        `com.docker.compose.project` / `com.docker.compose.service` 两个 label 在容器创建时
+        就写死了，所以即便项目目录里的 `.env` 属于 root、容器用户读不到（`config --services`
+        会 `permission denied`），这里照样能列出服务名。用的是已经挂载的 docker.sock。
+
+        用 `-a` 连已停止的容器一起算，停掉的服务也能从面板升级。
+        返回 `None` = 这次没取到（docker 命令失败/项目名为空）。
+        """
+        if not project_name:
+            return None
+        host = host or self.local_host
+        try:
+            result = subprocess.run(
+                host.command(
+                    [
+                        "docker", "ps", "-a",
+                        "--filter", "label=com.docker.compose.project=%s" % project_name,
+                        "--format", '{{.Label "com.docker.compose.service"}}',
+                    ]
+                ),
+                capture_output=True,
+                text=True,
+                timeout=SERVICES_TIMEOUT,
+            )
+        except Exception as exc:
+            log.warning("读取项目 %s 的容器 label 失败：%s", project_name, exc)
+            return None
+        if result.returncode != 0:
+            log.warning(
+                "读取项目 %s 的容器 label 失败：%s",
+                project_name,
+                explain_exit(result.returncode, result.stderr, host),
+            )
+            return None
+        names = sorted({line.strip() for line in result.stdout.splitlines() if line.strip()})
+        return names or None
 
     # ---------- 服务列表（按需 + 缓存） ----------
     def services_key(self, project: Any) -> str:
@@ -476,29 +532,47 @@ class DockerState:
         config_files = ",".join(str(c) for c in (project.get("config_files") or []))
         return "%s|%s|%s" % (host.id, project.get("name", ""), config_files or project.get("dir", ""))
 
-    def _cached_services(self, key: str) -> Optional[list[str]]:
+    def _cached_services(self, key: str) -> Optional[tuple[list[str], str]]:
         entry = self.services_cache.get(key)
         if not entry:
             return None
-        stamp, services = entry
+        stamp, services, source = entry
         if time.monotonic() - stamp >= SERVICES_CACHE_TTL:
             return None
-        return list(services)
+        return list(services), source
 
     def _fill_services(self, project: dict) -> None:
-        """取一个项目的服务列表并写回项目 dict（结果同时进缓存，跨扫描复用）。"""
-        services = self.get_project_services(
+        """取一个项目的服务列表并写回项目 dict（结果同时进缓存，跨扫描复用）。
+
+        来源按优先级：
+
+        1. **compose 文件解析**——能列出配置里定义的全部服务（含从未启动过的）；
+        2. **容器 label 兜底**——文件读不到时用（典型：`.env` 归 root、容器用户读不到，
+           `${VAR:?}` 插值失败）。它只认创建过容器的服务，但不需要任何文件权限；
+        3. 两者都失败——保持「未加载」下次重试，并把失败摘要留在项目上供面板显示。
+        """
+        host = self.host_of(project)
+        services, error = self.get_project_services(
             str(project.get("dir") or ""),
             list(project.get("config_files") or []),
-            self.host_of(project),
+            host,
         )
-        if services is None:  # 没取到：保持「未加载」，下次再看这一页时重试
+        source = "compose"
+        if services is None:
+            services = self.get_project_services_from_containers(
+                str(project.get("name") or ""), host
+            )
+            source = "containers"
+        if services is None:  # 两个来源都没取到：不写缓存，下次再看这一页时重试
+            project["services_error"] = error or "未获取到服务列表"
             return
         project["services"] = services
         project["services_loaded"] = True
+        project["services_source"] = source
+        project.pop("services_error", None)
         key = self.services_key(project)
         if key:
-            self.services_cache[key] = (time.monotonic(), list(services))
+            self.services_cache[key] = (time.monotonic(), list(services), source)
 
     def load_services(self, projects: Sequence[dict]) -> int:
         """给一批项目补齐服务列表（同步，交给 `ensure_services` 的 to_thread 跑）。
@@ -716,8 +790,12 @@ class DockerState:
                     "host_label": host.display,
                 }
                 cached = self._cached_services(self.services_key(project))
-                project["services"] = list(cached or [])
-                project["services_loaded"] = cached is not None
+                if cached is None:
+                    project["services"] = []
+                    project["services_loaded"] = False
+                else:
+                    project["services"], project["services_source"] = cached
+                    project["services_loaded"] = True
                 projects.append(project)
         scan.projects = projects
         return scan

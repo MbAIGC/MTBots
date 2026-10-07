@@ -1437,6 +1437,8 @@ class LazyServicesTest(unittest.TestCase):
             if "config" in cmd:
                 attempts.append(1)
                 return self._result(1, "", "no such file")
+            if "ps" in cmd:  # 容器 label 兜底同样失败：两个来源都没取到
+                return self._result(1, "", "docker: not found")
             return self._result(0, payload, "")
 
         with mock.patch("mtbots.features.docker.compose.subprocess.run", side_effect=fake_run):
@@ -1445,11 +1447,54 @@ class LazyServicesTest(unittest.TestCase):
         self.assertEqual(projects[0]["services"], [])
         self.assertFalse(projects[0]["services_loaded"], "取失败不能标成已加载")
         self.assertEqual(state.services_cache, {}, "取失败不能进缓存")
+        self.assertTrue(projects[0]["services_error"], "失败原因要留给面板显示")
         self.assertEqual(len(attempts), 1)
+
+    def test_service_lookup_falls_back_to_container_labels(self) -> None:
+        """compose 文件解析失败时（典型：`.env` 归 root、容器用户读不到），
+        服务名必须从容器 label 兜底取出来——不读文件、不需要额外权限。"""
+        state, base = self._local_state()
+        work = self._write_project(base, "cpa")
+        payload = json.dumps(
+            [{"Name": "cpa", "Status": "running(4)", "ConfigFiles": os.path.join(work, "docker-compose.yml")}]
+        )
+
+        def fake_run(cmd, **kwargs):
+            if "config" in cmd:
+                return self._result(1, "", "open /docker/cpa/.env: permission denied")
+            if "ps" in cmd:
+                # 兜底查询按**项目名**过滤并读 service label——这两个键写错会静默失效
+                #（命令成功但返回空/无关结果），所以在这里钉住；顺便验证去重。
+                self.assertIn("label=com.docker.compose.project=cpa", cmd)
+                self.assertIn("-a", cmd, "已停止的容器也要算进来")
+                self.assertIn("--format", cmd)
+                self.assertTrue(
+                    any("com.docker.compose.service" in str(part) for part in cmd),
+                    "要读 com.docker.compose.service label",
+                )
+                return self._result(
+                    0,
+                    "cli-proxy-api\noh-my-cpa\ncpa-usage-keeper\ncpa-manager-plus\ncli-proxy-api\n",
+                    "",
+                )
+            return self._result(0, payload, "")
+
+        with mock.patch("mtbots.features.docker.compose.subprocess.run", side_effect=fake_run):
+            projects = state.scan_projects_sync()
+            asyncio.run(state.ensure_services(projects))
+        self.assertEqual(
+            projects[0]["services"],
+            ["cli-proxy-api", "cpa-manager-plus", "cpa-usage-keeper", "oh-my-cpa"],
+            "兜底结果要排序去重",
+        )
+        self.assertEqual(projects[0]["services_source"], "containers", "面板要能标出来源")
+        self.assertTrue(projects[0]["services_loaded"])
+        self.assertNotIn("services_error", projects[0])
+        self.assertTrue(state.services_cache, "兜底结果同样进缓存")
 
     def test_invalidated_cache_drops_services(self) -> None:
         state, _base = self._local_state()
-        state.services_cache["nas|media|/x/c.yml"] = (time.monotonic(), ["emby"])
+        state.services_cache["nas|media|/x/c.yml"] = (time.monotonic(), ["emby"], "compose")
         state.invalidate_cache()
         self.assertEqual(state.services_cache, {})
 
